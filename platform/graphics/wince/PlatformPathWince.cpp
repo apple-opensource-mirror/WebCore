@@ -18,14 +18,14 @@
  */
 
 #include "config.h"
-#include "PlatformPathWince.h"
+#include "PlatformPathWinCE.h"
 
 #include "AffineTransform.h"
 #include "FloatRect.h"
 #include "GraphicsContext.h"
 #include "Path.h"
 #include "PlatformString.h"
-#include "WinceGraphicsExtras.h"
+#include "WinCEGraphicsExtras.h"
 #include <wtf/MathExtras.h>
 #include <wtf/OwnPtr.h>
 
@@ -33,7 +33,7 @@
 
 namespace WebCore {
 
-// Implemented in GraphicsContextWince.cpp
+// Implemented in GraphicsContextWinCE.cpp
 void getEllipsePointByAngle(double angle, double a, double b, float& x, float& y);
 
 static void quadCurve(int segments, Vector<PathPoint>& pts, const PathPoint* control)
@@ -119,7 +119,7 @@ static inline void bezier(int segments, Vector<PathPoint>& pts, const PathPoint*
 
 static bool containsPoint(const FloatRect& r, const FloatPoint& p)
 {
-    return p.x() >= r.x() && p.y() >= r.y() && p.x() < r.right() && p.y() < r.bottom();
+    return p.x() >= r.x() && p.y() >= r.y() && p.x() < r.maxX() && p.y() < r.maxY();
 }
 
 static void normalizeAngle(float& angle)
@@ -146,7 +146,7 @@ static void inflateRectToContainPoint(FloatRect& r, float x, float y)
         return;
     }
     if (x < r.x()) {
-        r.setWidth(r.right() - x);
+        r.setWidth(r.maxX() - x);
         r.setX(x);
     } else {
         float w = x - r.x() + 1;
@@ -154,7 +154,7 @@ static void inflateRectToContainPoint(FloatRect& r, float x, float y)
             r.setWidth(w);
     }
     if (y < r.y()) {
-        r.setHeight(r.bottom() - y);
+        r.setHeight(r.maxY() - y);
         r.setY(y);
     } else {
         float h =  y - r.y() + 1;
@@ -234,7 +234,6 @@ static void addArcPoints(PathPolygon& poly, const PlatformPathElement::ArcTo& da
 
 static void drawPolygons(HDC dc, const Vector<PathPolygon>& polygons, bool fill, const AffineTransform* transformation)
 {
-    MemoryAllocationCanFail canFail;
     for (Vector<PathPolygon>::const_iterator i = polygons.begin(); i != polygons.end(); ++i) {
         int npoints = i->size();
         if (!npoints)
@@ -671,7 +670,7 @@ void PlatformPath::addArcTo(const FloatPoint& fp1, const FloatPoint& fp2, float 
 
     double d01 = v01.length();
     double d21 = v21.length();
-    double angle = (piDouble - abs(asin(cross / (d01 * d21)))) * 0.5;
+    double angle = (piDouble - fabs(asin(cross / (d01 * d21)))) * 0.5;
     double span = radius * tan(angle);
     double rate = span / d01;
     PathPoint startPoint;
@@ -741,8 +740,8 @@ void PlatformPath::addRect(const FloatRect& r)
 {
     moveTo(r.location());
 
-    float right = r.right() - 1;
-    float bottom = r.bottom() - 1;
+    float right = r.maxX() - 1;
+    float bottom = r.maxY() - 1;
     addLineTo(FloatPoint(right, r.y()));
     addLineTo(FloatPoint(right, bottom));
     addLineTo(FloatPoint(r.x(), bottom));
@@ -753,43 +752,6 @@ void PlatformPath::addEllipse(const FloatRect& r)
 {
     FloatSize radius(r.width() * 0.5, r.height() * 0.5);
     addEllipse(r.location() + radius, radius.width(), radius.height(), 0, 0, true);
-}
-
-String PlatformPath::debugString() const
-{
-    String ret;
-    for (PlatformPathElements::const_iterator i(m_elements.begin()); i != m_elements.end(); ++i) {
-        switch (i->platformType()) {
-        case PlatformPathElement::PathMoveTo:
-        case PlatformPathElement::PathLineTo:
-            ret += String::format("M %f %f\n", i->pointAt(0).m_x, i->pointAt(0).m_y);
-            break;
-        case PlatformPathElement::PathArcTo:
-            ret += String::format("A %f %f %f %f %f %f %c\n"
-                , i->arcTo().m_end.m_x, i->arcTo().m_end.m_y
-                , i->arcTo().m_center.m_x, i->arcTo().m_center.m_y
-                , i->arcTo().m_radius.m_x, i->arcTo().m_radius.m_y
-                , i->arcTo().m_clockwise? 'Y' : 'N');
-            break;
-        case PlatformPathElement::PathQuadCurveTo:
-            ret += String::format("Q %f %f %f %f\n"
-                , i->pointAt(0).m_x, i->pointAt(0).m_y
-                , i->pointAt(1).m_x, i->pointAt(1).m_y);
-            break;
-        case PlatformPathElement::PathBezierCurveTo:
-            ret += String::format("B %f %f %f %f %f %f\n"
-                , i->pointAt(0).m_x, i->pointAt(0).m_y
-                , i->pointAt(1).m_x, i->pointAt(1).m_y
-                , i->pointAt(2).m_x, i->pointAt(2).m_y);
-            break;
-        default:
-            ASSERT(i->platformType() == PlatformPathElement::PathCloseSubpath);
-            ret += "S\n";
-            break;
-        }
-    }
-
-    return ret;
 }
 
 void PlatformPath::apply(void* info, PathApplierFunction function) const

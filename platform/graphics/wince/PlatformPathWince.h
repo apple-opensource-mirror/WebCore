@@ -17,8 +17,8 @@
  *  Boston, MA 02110-1301, USA.
  */
 
-#ifndef PlatformPathWince_h
-#define PlatformPathWince_h
+#ifndef PlatformPathWinCE_h
+#define PlatformPathWinCE_h
 
 #include "FloatPoint.h"
 #include "FloatRect.h"
@@ -164,7 +164,6 @@ namespace WebCore {
         void addEllipse(const FloatPoint& p, float a, float b, float sar, float ear, bool anticlockwise);
         void addRect(const FloatRect& r);
         void addEllipse(const FloatRect& r);
-        String debugString() const;
         void apply(void* info, PathApplierFunction function) const;
 
     private:
@@ -180,4 +179,4 @@ namespace WebCore {
 
 }
 
-#endif // PlatformPathWince_h
+#endif // PlatformPathWinCE_h

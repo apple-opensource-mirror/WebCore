@@ -1,5 +1,6 @@
 /*
  * Copyright (C) 2009 Torch Mobile, Inc. All rights reserved.
+ * Copyright (C) 2010 Torch Mobile (Beijing) Co. Ltd. All rights reserved.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Library General Public
@@ -24,9 +25,9 @@
 #include "GraphicsContext.h"
 #include "Image.h"
 #include "ImageData.h"
-#include "JPEGEncoder.h"
-#include "PNGEncoder.h"
+#include "NotImplemented.h"
 #include "SharedBitmap.h"
+#include "UnusedParam.h"
 #include <wtf/UnusedParam.h>
 
 namespace WebCore {
@@ -42,28 +43,28 @@ public:
     virtual IntSize size() const { return IntSize(m_data->m_bitmap->width(), m_data->m_bitmap->height()); }
     virtual void destroyDecodedData(bool destroyAll = true) {}
     virtual unsigned decodedSize() const { return 0; }
-    virtual void draw(GraphicsContext*, const FloatRect& dstRect, const FloatRect& srcRect, CompositeOperator);
+    virtual void draw(GraphicsContext*, const FloatRect& dstRect, const FloatRect& srcRect, ColorSpace styleColorSpace, CompositeOperator);
     virtual void drawPattern(GraphicsContext*, const FloatRect& srcRect, const AffineTransform& patternTransform,
-                             const FloatPoint& phase, CompositeOperator, const FloatRect& destRect);
+                             const FloatPoint& phase, ColorSpace styleColorSpace, CompositeOperator, const FloatRect& destRect);
 
     const ImageBufferData* m_data;
 };
 
-void BufferedImage::draw(GraphicsContext* ctxt, const FloatRect& dstRect, const FloatRect& srcRect, CompositeOperator compositeOp)
+void BufferedImage::draw(GraphicsContext* ctxt, const FloatRect& dstRect, const FloatRect& srcRect, ColorSpace styleColorSpace, CompositeOperator compositeOp)
 {
     IntRect intDstRect = enclosingIntRect(dstRect);
     IntRect intSrcRect(srcRect);
-    m_data->m_bitmap->draw(ctxt, intDstRect, intSrcRect, compositeOp);
+    m_data->m_bitmap->draw(ctxt, intDstRect, intSrcRect, styleColorSpace, compositeOp);
 }
 
 void BufferedImage::drawPattern(GraphicsContext* ctxt, const FloatRect& tileRectIn, const AffineTransform& patternTransform,
-                             const FloatPoint& phase, CompositeOperator op, const FloatRect& destRect)
+                             const FloatPoint& phase, ColorSpace styleColorSpace, CompositeOperator op, const FloatRect& destRect)
 {
-    m_data->m_bitmap->drawPattern(ctxt, tileRectIn, patternTransform, phase, op, destRect, size());
+    m_data->m_bitmap->drawPattern(ctxt, tileRectIn, patternTransform, phase, styleColorSpace, op, destRect, size());
 }
 
 ImageBufferData::ImageBufferData(const IntSize& size)
-: m_bitmap(SharedBitmap::createInstance(false, size.width(), size.height(), false))
+    : m_bitmap(SharedBitmap::create(size, BitmapInfo::BitCount32, false))
 {
     // http://www.w3.org/TR/2009/WD-html5-20090212/the-canvas-element.html#canvaspixelarray
     // "When the canvas is initialized it must be set to fully transparent black."
@@ -71,14 +72,14 @@ ImageBufferData::ImageBufferData(const IntSize& size)
     m_bitmap->setHasAlpha(true);
 }
 
-ImageBuffer::ImageBuffer(const IntSize& size, ImageColorSpace colorSpace, bool& success)
+ImageBuffer::ImageBuffer(const IntSize& size, ColorSpace colorSpace, RenderingMode, bool& success)
     : m_data(size)
     , m_size(size)
 {
     // FIXME: colorSpace is not used
     UNUSED_PARAM(colorSpace);
 
-    m_context.set(new GraphicsContext(0));
+    m_context = adoptPtr(new GraphicsContext(0));
     m_context->setBitmap(m_data.m_bitmap);
     success = true;
 }
@@ -87,41 +88,68 @@ ImageBuffer::~ImageBuffer()
 {
 }
 
+size_t ImageBuffer::dataSize() const
+{
+    return m_size.width() * m_size.height() * 4;
+}
+
 GraphicsContext* ImageBuffer::context() const
 {
     return m_context.get();
 }
 
-Image* ImageBuffer::image() const
+bool ImageBuffer::drawsUsingCopy() const
 {
-    if (!m_image)
-        m_image = adoptRef(new BufferedImage(&m_data));
-
-    return m_image.get();
+    return true;
 }
 
-template <bool premultiplied> PassRefPtr<ImageData>
-static getImageData(const IntRect& rect, const SharedBitmap* bitmap)
+PassRefPtr<Image> ImageBuffer::copyImage(BackingStoreCopy copyBehavior) const
 {
-    PassRefPtr<ImageData> imageData = ImageData::create(rect.width(), rect.height());
+	ASSERT(copyBehavior == CopyBackingStore);
+    return adoptRef(new BufferedImage(&m_data));
+}
+
+void ImageBuffer::clip(GraphicsContext*, const FloatRect&) const
+{
+    notImplemented();
+}
+
+void ImageBuffer::draw(GraphicsContext* context, ColorSpace styleColorSpace, const FloatRect& destRect, const FloatRect& srcRect,
+                       CompositeOperator op , bool useLowQualityScale)
+{
+    RefPtr<Image> imageCopy = copyImage(CopyBackingStore);
+    context->drawImage(imageCopy.get(), styleColorSpace, destRect, srcRect, op, useLowQualityScale);
+}
+
+void ImageBuffer::drawPattern(GraphicsContext* context, const FloatRect& srcRect, const AffineTransform& patternTransform,
+                              const FloatPoint& phase, ColorSpace styleColorSpace, CompositeOperator op, const FloatRect& destRect)
+{
+    RefPtr<Image> imageCopy = copyImage(CopyBackingStore);
+    imageCopy->drawPattern(context, srcRect, patternTransform, phase, styleColorSpace, op, destRect);
+}
+
+template <bool premultiplied>
+static PassRefPtr<ByteArray> getImageData(const IntRect& rect, const SharedBitmap* bitmap)
+{
+    RefPtr<ByteArray> imageData = ByteArray::create(rect.width() * rect.height() * 4);
 
     const unsigned char* src = static_cast<const unsigned char*>(bitmap->bytes());
     if (!src)
-        return imageData;
+        return imageData.release();
 
     IntRect sourceRect(0, 0, bitmap->width(), bitmap->height());
     sourceRect.intersect(rect);
     if (sourceRect.isEmpty())
-        return imageData;
+        return imageData.release();
 
-    unsigned char* dst = imageData->data()->data()->data();
-    memset(dst, 0, imageData->data()->data()->length());
+    unsigned char* dst = imageData->data();
+    memset(dst, 0, imageData->length());
     src += (sourceRect.y() * bitmap->width() + sourceRect.x()) * 4;
-    dst += ((sourceRect.y() - rect.y()) * imageData->width() + sourceRect.x() - rect.x()) * 4;
+    dst += ((sourceRect.y() - rect.y()) * rect.width() + sourceRect.x() - rect.x()) * 4;
     int bytesToCopy = sourceRect.width() * 4;
     int srcSkip = (bitmap->width() - sourceRect.width()) * 4;
-    int dstSkip = (imageData->width() - sourceRect.width()) * 4;
-    const unsigned char* dstEnd = dst + sourceRect.height() * imageData->width() * 4;
+    int dstSkip = (rect.width() - sourceRect.width()) * 4;
+    const unsigned char* dstEnd = dst + sourceRect.height() * rect.width() * 4;
     while (dst < dstEnd) {
         const unsigned char* dstRowEnd = dst + bytesToCopy;
         while (dst < dstRowEnd) {
@@ -147,21 +175,21 @@ static getImageData(const IntRect& rect, const SharedBitmap* bitmap)
         dst += dstSkip;
     }
 
-    return imageData;
+    return imageData.release();
 }
 
-PassRefPtr<ImageData> ImageBuffer::getUnmultipliedImageData(const IntRect& rect) const
+PassRefPtr<ByteArray> ImageBuffer::getUnmultipliedImageData(const IntRect& rect) const
 {
     return getImageData<false>(rect, m_data.m_bitmap.get());
 }
 
-PassRefPtr<ImageData> ImageBuffer::getPremultipliedImageData(const IntRect& rect) const
+PassRefPtr<ByteArray> ImageBuffer::getPremultipliedImageData(const IntRect& rect) const
 {
     return getImageData<true>(rect, m_data.m_bitmap.get());
 }
 
 template <bool premultiplied>
-static void putImageData(ImageData* source, const IntRect& sourceRect, const IntPoint& destPoint, SharedBitmap* bitmap)
+static void putImageData(ByteArray* source, const IntSize& sourceSize, const IntRect& sourceRect, const IntPoint& destPoint, SharedBitmap* bitmap)
 {
     unsigned char* dst = (unsigned char*)bitmap->bytes();
     if (!dst)
@@ -173,12 +201,12 @@ static void putImageData(ImageData* source, const IntRect& sourceRect, const Int
     if (destRect.isEmpty())
         return;
 
-    const unsigned char* src = source->data()->data()->data();
+    const unsigned char* src = source->data();
     dst += (destRect.y() * bitmap->width() + destRect.x()) * 4;
-    src += (sourceRect.y() * source->width() + sourceRect.x()) * 4;
+    src += (sourceRect.y() * sourceSize.width() + sourceRect.x()) * 4;
     int bytesToCopy = destRect.width() * 4;
     int dstSkip = (bitmap->width() - destRect.width()) * 4;
-    int srcSkip = (source->width() - destRect.width()) * 4;
+    int srcSkip = (sourceSize.width() - destRect.width()) * 4;
     const unsigned char* dstEnd = dst + destRect.height() * bitmap->width() * 4;
     while (dst < dstEnd) {
         const unsigned char* dstRowEnd = dst + bytesToCopy;
@@ -205,43 +233,29 @@ static void putImageData(ImageData* source, const IntRect& sourceRect, const Int
     }
 }
 
-void ImageBuffer::putUnmultipliedImageData(ImageData* source, const IntRect& sourceRect, const IntPoint& destPoint)
+void ImageBuffer::putUnmultipliedImageData(ByteArray* source, const IntSize& sourceSize, const IntRect& sourceRect, const IntPoint& destPoint)
 {
-    putImageData<false>(source, sourceRect, destPoint, m_data.m_bitmap.get());
+    putImageData<false>(source, sourceSize, sourceRect, destPoint, m_data.m_bitmap.get());
 }
 
-void ImageBuffer::putPremultipliedImageData(ImageData* source, const IntRect& sourceRect, const IntPoint& destPoint)
+void ImageBuffer::putPremultipliedImageData(ByteArray* source, const IntSize& sourceSize, const IntRect& sourceRect, const IntPoint& destPoint)
 {
-    putImageData<true>(source, sourceRect, destPoint, m_data.m_bitmap.get());
+    putImageData<true>(source, sourceSize, sourceRect, destPoint, m_data.m_bitmap.get());
 }
 
-String ImageBuffer::toDataURL(const String& mimeType) const
+void ImageBuffer::platformTransformColorSpace(const Vector<int>& lookUpTable)
+{
+    UNUSED_PARAM(lookUpTable);
+    notImplemented();
+}
+
+String ImageBuffer::toDataURL(const String& mimeType, const double*) const
 {
     if (!m_data.m_bitmap->bytes())
         return "data:,";
 
-    Vector<char> output;
-    const char* header;
-    if (mimeType.lower() == "image/png") {
-        if (!compressBitmapToPng(m_data.m_bitmap.get(), output))
-            return "data:,";
-        header = "data:image/png;base64,";
-    } else {
-        if (!compressBitmapToJpeg(m_data.m_bitmap.get(), output))
-            return "data:,";
-        header = "data:image/jpeg;base64,";
-    }
-
-    Vector<char> base64;
-    base64Encode(output, base64);
-
-    output.clear();
-
-    Vector<char> url;
-    url.append(header, strlen(header));
-    url.append(base64);
-
-    return String(url.data(), url.size());
+    notImplemented();
+    return String();
 }
 
-}
+} // namespace WebCore

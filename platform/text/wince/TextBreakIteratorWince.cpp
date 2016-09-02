@@ -26,6 +26,7 @@
 #include <wtf/StdLibExtras.h>
 #include <wtf/unicode/Unicode.h>
 
+using namespace std;
 using namespace WTF::Unicode;
 
 namespace WebCore {
@@ -55,7 +56,16 @@ public:
         length = len;
         currentPos = 0;
     }
-    virtual int first() = 0;
+    int first()
+    {
+        currentPos = 0;
+        return currentPos;
+    }
+    int last()
+    {
+        currentPos = length;
+        return currentPos;
+    }
     virtual int next() = 0;
     virtual int previous() = 0;
     int following(int position)
@@ -75,34 +85,24 @@ public:
 };
 
 struct WordBreakIterator: TextBreakIterator {
-    virtual int first();
     virtual int next();
     virtual int previous();
 };
 
 struct CharBreakIterator: TextBreakIterator {
-    virtual int first();
     virtual int next();
     virtual int previous();
 };
 
 struct LineBreakIterator: TextBreakIterator {
-    virtual int first();
     virtual int next();
     virtual int previous();
 };
 
 struct SentenceBreakIterator : TextBreakIterator {
-    virtual int first();
     virtual int next();
     virtual int previous();
 };
-
-int WordBreakIterator::first()
-{
-    currentPos = 0;
-    return currentPos;
-}
 
 int WordBreakIterator::next()
 {
@@ -138,12 +138,6 @@ int WordBreakIterator::previous()
     return currentPos;
 }
 
-int CharBreakIterator::first()
-{
-    currentPos = 0;
-    return currentPos;
-}
-
 int CharBreakIterator::next()
 {
     if (currentPos >= length)
@@ -163,12 +157,6 @@ int CharBreakIterator::previous()
     --currentPos;
     while (currentPos > 0 && !isCharStop(string[currentPos]))
         --currentPos;
-    return currentPos;
-}
-
-int LineBreakIterator::first()
-{
-    currentPos = 0;
     return currentPos;
 }
 
@@ -203,12 +191,6 @@ int LineBreakIterator::previous()
             haveSpace = true;
         --currentPos;
     }
-    return currentPos;
-}
-
-int SentenceBreakIterator::first()
-{
-    currentPos = 0;
     return currentPos;
 }
 
@@ -260,11 +242,32 @@ TextBreakIterator* characterBreakIterator(const UChar* string, int length)
     return &iterator;
 }
 
-TextBreakIterator* lineBreakIterator(const UChar* string, int length)
+static TextBreakIterator* staticLineBreakIterator;
+
+TextBreakIterator* acquireLineBreakIterator(const UChar* string, int length, const AtomicString&)
 {
-    DEFINE_STATIC_LOCAL(LineBreakIterator , iterator, ());
-    iterator.reset(string, length);
-    return &iterator;
+    TextBreakIterator* lineBreakIterator = 0;
+    if (staticLineBreakIterator) {
+        staticLineBreakIterator->reset(string, length);
+        swap(staticLineBreakIterator, lineBreakIterator);
+    }
+
+    if (!lineBreakIterator && string && length) {
+        lineBreakIterator = new LineBreakIterator;
+        lineBreakIterator->reset(string, length);
+    }
+
+    return lineBreakIterator;
+}
+
+void releaseLineBreakIterator(TextBreakIterator* iterator)
+{
+    ASSERT(iterator);
+
+    if (!staticLineBreakIterator)
+        staticLineBreakIterator = iterator;
+    else
+        delete iterator;
 }
 
 TextBreakIterator* sentenceBreakIterator(const UChar* string, int length)
@@ -279,9 +282,19 @@ int textBreakFirst(TextBreakIterator* breakIterator)
     return breakIterator->first();
 }
 
+int textBreakLast(TextBreakIterator* breakIterator)
+{
+    return breakIterator->last();
+}
+
 int textBreakNext(TextBreakIterator* breakIterator)
 {
     return breakIterator->next();
+}
+
+int textBreakPrevious(TextBreakIterator* breakIterator)
+{
+    return breakIterator->previous();
 }
 
 int textBreakPreceding(TextBreakIterator* breakIterator, int position)

@@ -38,6 +38,7 @@
 #include "GraphicsContext.h"
 #include "IntRect.h"
 #include "NotImplemented.h"
+#include "TextRun.h"
 #include "WidthIterator.h"
 #include <wtf/MathExtras.h>
 #include <wtf/OwnPtr.h>
@@ -85,10 +86,9 @@ public:
 
 TextRunComponent::TextRunComponent(const UChar *start, int length, const TextRun& parentTextRun, const Font &font, int o)
     : m_textRun(start, length, parentTextRun.allowTabs(), 0, 0
-        , parentTextRun.rtl()
-        , parentTextRun.directionalOverride()
-        , parentTextRun.applyRunRounding()
-        , parentTextRun.applyWordRounding())
+        , parentTextRun.allowsTrailingExpansion() ? TextRun::AllowTrailingExpansion : TextRun::ForbidTrailingExpansion
+        , parentTextRun.direction()
+        , parentTextRun.directionalOverride())
     , m_offset(o)
     , m_spaces(0)
 {
@@ -111,7 +111,7 @@ static int generateComponents(TextRunComponents* components, const Font &font, c
 {
     int letterSpacing = font.letterSpacing();
     int wordSpacing = font.wordSpacing();
-    int padding = run.padding();
+    int padding = run.expansion();
     int numSpaces = 0;
     if (padding) {
         for (int i = 0; i < run.length(); i++)
@@ -235,6 +235,11 @@ void Font::drawComplexText(GraphicsContext* context, const TextRun& run, const F
     }
 }
 
+void Font::drawEmphasisMarksForComplexText(GraphicsContext* /* context */, const TextRun& /* run */, const AtomicString& /* mark */, const FloatPoint& /* point */, int /* from */, int /* to */) const
+{
+    notImplemented();
+}
+
 float Font::floatWidthForComplexText(const TextRun& run, HashSet<const SimpleFontData*>* fallbackFonts, GlyphOverflow* glyphOverflow) const
 {
     TextRunComponents components;
@@ -242,8 +247,12 @@ float Font::floatWidthForComplexText(const TextRun& run, HashSet<const SimpleFon
     return w;
 }
 
-int Font::offsetForPositionForComplexText(const TextRun& run, int position, bool includePartialGlyphs) const
+int Font::offsetForPositionForComplexText(const TextRun& run, float xFloat, bool includePartialGlyphs) const
 {
+    // FIXME: This truncation is not a problem for HTML, but only affects SVG, which passes floating-point numbers
+    // to Font::offsetForPosition(). Bug http://webkit.org/b/40673 tracks fixing this problem.
+    int position = static_cast<int>(xFloat);
+
     TextRunComponents components;
     int w = generateComponents(&components, *this, run);
 
@@ -308,7 +317,7 @@ static float cursorToX(const Font* font, const TextRunComponents& components, in
     return width;
 }
 
-FloatRect Font::selectionRectForComplexText(const TextRun& run, const IntPoint& pt,
+FloatRect Font::selectionRectForComplexText(const TextRun& run, const FloatPoint& pt,
                                      int h, int from, int to) const
 {
     TextRunComponents components;
@@ -330,4 +339,9 @@ bool Font::canReturnFallbackFontsForComplexText()
     return false;
 }
 
+bool Font::canExpandAroundIdeographsInComplexText()
+{
+    return false;
 }
+
+} // namespace WebCore

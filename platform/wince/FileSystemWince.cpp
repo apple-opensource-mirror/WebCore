@@ -32,13 +32,26 @@
 #include "FileSystem.h"
 
 #include "NotImplemented.h"
-#include "PlatformString.h"
-#include <wtf/text/CString.h>
-
-#include <windows.h>
 #include <wincrypt.h>
+#include <windows.h>
+#include <wtf/text/CString.h>
+#include <wtf/text/WTFString.h>
 
 namespace WebCore {
+
+static size_t reverseFindPathSeparator(const String& path, unsigned start = UINT_MAX)
+{
+    size_t positionSlash = path.reverseFind('/', start);
+    size_t positionBackslash = path.reverseFind('\\', start);
+
+    if (positionSlash == notFound)
+        return positionBackslash;
+
+    if (positionBackslash == notFound)
+        return positionSlash;
+
+    return std::max(positionSlash, positionBackslash);
+}
 
 static bool getFileInfo(const String& path, BY_HANDLE_FILE_INFORMATION& fileInfo)
 {
@@ -133,14 +146,14 @@ CString fileSystemRepresentation(const String&)
 
 bool makeAllDirectories(const String& path)
 {
-    int lastDivPos = std::max(path.reverseFind('/'), path.reverseFind('\\'));
-    int endPos = path.length();
-    if (lastDivPos == path.length() - 1) {
-        endPos -= 1;
-        lastDivPos = std::max(path.reverseFind('/', lastDivPos), path.reverseFind('\\', lastDivPos));
+    size_t lastDivPos = reverseFindPathSeparator(path);
+    unsigned endPos = path.length();
+    if (lastDivPos == endPos - 1) {
+        --endPos;
+        lastDivPos = reverseFindPathSeparator(path, lastDivPos);
     }
 
-    if (lastDivPos > 0) {
+    if (lastDivPos != notFound) {
         if (!makeAllDirectories(path.substring(0, lastDivPos)))
             return false;
     }
@@ -160,27 +173,32 @@ String homeDirectoryPath()
 
 String pathGetFileName(const String& path)
 {
-    return path.substring(std::max(path.reverseFind('/'), path.reverseFind('\\')) + 1);
+    size_t pos = reverseFindPathSeparator(path);
+    if (pos == notFound)
+        return path;
+    return path.substring(pos + 1);
 }
 
 String directoryName(const String& path)
 {
-    notImplemented();
-    return String();
+    size_t pos = reverseFindPathSeparator(path);
+    if (pos == notFound)
+        return String();
+    return path.left(pos);
 }
 
-CString openTemporaryFile(const char*, PlatformFileHandle& handle)
+String openTemporaryFile(const String&, PlatformFileHandle& handle)
 {
     handle = INVALID_HANDLE_VALUE;
 
     wchar_t tempPath[MAX_PATH];
-    int tempPathLength = ::GetTempPath(_countof(tempPath), tempPath);
-    if (tempPathLength <= 0 || tempPathLength > _countof(tempPath))
-        return CString();
+    int tempPathLength = ::GetTempPath(WTF_ARRAY_LENGTH(tempPath), tempPath);
+    if (tempPathLength <= 0 || tempPathLength > WTF_ARRAY_LENGTH(tempPath))
+        return String();
 
     HCRYPTPROV hCryptProv = 0;
     if (!CryptAcquireContext(&hCryptProv, 0, 0, PROV_RSA_FULL, CRYPT_VERIFYCONTEXT))
-        return CString();
+        return String();
 
     String proposedPath;
     while (1) {
@@ -211,9 +229,28 @@ CString openTemporaryFile(const char*, PlatformFileHandle& handle)
     CryptReleaseContext(hCryptProv, 0);
 
     if (!isHandleValid(handle))
-        return CString();
+        return String();
 
-    return proposedPath.latin1();
+    return proposedPath;
+}
+
+PlatformFileHandle openFile(const String& path, FileOpenMode mode)
+{
+    DWORD desiredAccess = 0;
+    DWORD creationDisposition = 0;
+    switch (mode) {
+        case OpenForRead:
+            desiredAccess = GENERIC_READ;
+            creationDisposition = OPEN_EXISTING;
+        case OpenForWrite:
+            desiredAccess = GENERIC_WRITE;
+            creationDisposition = CREATE_ALWAYS;
+        default:
+            ASSERT_NOT_REACHED();
+    }
+
+    String destination = path;
+    return CreateFile(destination.charactersWithNullTermination(), desiredAccess, 0, 0, creationDisposition, FILE_ATTRIBUTE_NORMAL, 0);
 }
 
 void closeFile(PlatformFileHandle& handle)
@@ -273,7 +310,7 @@ Vector<String> listDirectory(const String& path, const String& filter)
             // is so far only called by PluginDatabase.cpp to list
             // all plugins in a folder, where it's not supposed to list sub-folders.
             if (!(findData.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY))
-                entries.append(root + findData.cFileName);
+                entries.append(root + String(findData.cFileName));
         } while (FindNextFile(hFind, &findData));
         FindClose(hFind);
     }
@@ -281,4 +318,4 @@ Vector<String> listDirectory(const String& path, const String& filter)
     return entries;
 }
 
-}
+} // namespace WebCore
