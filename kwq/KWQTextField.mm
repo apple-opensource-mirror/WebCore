@@ -71,7 +71,9 @@
 - (BOOL)textView:(NSTextView *)view shouldDrawInsertionPointInRect:(NSRect)rect color:(NSColor *)color turnedOn:(BOOL)drawInsteadOfErase;
 - (BOOL)textView:(NSTextView *)view shouldHandleEvent:(NSEvent *)event;
 - (void)textView:(NSTextView *)view didHandleEvent:(NSEvent *)event;
+- (BOOL)textView:(NSTextView *)view shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)string;
 - (void)updateTextAttributes:(NSMutableDictionary *)attributes;
+- (NSString *)preprocessString:(NSString *)string;
 @end
 
 @implementation KWQTextFieldController
@@ -79,7 +81,7 @@
 - (id)initWithTextField:(NSTextField *)f QLineEdit:(QLineEdit *)w
 {
     [self init];
-    
+
     // This is initialization that's shared by all types of text fields.
     widget = w;
     field = f;
@@ -97,9 +99,9 @@
     return self;
 }
 
-- (void)invalidate
+- (void)detachQLineEdit
 {
-    widget = NULL;
+    widget = 0;
 }
 
 - (void)action:(id)sender
@@ -107,6 +109,8 @@
     if (!widget)
 	return;
     widget->textChanged();
+    if (!widget)
+        return;
     widget->performSearch();
 }
 
@@ -123,7 +127,7 @@
 
 - (void)setMaximumLength:(int)len
 {
-    NSString *oldValue = [field stringValue];
+    NSString *oldValue = [self string];
     if ([oldValue _KWQ_numComposedCharacterSequences] > len) {
         [field setStringValue:[oldValue _KWQ_truncateToNumComposedCharacterSequences:len]];
     }
@@ -164,7 +168,7 @@
     
     [self setHasFocus:NO];
 
-    if ([[[notification userInfo] objectForKey:@"NSTextMovement"] intValue] == NSReturnTextMovement)
+    if (widget && [[[notification userInfo] objectForKey:@"NSTextMovement"] intValue] == NSReturnTextMovement)
         widget->returnPressed();
 }
 
@@ -180,7 +184,9 @@
     [bridge controlTextDidChange:notification];
     
     edited = YES;
-    widget->textChanged();
+    if (widget) {
+        widget->textChanged();
+    }
 }
 
 - (BOOL)control:(NSControl *)control textShouldBeginEditing:(NSText *)fieldEditor
@@ -292,26 +298,44 @@
 	return YES;
     
     NSEventType type = [event type];
-    if ((type == NSKeyDown || type == NSKeyUp) && 
-	![[NSInputManager currentInputManager] hasMarkedText]) {
+    if ((type == NSKeyDown || type == NSKeyUp) && ![[NSInputManager currentInputManager] hasMarkedText]) {
         WebCoreBridge *bridge = KWQKHTMLPart::bridgeForWidget(widget);
-        BOOL intercepted = [bridge interceptKeyEvent:event toView:view];
-        // Always return NO for key up events because we don't want them
+
+        QWidget::setDeferFirstResponderChanges(true);
+
+        BOOL intercepted = [bridge control:field textView:view shouldHandleEvent:event];
+        if (!intercepted) {
+            intercepted = [bridge interceptKeyEvent:event toView:view];
+        }
+
+        // Always intercept key up events because we don't want them
         // passed along the responder chain. This is arguably a bug in
         // NSTextView; see Radar 3507083.
-        return type != NSKeyUp && !intercepted;
+        if (type == NSKeyUp) {
+            intercepted = YES;
+        }
+
+        if (intercepted || !widget) {
+            QWidget::setDeferFirstResponderChanges(false);
+            return NO;
+        }
     }
+
     return YES;
 }
 
 - (void)textView:(NSTextView *)view didHandleEvent:(NSEvent *)event
 {
+    QWidget::setDeferFirstResponderChanges(false);
+
     if (!widget)
 	return;
 
     if ([event type] == NSLeftMouseUp) {
         widget->sendConsumedMouseUp();
-        widget->clicked();
+        if (widget) {
+            widget->clicked();
+        }
     }
 }
 
@@ -364,8 +388,10 @@
         if (!KWQKHTMLPart::currentEventIsMouseDownInWidget(widget))
             [field _KWQ_scrollFrameToVisible];
         
-        QFocusEvent event(QEvent::FocusIn);
-        const_cast<QObject *>(widget->eventFilterObject())->eventFilter(widget, &event);
+        if (widget) {
+            QFocusEvent event(QEvent::FocusIn);
+            const_cast<QObject *>(widget->eventFilterObject())->eventFilter(widget, &event);
+        }
         
 	// Sending the onFocus event above, may have resulted in a blur() - if this
 	// happens when tabbing from another text field, then endEditing: and
@@ -381,8 +407,10 @@
     } else {
         lastSelectedRange = [self selectedRange];
         
-        QFocusEvent event(QEvent::FocusOut);
-        const_cast<QObject *>(widget->eventFilterObject())->eventFilter(widget, &event);
+        if (widget) {
+            QFocusEvent event(QEvent::FocusOut);
+            const_cast<QObject *>(widget->eventFilterObject())->eventFilter(widget, &event);
+        }
     }
 }
 
@@ -396,6 +424,49 @@
         [attributes setObject:mutableStyle forKey:NSParagraphStyleAttributeName];
         [mutableStyle release];
     }
+}
+
+- (NSString *)string
+{
+#if BUILDING_ON_PANTHER
+    // On Panther, the secure text field's editor does not contain the real
+    // string, so we must always call stringValue on the field. We'll live
+    // with the side effect of ending International inline input for these
+    // password fields on Panther only, since it's fixed in Tiger.
+    if ([field isKindOfClass:[NSSecureTextField class]]) {
+	    return [field stringValue];
+    }
+#endif
+    // Calling stringValue can have a side effect of ending International inline input.
+    // So don't call it unless there's no editor.
+    NSText *editor = [field _KWQ_currentEditor];
+    if (editor == nil) {
+        return [field stringValue];
+    }
+    return [editor string];
+}
+
+- (BOOL)textView:(NSTextView *)textView shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)string
+{
+    NSRange newline = [string rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"\r\n"]];
+    if (newline.location == NSNotFound) {
+        return YES;
+    }
+    NSString *truncatedString = [string substringToIndex:newline.location];
+    if ([textView shouldChangeTextInRange:range replacementString:truncatedString]) {
+        [textView replaceCharactersInRange:range withString:truncatedString];
+        [textView didChangeText];
+    }
+    return NO;
+}
+
+- (NSString *)preprocessString:(NSString *)string
+{
+    NSString *result = string;
+    NSRange newline = [result rangeOfCharacterFromSet:[NSCharacterSet characterSetWithCharactersInString:@"\r\n"]];
+    if (newline.location != NSNotFound)
+        result = [result substringToIndex:newline.location];
+    return [result _KWQ_truncateToNumComposedCharacterSequences:[formatter maximumLength]];
 }
 
 @end
@@ -446,9 +517,7 @@
 
 - (void)setStringValue:(NSString *)string
 {
-    int maxLength = [controller maximumLength];
-    string = [string _KWQ_truncateToNumComposedCharacterSequences:maxLength];
-    [super setStringValue:string];
+    [super setStringValue:[controller preprocessString:string]];
     [controller textChanged];
 }
 
@@ -511,7 +580,6 @@
     [controller setInDrawingMachinery:NO];
 }
 
-// Use the "needs display" mechanism to do all insertion point drawing in the web view.
 - (BOOL)textView:(NSTextView *)view shouldDrawInsertionPointInRect:(NSRect)rect color:(NSColor *)color turnedOn:(BOOL)drawInsteadOfErase
 {
     return [controller textView:view shouldDrawInsertionPointInRect:rect color:color turnedOn:drawInsteadOfErase];
@@ -525,6 +593,12 @@
 - (void)textView:(NSTextView *)view didHandleEvent:(NSEvent *)event
 {
     [controller textView:view didHandleEvent:event];
+}
+
+- (BOOL)textView:(NSTextView *)view shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)string
+{
+    return [controller textView:view shouldChangeTextInRange:range replacementString:string]
+        && [super textView:view shouldChangeTextInRange:range replacementString:string];
 }
 
 @end
@@ -595,9 +669,7 @@
 
 - (void)setStringValue:(NSString *)string
 {
-    int maxLength = [controller maximumLength];
-    string = [string _KWQ_truncateToNumComposedCharacterSequences:maxLength];
-    [super setStringValue:string];
+    [super setStringValue:[controller preprocessString:string]];
     [controller textChanged];
 }
 
@@ -660,7 +732,6 @@
     [controller setInDrawingMachinery:NO];
 }
 
-// Use the "needs display" mechanism to do all insertion point drawing in the web view.
 - (BOOL)textView:(NSTextView *)view shouldDrawInsertionPointInRect:(NSRect)rect color:(NSColor *)color turnedOn:(BOOL)drawInsteadOfErase
 {
     return [controller textView:view shouldDrawInsertionPointInRect:rect color:color turnedOn:drawInsteadOfErase];
@@ -674,6 +745,12 @@
 - (void)textView:(NSTextView *)view didHandleEvent:(NSEvent *)event
 {
     [controller textView:view didHandleEvent:event];
+}
+
+- (BOOL)textView:(NSTextView *)view shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)string
+{
+    return [controller textView:view shouldChangeTextInRange:range replacementString:string]
+        && [super textView:view shouldChangeTextInRange:range replacementString:string];
 }
 
 // These next two methods are the workaround for bug 3024443.
@@ -716,11 +793,14 @@
     // workaround for this AppKit bug, we detect this circumstance
     // (changing from one secure field to another) and set selectable
     // to YES, and then back to whatever it was - this has the side
-    // effect of turning on bullet mode.
+    // effect of turning on bullet mode. This is also helpful when
+    // we end editing once, but we've already started editing
+    // again on the same text field. (On Panther we only did this when
+    // advancing to a *different* secure text field.)
 
     NSTextView *textObject = [notification object];
     id delegate = [textObject delegate];
-    if (delegate != self && [delegate isKindOfClass:[NSSecureTextField class]]) {
+    if ([delegate isKindOfClass:[NSSecureTextField class]]) {
 	BOOL oldSelectable = [textObject isSelectable];
 	[textObject setSelectable:YES];
 	[textObject setSelectable:oldSelectable];
@@ -808,9 +888,7 @@
 
 - (void)setStringValue:(NSString *)string
 {
-    int maxLength = [controller maximumLength];
-    string = [string _KWQ_truncateToNumComposedCharacterSequences:maxLength];
-    [super setStringValue:string];
+    [super setStringValue:[controller preprocessString:string]];
     [controller textChanged];
 }
 
@@ -873,7 +951,6 @@
     [controller setInDrawingMachinery:NO];
 }
 
-// Use the "needs display" mechanism to do all insertion point drawing in the web view.
 - (BOOL)textView:(NSTextView *)view shouldDrawInsertionPointInRect:(NSRect)rect color:(NSColor *)color turnedOn:(BOOL)drawInsteadOfErase
 {
     return [controller textView:view shouldDrawInsertionPointInRect:rect color:color turnedOn:drawInsteadOfErase];
@@ -887,6 +964,12 @@
 - (void)textView:(NSTextView *)view didHandleEvent:(NSEvent *)event
 {
     [controller textView:view didHandleEvent:event];
+}
+
+- (BOOL)textView:(NSTextView *)view shouldChangeTextInRange:(NSRange)range replacementString:(NSString *)string
+{
+    return [controller textView:view shouldChangeTextInRange:range replacementString:string]
+        && [super textView:view shouldChangeTextInRange:range replacementString:string];
 }
 
 @end
@@ -954,14 +1037,30 @@
     return YES;
 }
 
-- (BOOL)isPartialStringValid:(NSString *)partialString newEditingString:(NSString **)newString errorDescription:(NSString **)error
+- (BOOL)isPartialStringValid:(NSString **)partialStringPtr proposedSelectedRange:(NSRangePointer)proposedSelectedRangePtr
+    originalString:(NSString *)originalString originalSelectedRange:(NSRange)originalSelectedRange errorDescription:(NSString **)errorDescription
 {
-    if ([partialString _KWQ_numComposedCharacterSequences] > maxLength) {
-        *newString = nil;
-        return NO;
+    NSString *p = *partialStringPtr;
+
+    int length = [p _KWQ_numComposedCharacterSequences];
+    if (length <= maxLength) {
+        return YES;
     }
-    
-    return YES;
+
+    int composedSequencesToRemove = length - maxLength;
+    int removeRangeEnd = proposedSelectedRangePtr->location;
+    int removeRangeStart = removeRangeEnd;
+    while (composedSequencesToRemove > 0 && removeRangeStart != 0) {
+        removeRangeStart = [p rangeOfComposedCharacterSequenceAtIndex:removeRangeStart - 1].location;
+        --composedSequencesToRemove;
+    }
+
+    if (removeRangeStart != 0) {
+        *partialStringPtr = [[p substringToIndex:removeRangeStart] stringByAppendingString:[p substringFromIndex:removeRangeEnd]];
+        proposedSelectedRangePtr->location = removeRangeStart;
+    }
+
+    return NO;
 }
 
 - (NSAttributedString *)attributedStringForObjectValue:(id)anObject withDefaultAttributes:(NSDictionary *)attributes

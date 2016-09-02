@@ -26,64 +26,77 @@
 #ifndef __dom_position_h__
 #define __dom_position_h__
 
+#include "text_affinity.h"
+
 namespace DOM {
 
+class CSSComputedStyleDeclarationImpl;
 class ElementImpl;
 class NodeImpl;
+class Range;
+class RangeImpl;
+
+enum EStayInBlock { DoNotStayInBlock = false, StayInBlock = true };
 
 class Position
 {
 public:
-    Position() : m_node(0), m_offset(0) {};
+    Position() : m_node(0), m_offset(0) { }
     Position(NodeImpl *node, long offset);
     Position(const Position &);
     ~Position();
 
+    Position &operator=(const Position &o);
+
+    void clear();
+
     NodeImpl *node() const { return m_node; }
     long offset() const { return m_offset; }
 
+    bool isNull() const { return m_node == 0; }
+    bool isNotNull() const { return m_node != 0; }
+
     ElementImpl *element() const;
+    CSSComputedStyleDeclarationImpl *computedStyle() const;
 
-    long renderedOffset() const;
+    // FIXME: Make these non-member functions and put them somewhere in the editing directory.
+    // These aren't really basic "position" operations. More high level editing helper functions.
+    Position leadingWhitespacePosition(khtml::EAffinity affinity, bool considerNonCollapsibleWhitespace = false) const;
+    Position trailingWhitespacePosition(khtml::EAffinity affinity, bool considerNonCollapsibleWhitespace = false) const;
 
-    bool isEmpty() const { return m_node == 0; }
-    bool notEmpty() const { return m_node != 0; }
+    // These functions only consider leaf nodes, and if stayInBlock is true, blocks.
+    // Hence, the results from these functions are idiosyncratic, and until you
+    // become familiar with the results, you may find using these functions confusing.
+    // I have hopes to make the results of these functions less ambiguous in the near
+    // future, and have them consider all nodes, and have the Positions that are 
+    // returned follow a simple rule: The upstream position is the position
+    // earliest in document order that will make the insertion point render in the
+    // same position as the caller's position. The same goes for downstream position
+    // except that it is the latest position for earliest position in the above 
+    // description.
+    Position upstream(EStayInBlock stayInBlock = DoNotStayInBlock) const;
+    Position downstream(EStayInBlock stayInBlock = DoNotStayInBlock) const;
     
-    Position equivalentLeafPosition() const;
-    Position previousRenderedEditablePosition() const;
-    Position nextRenderedEditablePosition() const;
-    Position previousCharacterPosition() const;
-    Position nextCharacterPosition() const;
-    Position previousWordPosition() const;
-    Position nextWordPosition() const;
-    Position previousLinePosition(int x) const;
-    Position nextLinePosition(int x) const;
-    Position equivalentUpstreamPosition() const;
-    Position equivalentDownstreamPosition() const;
     Position equivalentRangeCompliantPosition() const;
-    Position equivalentShallowPosition() const;
-    bool atStartOfContainingEditableBlock() const;
-    bool atStartOfRootEditableElement() const;
+    Position equivalentDeepPosition() const;
     bool inRenderedContent() const;
-    bool inRenderedText() const;
-    bool rendersOnSameLine(const Position &pos) const;
+    bool isRenderedCharacter() const;
     bool rendersInDifferentPosition(const Position &pos) const;
-    bool isFirstRenderedPositionOnLine() const;
-    bool isLastRenderedPositionOnLine() const;
-    bool isLastRenderedPositionInEditableBlock() const;
-    bool inFirstEditableInRootEditableElement() const;
-    bool inLastEditableInRootEditableElement() const;
-    bool inFirstEditableInContainingEditableBlock() const;
-    bool inLastEditableInContainingEditableBlock() const;
-    
-    Position &operator=(const Position &o);
-    
-    friend bool operator==(const Position &a, const Position &b);
-    friend bool operator!=(const Position &a, const Position &b);
     
     void debugPosition(const char *msg="") const;
+
+#ifndef NDEBUG
+    void formatForDebugger(char *buffer, unsigned length) const;
+#endif
     
 private:
+    long renderedOffset() const;
+
+    bool inRenderedText() const;
+
+    Position previousCharacterPosition(khtml::EAffinity affinity) const;
+    Position nextCharacterPosition(khtml::EAffinity affinity) const;
+    
     NodeImpl *m_node;
     long m_offset;
 };
@@ -97,6 +110,11 @@ inline bool operator!=(const Position &a, const Position &b)
 {
     return !(a == b);
 }
+
+Position startPosition(const Range &);
+Position startPosition(const RangeImpl *);
+Position endPosition(const Range &);
+Position endPosition(const RangeImpl *);
 
 } // namespace DOM
 

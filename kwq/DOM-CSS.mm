@@ -97,8 +97,19 @@ using DOM::StyleSheetListImpl;
 
 static inline int getPropertyID(NSString *string)
 {
-    const char *s = [string UTF8String];
-    return DOM::getPropertyID(s, strlen(s));
+    //use a fixed sized buffer to avoid malloc() allocations done by -[NSString UTF8String]
+    static char buffer[1024];
+    BOOL success = CFStringGetCString((CFStringRef)string, buffer, 1023, kCFStringEncodingUTF8);
+   
+    // CFStringGetCString returns false if conversion isn't possible
+    // (due to conversion error, or not enough space in the provided buffer)
+    // fall back to UTF8String instead
+    if (!success) {
+        const char *s = [string UTF8String];
+        return DOM::getPropertyID(s, strlen(s));
+    }
+
+    return DOM::getPropertyID(buffer, strlen(buffer));
 }
 
 //------------------------------------------------------------------------------------------
@@ -764,6 +775,11 @@ static inline int getPropertyID(NSString *string)
     [super finalize];
 }
 
+- (NSString *)description
+{
+    return [NSString stringWithFormat:@"DOMCSSStyleDeclaration: %@", [self cssText]];
+}
+
 - (NSString *)cssText
 {
     return [self _styleDeclarationImpl]->cssText();
@@ -771,7 +787,9 @@ static inline int getPropertyID(NSString *string)
 
 - (void)setCssText:(NSString *)cssText
 {
-    [self _styleDeclarationImpl]->setCssText(cssText);
+    int exceptionCode;
+    [self _styleDeclarationImpl]->setCssText(cssText, exceptionCode);
+    raiseOnDOMError(exceptionCode);
 }
 
 - (NSString *)getPropertyValue:(NSString *)propertyName
@@ -795,7 +813,10 @@ static inline int getPropertyID(NSString *string)
     int propid = getPropertyID(propertyName);
     if (!propid) 
         return nil;
-    return [self _styleDeclarationImpl]->removeProperty(propid);
+    int exceptionCode = 0;
+    DOMString result = [self _styleDeclarationImpl]->removeProperty(propid, exceptionCode);
+    raiseOnDOMError(exceptionCode);
+    return result;
 }
 
 - (NSString *)getPropertyPriority:(NSString *)propertyName
@@ -815,7 +836,9 @@ static inline int getPropertyID(NSString *string)
     if (!propid) 
         return;
     bool important = strcasecmp(DOMString(priority), "important") == 0;
-    [self _styleDeclarationImpl]->setProperty(propid, value, important);
+    int exceptionCode;
+    [self _styleDeclarationImpl]->setProperty(propid, value, important, exceptionCode);
+    raiseOnDOMError(exceptionCode);
 }
 
 - (unsigned long)length
@@ -1133,6 +1156,17 @@ void removeWrapperForRGB(QRgb value)
 }
 
 @end
+
+@implementation DOMRGBColor (WebPrivate)
+
+- (NSColor *)_color
+{
+    QRgb rgb = reinterpret_cast<QRgb>(_internal);
+    return QColor(rgb).getNSColor();
+}
+
+@end
+
 
 //------------------------------------------------------------------------------------------
 // DOMRect
@@ -1789,6 +1823,16 @@ void removeWrapperForRGB(QRgb value)
 - (void)setFontSizeAdjust:(NSString *)fontSizeAdjust
 {
     [self setProperty:@"font-size-adjust" :fontSizeAdjust :@""];
+}
+
+- (NSString *)_fontSizeDelta
+{
+    return [self getPropertyValue:@"-khtml-font-size-delta"];
+}
+
+- (void)_setFontSizeDelta:(NSString *)fontSizeDelta
+{
+    [self setProperty:@"-khtml-font-size-delta" :fontSizeDelta :@""];
 }
 
 - (NSString *)fontStretch

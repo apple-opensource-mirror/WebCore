@@ -19,7 +19,7 @@
  * the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 02111-1307, USA.
  *
- * $Id: css_stylesheetimpl.cpp,v 1.10 2004/05/20 15:09:32 darin Exp $
+ * $Id: css_stylesheetimpl.cpp,v 1.11 2004/08/04 22:05:48 hyatt Exp $
  */
 
 //#define CSS_STYLESHEET_DEBUG
@@ -105,12 +105,12 @@ CSSStyleSheetImpl::CSSStyleSheetImpl(CSSStyleSheetImpl *parentSheet, DOMString h
     : StyleSheetImpl(parentSheet, href)
 {
     m_lstChildren = new QPtrList<StyleBaseImpl>;
-    m_doc = 0;
+    m_doc = parentSheet ? parentSheet->doc() : 0;
     m_implicit = false;
     m_namespaces = 0;
 }
 
-CSSStyleSheetImpl::CSSStyleSheetImpl(DOM::NodeImpl *parentNode, DOMString href, bool _implicit)
+CSSStyleSheetImpl::CSSStyleSheetImpl(NodeImpl *parentNode, DOMString href, bool _implicit)
     : StyleSheetImpl(parentNode, href)
 {
     m_lstChildren = new QPtrList<StyleBaseImpl>;

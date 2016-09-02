@@ -5,7 +5,7 @@
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
  *           (C) 2000 Simon Hausmann (hausmann@kde.org)
  *           (C) 2001 Dirk Mueller (mueller@kde.org)
- * Copyright (C) 2003 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -56,6 +56,7 @@ HTMLBodyElementImpl::HTMLBodyElementImpl(DocumentPtr *doc)
 HTMLBodyElementImpl::~HTMLBodyElementImpl()
 {
     if (m_linkDecl) {
+        m_linkDecl->setNode(0);
         m_linkDecl->setParent(0);
         m_linkDecl->deref();
     }
@@ -68,7 +69,7 @@ NodeImpl::Id HTMLBodyElementImpl::id() const
 
 void HTMLBodyElementImpl::createLinkDecl()
 {
-    m_linkDecl = new CSSStyleDeclarationImpl(0);
+    m_linkDecl = new CSSMutableStyleDeclarationImpl;
     m_linkDecl->ref();
     m_linkDecl->setParent(getDocument()->elementSheet());
     m_linkDecl->setNode(this);
@@ -146,14 +147,18 @@ void HTMLBodyElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
                 createLinkDecl();
             m_linkDecl->setProperty(CSS_PROP_COLOR, attr->value(), false, false);
             CSSValueImpl* val = m_linkDecl->getPropertyCSSValue(CSS_PROP_COLOR);
-            if (val && val->isPrimitiveValue()) {
-                QColor col = getDocument()->styleSelector()->getColorFromPrimitiveValue(static_cast<CSSPrimitiveValueImpl*>(val));
-                if (attr->id() == ATTR_LINK)
-                    getDocument()->setLinkColor(col);
-                else if (attr->id() == ATTR_VLINK)
-                    getDocument()->setVisitedLinkColor(col);
-                else
-                    getDocument()->setActiveLinkColor(col);
+            if (val) {
+                val->ref();
+                if (val->isPrimitiveValue()) {
+                    QColor col = getDocument()->styleSelector()->getColorFromPrimitiveValue(static_cast<CSSPrimitiveValueImpl*>(val));
+                    if (attr->id() == ATTR_LINK)
+                        getDocument()->setLinkColor(col);
+                    else if (attr->id() == ATTR_VLINK)
+                        getDocument()->setVisitedLinkColor(col);
+                    else
+                        getDocument()->setActiveLinkColor(col);
+                }
+                val->deref();
             }
         }
         
@@ -163,27 +168,27 @@ void HTMLBodyElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
     }
     case ATTR_ONLOAD:
         getDocument()->setHTMLWindowEventListener(EventImpl::LOAD_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), NULL));
         break;
     case ATTR_ONUNLOAD:
         getDocument()->setHTMLWindowEventListener(EventImpl::UNLOAD_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), NULL));
         break;
     case ATTR_ONBLUR:
         getDocument()->setHTMLWindowEventListener(EventImpl::BLUR_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), NULL));
         break;
     case ATTR_ONFOCUS:
         getDocument()->setHTMLWindowEventListener(EventImpl::FOCUS_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), NULL));
         break;
     case ATTR_ONRESIZE:
         getDocument()->setHTMLWindowEventListener(EventImpl::RESIZE_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), NULL));
         break;
     case ATTR_ONSCROLL:
         getDocument()->setHTMLWindowEventListener(EventImpl::SCROLL_EVENT,
-                                                  getDocument()->createHTMLEventListener(attr->value().string()));
+                                                  getDocument()->createHTMLEventListener(attr->value().string(), NULL));
         break;
     case ATTR_NOSAVE:
 	break;
@@ -196,9 +201,10 @@ void HTMLBodyElementImpl::insertedIntoDocument()
 {
     HTMLElementImpl::insertedIntoDocument();
 
-    // FIXME: perhaps all this stuff should be in attach() instead of here...
+    // FIXME: perhaps this code should be in attach() instead of here
 
-    KHTMLView* w = getDocument()->view();
+    DocumentImpl *d = getDocument();
+    KHTMLView *w = d ? d->view() : 0;
     if (w && w->marginWidth() != -1) {
         QString s;
         s.sprintf( "%d", w->marginWidth() );
@@ -209,6 +215,9 @@ void HTMLBodyElementImpl::insertedIntoDocument()
         s.sprintf( "%d", w->marginHeight() );
         setAttribute(ATTR_MARGINHEIGHT, s);
     }
+
+    if (w)
+        w->scheduleRelayout();
 }
 
 bool HTMLBodyElementImpl::isURLAttribute(AttributeImpl *attr) const
@@ -244,7 +253,8 @@ bool HTMLFrameElementImpl::isURLAllowed(const AtomicString &URLString) const
         return true;
     }
     
-    KHTMLView *w = getDocument()->view();
+    DocumentImpl *d = getDocument();
+    KHTMLView *w = d ? d->view() : 0;
 
     if (!w) {
 	return false;
@@ -310,7 +320,8 @@ void HTMLFrameElementImpl::updateForNewURL()
 
 void HTMLFrameElementImpl::openURL()
 {
-    KHTMLView *w = getDocument()->view();
+    DocumentImpl *d = getDocument();
+    KHTMLView *w = d ? d->view() : 0;
     if (!w) {
         return;
     }
@@ -378,11 +389,11 @@ void HTMLFrameElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
         break;
     case ATTR_ONLOAD:
         setHTMLEventListener(EventImpl::LOAD_EVENT,
-                                getDocument()->createHTMLEventListener(attr->value().string()));
+                                getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONUNLOAD:
         setHTMLEventListener(EventImpl::UNLOAD_EVENT,
-                                getDocument()->createHTMLEventListener(attr->value().string()));
+                                getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     default:
         HTMLElementImpl::parseHTMLAttribute(attr);
@@ -485,18 +496,27 @@ void HTMLFrameElementImpl::setFocus(bool received)
 	renderFrame->widget()->clearFocus();
 }
 
-DocumentImpl* HTMLFrameElementImpl::contentDocument() const
+KHTMLPart* HTMLFrameElementImpl::contentPart() const
 {
-    KHTMLPart* p = getDocument()->part();
-
-    if (p) {
-        KHTMLPart *part = p->findFrame( name.string() );
-        if (part) {
-            return part->xmlDocImpl();
-        }
+    // Start with the part that contains this element, our ownerDocument.
+    KHTMLPart* ownerDocumentPart = getDocument()->part();
+    if (!ownerDocumentPart) {
+        return 0;
     }
 
-    return 0;
+    // Find the part for the subframe that this element represents.
+    return ownerDocumentPart->findFrame(name.string());
+}
+
+DocumentImpl* HTMLFrameElementImpl::contentDocument() const
+{
+    KHTMLPart* part = contentPart();
+    if (!part) {
+        return 0;
+    }
+
+    // Return the document for that part, which is our contentDocument.
+    return part->xmlDocImpl();
 }
 
 bool HTMLFrameElementImpl::isURLAttribute(AttributeImpl *attr) const
@@ -570,11 +590,11 @@ void HTMLFrameSetElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
         break;
     case ATTR_ONLOAD:
         setHTMLEventListener(EventImpl::LOAD_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONUNLOAD:
         setHTMLEventListener(EventImpl::UNLOAD_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     default:
         HTMLElementImpl::parseHTMLAttribute(attr);

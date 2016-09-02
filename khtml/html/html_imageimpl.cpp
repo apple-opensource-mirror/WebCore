@@ -22,6 +22,7 @@
  */
 
 #include "html/html_imageimpl.h"
+#include "html/html_formimpl.h"
 #include "html/html_documentimpl.h"
 
 #include "misc/htmlhashes.h"
@@ -49,6 +50,8 @@
 
 using namespace DOM;
 using namespace khtml;
+
+//#define INSTRUMENT_LAYOUT_SCHEDULING 1
 
 HTMLImageLoader::HTMLImageLoader(ElementImpl* elt)
 :m_element(elt), m_image(0), m_firedLoad(true), m_imageComplete(true)
@@ -91,6 +94,11 @@ void HTMLImageLoader::updateFromElement()
         if (oldImage)
             oldImage->deref(this);
     }
+#if APPLE_CHANGES
+    khtml::RenderImage *renderer = static_cast<khtml::RenderImage*>(element()->renderer());
+    if (renderer)
+        renderer->resetAnimation();
+#endif
 }
 
 void HTMLImageLoader::dispatchLoadEvent()
@@ -108,8 +116,13 @@ void HTMLImageLoader::notifyFinished(CachedObject* image)
 {
     m_imageComplete = true;
     DocumentImpl* document = element()->getDocument();
-    if (document)
+    if (document) {
         document->dispatchImageLoadEventSoon(this);
+#ifdef INSTRUMENT_LAYOUT_SCHEDULING
+        if (!document->ownerElement())
+            printf("Image loaded at %d\n", element()->getDocument()->elapsedTime());
+#endif
+    }
     if (element()->renderer()) {
         RenderImage* imageObj = static_cast<RenderImage*>(element()->renderer());
         imageObj->setImage(m_image);
@@ -118,18 +131,18 @@ void HTMLImageLoader::notifyFinished(CachedObject* image)
 
 // -------------------------------------------------------------------------
 
-HTMLImageElementImpl::HTMLImageElementImpl(DocumentPtr *doc)
-    : HTMLElementImpl(doc), m_imageLoader(this)
+HTMLImageElementImpl::HTMLImageElementImpl(DocumentPtr *doc, HTMLFormElementImpl *f)
+    : HTMLElementImpl(doc), m_imageLoader(this), ismap(false), m_form(f)
 {
-    ismap = false;
+    if (m_form)
+        m_form->registerImgElement(this);
 }
 
 HTMLImageElementImpl::~HTMLImageElementImpl()
 {
+    if (m_form)
+        m_form->removeImgElement(this);
 }
-
-
-// DOM related
 
 NodeImpl::Id HTMLImageElementImpl::id() const
 {
@@ -213,15 +226,15 @@ void HTMLImageElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
         break;
     case ATTR_ONABORT: // ### add support for this
         setHTMLEventListener(EventImpl::ABORT_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONERROR:
         setHTMLEventListener(EventImpl::ERROR_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONLOAD:
         setHTMLEventListener(EventImpl::LOAD_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_NOSAVE:
 	break;
@@ -311,7 +324,7 @@ void HTMLImageElementImpl::detach()
     HTMLElementImpl::detach();
 }
 
-long HTMLImageElementImpl::width() const
+long HTMLImageElementImpl::width(bool ignorePendingStylesheets) const
 {
     if (!m_render) {
 	// check the attribute first for an explicit pixel value
@@ -325,7 +338,10 @@ long HTMLImageElementImpl::width() const
 
     DOM::DocumentImpl* docimpl = getDocument();
     if (docimpl) {
-	docimpl->updateLayout();
+	if (ignorePendingStylesheets)
+            docimpl->updateLayoutIgnorePendingStylesheets();
+        else
+            docimpl->updateLayout();
     }
 
     if (!m_render) {
@@ -335,7 +351,7 @@ long HTMLImageElementImpl::width() const
     return m_render->contentWidth();
 }
 
-long HTMLImageElementImpl::height() const
+long HTMLImageElementImpl::height(bool ignorePendingStylesheets) const
 {
     if (!m_render) {
 	// check the attribute first for an explicit pixel value
@@ -349,7 +365,10 @@ long HTMLImageElementImpl::height() const
 
     DOM::DocumentImpl* docimpl = getDocument();
     if (docimpl) {
-	docimpl->updateLayout();
+	if (ignorePendingStylesheets)
+            docimpl->updateLayoutIgnorePendingStylesheets();
+        else
+            docimpl->updateLayout();
     }
 
     if (!m_render) {

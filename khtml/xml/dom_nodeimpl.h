@@ -34,6 +34,7 @@
 
 class QPainter;
 template <class type> class QPtrList;
+template <class type> class QPtrDict;
 class KHTMLView;
 class RenderArena;
 class QRect;
@@ -49,15 +50,10 @@ namespace khtml {
 
 namespace DOM {
 
-class CSSStyleDeclarationImpl;
 class DocumentImpl;
 class ElementImpl;
 class EventImpl;
-class NamedNodeMapImpl;
 class NodeListImpl;
-class Position;
-class Range;
-class RangeImpl;
 class RegisteredEventListener;
 
 // The namespace used for XHTML elements
@@ -75,7 +71,8 @@ inline Q_UINT16 namespacePart(Q_UINT32 i) { return i >> 16; }
 inline Q_UINT16 localNamePart(Q_UINT32 i) { return i; }
 inline Q_UINT32 makeId(Q_UINT16 n, Q_UINT16 l) { return (n << 16) | l; }
 
-const Q_UINT32 anyQName = makeId(anyNamespace, anyLocalName);
+// Can't use makeId here because it results in an "initroutine".
+const Q_UINT32 anyQName = anyNamespace << 16 | anyLocalName;
 
 class DocumentPtr : public khtml::Shared<DocumentPtr>
 {
@@ -120,6 +117,8 @@ public:
     virtual void setPrefix(const DOMString &_prefix, int &exceptioncode );
     void normalize ();
 
+    NodeImpl *lastDescendent() const;
+
     // Other methods (not part of DOM)
     virtual bool isElementNode() const { return false; }
     virtual bool isHTMLElement() const { return false; }
@@ -128,6 +127,7 @@ public:
     virtual bool isDocumentNode() const { return false; }
     virtual bool isXMLElementNode() const { return false; }
     bool isBlockFlow() const;
+    bool isBlockFlowOrTable() const;
     
     // Used by <form> elements to indicate a malformed state of some kind, typically
     // used to keep from applying the bottom margin of the form.
@@ -144,6 +144,10 @@ public:
     virtual void setFirstChild(NodeImpl *child);
     virtual void setLastChild(NodeImpl *child);
 
+    bool isAtomicNode() const;
+    NodeImpl *previousNodeConsideringAtomicNodes() const;
+    NodeImpl *nextNodeConsideringAtomicNodes() const;
+    
     /** (Not part of the official DOM)
      * Returns the next leaf node.
      *
@@ -164,16 +168,22 @@ public:
 
     bool isEditableBlock() const;
     ElementImpl *enclosingBlockFlowElement() const;
+    ElementImpl *enclosingBlockFlowOrTableElement() const;
+    ElementImpl *enclosingInlineElement() const;
     ElementImpl *rootEditableElement() const;
     
     bool inSameRootEditableElement(NodeImpl *);
     bool inSameContainingBlockFlowElement(NodeImpl *);
     
-    Position positionForCoordinates(int x, int y);
-
     // used by the parser. Doesn't do as many error checkings as
     // appendChild(), and returns the node into which will be parsed next.
     virtual NodeImpl *addChild(NodeImpl *newChild);
+    
+    // called by the parser when this element's close tag is reached,
+    // signalling that all child tags have been parsed and added.
+    // This is only needed for <applet> and <object> elements, which can't lay themselves out
+    // until they know all of their nested <param>s. [3603191, 4040848]
+    virtual void closeRenderer() { }
 
     typedef Q_UINT32 Id;
     // id() is used to easily and exactly identify a node. It
@@ -255,10 +265,6 @@ public:
     virtual bool isMouseFocusable() const;
     
     virtual bool isInline() const;
-    virtual QString toHTML() const;
-    QString recursive_toHTML(bool start = false) const;
-    QString recursive_toHTMLWithOptions(bool start=false, const DOM::RangeImpl *range=NULL, QPtrList<NodeImpl> *nodes=NULL) const;
-    void recursive_completeURLs(QString baseURL);
     
     virtual bool isContentEditable() const;
     virtual QRect getRect() const;
@@ -279,6 +285,7 @@ public:
     void removeHTMLEventListener(int id);
     void setHTMLEventListener(int id, EventListener *listener);
     EventListener *getHTMLEventListener(int id);
+    void removeAllEventListeners();
 
     bool dispatchEvent(EventImpl *evt, int &exceptioncode, bool tempEvent = false);
     bool dispatchGenericEvent( EventImpl *evt, int &exceptioncode);
@@ -286,7 +293,7 @@ public:
     bool dispatchWindowEvent(int _id, bool canBubbleArg, bool cancelableArg);
     bool dispatchMouseEvent(QMouseEvent *e, int overrideId = 0, int overrideDetail = 0);
     bool dispatchUIEvent(int _id, int detail = 0);
-    bool dispatchSubtreeModifiedEvent();
+    bool dispatchSubtreeModifiedEvent(bool childrenChanged = true);
     bool dispatchKeyEvent(QKeyEvent *key);
 
     void handleLocalEvents(EventImpl *evt, bool useCapture);
@@ -304,7 +311,7 @@ public:
 
     virtual bool isReadOnly();
     virtual bool childTypeAllowed( unsigned short /*type*/ ) { return false; }
-    virtual unsigned long childNodeCount();
+    virtual unsigned long childNodeCount() const;
     virtual NodeImpl *childNode(unsigned long index);
 
     /**
@@ -318,10 +325,10 @@ public:
      *
      * see @ref traversePreviousNode()
      */
-    NodeImpl *traverseNextNode(NodeImpl *stayWithin = 0) const;
+    NodeImpl *traverseNextNode(const NodeImpl *stayWithin = 0) const;
     
     /* Like traverseNextNode, but skips children and starts with the next sibling. */
-    NodeImpl *traverseNextSibling(NodeImpl *stayWithin = 0) const;
+    NodeImpl *traverseNextSibling(const NodeImpl *stayWithin = 0) const;
 
     /**
      * Does a reverse pre-order traversal to find the node that comes before the current one in document order
@@ -329,6 +336,9 @@ public:
      * see @ref traverseNextNode()
      */
     NodeImpl *traversePreviousNode() const;
+
+    /* Like traversePreviousNode, but visits nodes before their children. */
+    NodeImpl *traversePreviousNodePostOrder(const NodeImpl *stayWithin = 0) const;
 
     DocumentPtr *docPtr() const { return document; }
 
@@ -343,7 +353,7 @@ public:
     
     void checkSetPrefix(const DOMString &_prefix, int &exceptioncode);
     void checkAddChild(NodeImpl *newChild, int &exceptioncode);
-    bool isAncestor(NodeImpl *) const;
+    bool isAncestor(const NodeImpl *) const;
     virtual bool childAllowed( NodeImpl *newChild );
 
     virtual long maxOffset() const;
@@ -351,6 +361,9 @@ public:
     virtual long caretMaxOffset() const;
     virtual unsigned long caretMaxRenderedOffset() const;
 
+    virtual long previousOffset (long current) const;
+    virtual long nextOffset (long current) const;
+    
 #ifndef NDEBUG
     virtual void dump(QTextStream *stream, QString ind = "") const;
 #endif
@@ -370,8 +383,6 @@ public:
      * the node's rendering object from the rendering tree and delete it.
      */
     virtual void detach();
-
-    void closeRenderer();
 
     void createRendererIfNeeded();
     virtual khtml::RenderStyle *styleForRenderer(khtml::RenderObject *parent);
@@ -431,11 +442,23 @@ public:
 
     /**
      * Notifies the node that it's list of children have changed (either by adding or removing child nodes), or a child
-     * node that is of the type CDATA_SECTION_NODE, TEXT_NODE or COMMENT_NODE has changed it's value.
+     * node that is of the type CDATA_SECTION_NODE, TEXT_NODE or COMMENT_NODE has changed its value.
      */
     virtual void childrenChanged();
 
     virtual DOMString toString() const = 0;
+    
+#ifndef NDEBUG
+    virtual void formatForDebugger(char *buffer, unsigned length) const;
+
+    void displayNode(const char *prefix="");
+    void displayTree();
+#endif
+
+    void registerNodeList(NodeListImpl *list);
+    void unregisterNodeList(NodeListImpl *list);
+    void notifyNodeListsSubtreeModified();
+    void notifyLocalNodeListsSubtreeModified();
 
 private: // members
     DocumentPtr *document;
@@ -444,6 +467,7 @@ private: // members
 protected:
     khtml::RenderObject *m_render;
     QPtrList<RegisteredEventListener> *m_regdListeners;
+    QPtrDict<NodeListImpl> *m_nodeLists;
 
     unsigned short m_tabIndex : 15;
     bool m_hasTabIndex  : 1;
@@ -462,9 +486,8 @@ protected:
     bool m_active : 1;
     bool m_styleElement : 1; // contains stylesheet text
     bool m_implicit : 1; // implicitely generated by the parser
-    bool m_rendererNeedsClose : 1;
 
-    // 1 bit unused
+    // 3 bits unused
 };
 
 // this is the full Node Implementation with parents and children.
@@ -502,7 +525,7 @@ public:
 
     virtual void setFocus(bool=true);
     virtual void setActive(bool=true);
-    virtual unsigned long childNodeCount();
+    virtual unsigned long childNodeCount() const;
     virtual NodeImpl *childNode(unsigned long index);
 
     virtual void insertedIntoDocument();
@@ -536,29 +559,39 @@ class NodeImpl;
 class NodeListImpl : public khtml::Shared<NodeListImpl>
 {
 public:
-    virtual ~NodeListImpl() {}
+    NodeListImpl( NodeImpl *_rootNode );
+    virtual ~NodeListImpl();
 
     // DOM methods & attributes for NodeList
-    virtual unsigned long length() const;
-    virtual NodeImpl *item ( unsigned long index ) const;
+    virtual unsigned long length() const = 0;
+    virtual NodeImpl *item ( unsigned long index ) const = 0;
+    virtual NodeImpl *itemById ( const DOMString & elementId ) const;
 
     // Other methods (not part of DOM)
+
+    void rootNodeSubtreeModified();
 
 #if APPLE_CHANGES
     static NodeList createInstance(NodeListImpl *impl);
 #endif
 protected:
     // helper functions for searching all ElementImpls in a tree
-    unsigned long recursiveLength(NodeImpl *start) const;
-    NodeImpl *recursiveItem ( NodeImpl *start, unsigned long &offset ) const;
+    unsigned long recursiveLength(NodeImpl *start = 0) const;
+    NodeImpl *recursiveItem ( unsigned long offset, NodeImpl *start = 0 ) const;
     virtual bool nodeMatches( NodeImpl *testNode ) const = 0;
+
+    NodeImpl *rootNode;
+    mutable int cachedLength;
+    mutable NodeImpl *lastItem;
+    mutable unsigned long lastItemOffset;
+    mutable bool isLengthCacheValid : 1;
+    mutable bool isItemCacheValid : 1;
 };
 
 class ChildNodeListImpl : public NodeListImpl
 {
 public:
     ChildNodeListImpl( NodeImpl *n);
-    virtual ~ChildNodeListImpl();
 
     // DOM methods overridden from  parent classes
 
@@ -567,8 +600,6 @@ public:
 
 protected:
     virtual bool nodeMatches( NodeImpl *testNode ) const;
-
-    NodeImpl *refNode;
 };
 
 
@@ -579,7 +610,6 @@ class TagNodeListImpl : public NodeListImpl
 {
 public:
     TagNodeListImpl( NodeImpl *n, NodeImpl::Id tagId, NodeImpl::Id tagIdMask );
-    virtual ~TagNodeListImpl();
 
     // DOM methods overridden from  parent classes
 
@@ -591,7 +621,6 @@ public:
 protected:
     virtual bool nodeMatches( NodeImpl *testNode ) const;
 
-    NodeImpl *refNode;
     NodeImpl::Id m_id;
     NodeImpl::Id m_idMask;
 };
@@ -604,7 +633,6 @@ class NameNodeListImpl : public NodeListImpl
 {
 public:
     NameNodeListImpl( NodeImpl *doc, const DOMString &t );
-    virtual ~NameNodeListImpl();
 
     // DOM methods overridden from  parent classes
 
@@ -616,7 +644,6 @@ public:
 protected:
     virtual bool nodeMatches( NodeImpl *testNode ) const;
 
-    NodeImpl *refNode;
     DOMString nodeName;
 };
 

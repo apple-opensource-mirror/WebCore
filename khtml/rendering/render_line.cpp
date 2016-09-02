@@ -63,9 +63,8 @@ public:
         m_markupBox = markupBox;
     }
     
-    void paint(RenderObject::PaintInfo& i, int _tx, int _ty);
-    bool nodeAtPoint(RenderObject::NodeInfo& info, int _x, int _y, int _tx, int _ty,
-                     HitTestAction hitTestAction, bool inBox);
+    virtual void paint(RenderObject::PaintInfo& i, int _tx, int _ty);
+    virtual bool nodeAtPoint(RenderObject::NodeInfo& info, int _x, int _y, int _tx, int _ty);
 
 private:
     DOM::AtomicString m_str;
@@ -130,6 +129,7 @@ void InlineBox::dirtyLineBoxes()
 
 void InlineBox::deleteLine(RenderArena* arena)
 {
+    m_object->setInlineBoxWrapper(0);
     detach(arena);
 }
 
@@ -151,6 +151,37 @@ void InlineBox::adjustPosition(int dx, int dy)
     m_y += dy;
     if (m_object->isReplaced() || m_object->isBR())
         m_object->setPos(m_object->xPos() + dx, m_object->yPos() + dy);
+}
+
+void InlineBox::paint(RenderObject::PaintInfo& i, int tx, int ty)
+{
+    if (!object()->shouldPaintWithinRoot(i) || i.phase == PaintActionOutline)
+        return;
+
+    // Paint all phases of replaced elements atomically, as though the replaced element established its
+    // own stacking context.  (See Appendix E.2, section 6.4 on inline block/table elements in the CSS2.1
+    // specification.)
+    bool paintSelectionOnly = i.phase == PaintActionSelection;
+    RenderObject::PaintInfo info(i.p, i.r, paintSelectionOnly ? i.phase : PaintActionBlockBackground, i.paintingRoot);
+    object()->paint(info, tx, ty);
+    if (!paintSelectionOnly) {
+        info.phase = PaintActionChildBlockBackgrounds;
+        object()->paint(info, tx, ty);
+        info.phase = PaintActionFloat;
+        object()->paint(info, tx, ty);
+        info.phase = PaintActionForeground;
+        object()->paint(info, tx, ty);
+        info.phase = PaintActionOutline;
+        object()->paint(info, tx, ty);
+    }
+}
+
+bool InlineBox::nodeAtPoint(RenderObject::NodeInfo& i, int x, int y, int tx, int ty)
+{
+    // Hit test all phases of replaced elements atomically, as though the replaced element established its
+    // own stacking context.  (See Appendix E.2, section 6.4 on inline block/table elements in the CSS2.1
+    // specification.)
+    return object()->hitTest(i, x, y, tx, ty);
 }
 
 RootInlineBox* InlineBox::root()
@@ -192,20 +223,19 @@ InlineBox* InlineBox::lastLeafChild()
     return this;
 }
 
-InlineBox* InlineBox::closestLeafChildForXPos(int _x, int _tx)
+InlineBox* InlineBox::nextLeafChild()
 {
-    if (!isInlineFlowBox())
-        return this;
-    
-    InlineFlowBox *flowBox = static_cast<InlineFlowBox*>(this);
-    if (!flowBox->firstChild())
-        return this;
+    return parent() ? parent()->firstLeafChildAfterBox(this) : 0;
+}
 
-    InlineBox *box = flowBox->closestChildForXPos(_x, _tx);
-    if (!box)
-        return this;
-    
-    return box->closestLeafChildForXPos(_x, _tx);
+InlineBox* InlineBox::prevLeafChild()
+{
+    return parent() ? parent()->lastLeafChildBeforeBox(this) : 0;
+}
+
+RenderObject::SelectionState InlineBox::selectionState()
+{
+    return object()->selectionState();
 }
 
 bool InlineBox::canAccommodateEllipsis(bool ltr, int blockEdge, int ellipsisWidth)
@@ -223,6 +253,11 @@ int InlineBox::placeEllipsisBox(bool ltr, int blockEdge, int ellipsisWidth, bool
 {
     // Use -1 to mean "we didn't set the position."
     return -1;
+}
+
+RenderFlow* InlineFlowBox::flowObject()
+{
+    return static_cast<RenderFlow*>(m_object);
 }
 
 int InlineFlowBox::marginLeft()
@@ -267,6 +302,22 @@ int InlineFlowBox::getFlowSpacingWidth()
             totWidth += static_cast<InlineFlowBox*>(curr)->getFlowSpacingWidth();
     }
     return totWidth;
+}
+
+void InlineFlowBox::addToLine(InlineBox* child) {
+    if (!m_firstChild)
+        m_firstChild = m_lastChild = child;
+    else {
+        m_lastChild->m_next = child;
+        child->m_prev = m_lastChild;
+        m_lastChild = child;
+    }
+    child->setFirstLineStyleBit(m_firstLine);
+    child->setParent(this);
+    if (child->isText())
+        m_hasTextChildren = true;
+    if (child->object()->selectionState() != RenderObject::SelectionNone)
+        root()->setHasSelectedChildren(true);
 }
 
 void InlineFlowBox::removeChild(InlineBox* child)
@@ -403,10 +454,11 @@ void InlineFlowBox::determineSpacingForFlowBoxes(bool lastLine, RenderObject* en
     }
 }
 
-int InlineFlowBox::placeBoxesHorizontally(int x)
+int InlineFlowBox::placeBoxesHorizontally(int x, int& leftPosition, int& rightPosition)
 {
     // Set our x position.
     setXPos(x);
+    leftPosition = kMin(x, leftPosition);
 
     int startX = x;
     x += borderLeft() + paddingLeft();
@@ -415,38 +467,38 @@ int InlineFlowBox::placeBoxesHorizontally(int x)
         if (curr->object()->isText()) {
             InlineTextBox* text = static_cast<InlineTextBox*>(curr);
             text->setXPos(x);
+            leftPosition = kMin(x, leftPosition);
+            rightPosition = kMax(x + text->width(), rightPosition);
             x += text->width();
         }
         else {
             if (curr->object()->isPositioned()) {
                 if (curr->object()->parent()->style()->direction() == LTR)
                     curr->setXPos(x);
-                else {
+                else
                     // Our offset that we cache needs to be from the edge of the right border box and
                     // not the left border box.  We have to subtract |x| from the width of the block
-                    // (which can be obtained by walking up to the root line box).
-                    InlineBox* root = this;
-                    while (!root->isRootInlineBox())
-                        root = root->parent();
-                    curr->setXPos(root->object()->width()-x);
-                }
+                    // (which can be obtained from the root line box).
+                    curr->setXPos(root()->object()->width()-x);
                 continue; // The positioned object has no effect on the width.
             }
             if (curr->object()->isInlineFlow()) {
                 InlineFlowBox* flow = static_cast<InlineFlowBox*>(curr);
                 if (curr->object()->isCompact()) {
                     int ignoredX = x;
-                    flow->placeBoxesHorizontally(ignoredX);
+                    flow->placeBoxesHorizontally(ignoredX, leftPosition, rightPosition);
                 }
                 else {
                     x += flow->marginLeft();
-                    x = flow->placeBoxesHorizontally(x);
+                    x = flow->placeBoxesHorizontally(x, leftPosition, rightPosition);
                     x += flow->marginRight();
                 }
             }
             else if (!curr->object()->isCompact()) {
                 x += curr->object()->marginLeft();
                 curr->setXPos(x);
+                leftPosition = kMin(x, leftPosition);
+                rightPosition = kMax(x + curr->width(), rightPosition);
                 x += curr->width() + curr->object()->marginRight();
             }
         }
@@ -454,6 +506,8 @@ int InlineFlowBox::placeBoxesHorizontally(int x)
 
     x += borderRight() + paddingRight();
     setWidth(x-startX);
+    rightPosition = kMax(xPos() + width(), rightPosition);
+
     return x;
 }
 
@@ -469,7 +523,7 @@ void InlineFlowBox::verticallyAlignBoxes(int& heightOfBlock)
     RenderObject* curr = object();
     while (curr && !curr->element())
         curr = curr->container();
-    bool strictMode = (curr && curr->element()->getDocument()->inStrictMode());
+    bool strictMode = (curr && curr->document()->inStrictMode());
     
     computeLogicalBoxHeights(maxPositionTop, maxPositionBottom, maxAscent, maxDescent, strictMode);
 
@@ -481,7 +535,7 @@ void InlineFlowBox::verticallyAlignBoxes(int& heightOfBlock)
     int bottomPosition = heightOfBlock;
     placeBoxesVertically(heightOfBlock, maxHeight, maxAscent, strictMode, topPosition, bottomPosition);
 
-    setOverflowPositions(topPosition, bottomPosition);
+    setVerticalOverflowPositions(topPosition, bottomPosition);
 
     // Shrink boxes with no text children in quirks and almost strict mode.
     if (!strictMode)
@@ -599,7 +653,7 @@ void InlineFlowBox::placeBoxesVertically(int y, int maxHeight, int maxAscent, bo
         int newY = curr->yPos();
         int newHeight = curr->height();
         int newBaseline = curr->baseline();
-        if (curr->isInlineTextBox() || curr->isInlineFlowBox()) {
+        if (curr->isText() || curr->isInlineFlowBox()) {
             const QFontMetrics &fm = curr->object()->fontMetrics( m_firstLine );
             newBaseline = fm.ascent();
             newY += curr->baseline() - newBaseline;
@@ -611,7 +665,7 @@ void InlineFlowBox::placeBoxesVertically(int y, int maxHeight, int maxAscent, bo
                 newBaseline += curr->object()->borderTop() + curr->object()->paddingTop();
             }	
         }
-        else {
+        else if (!curr->object()->isBR()) {
             newY += curr->object()->marginTop();
             newHeight = curr->height() - (curr->object()->marginTop() + curr->object()->marginBottom());
         }
@@ -664,8 +718,113 @@ void InlineFlowBox::shrinkBoxesWithNoTextChildren(int topPos, int bottomPos)
     }
 }
 
-void InlineFlowBox::paintBackgroundAndBorder(RenderObject::PaintInfo& i, int _tx, int _ty, int xOffsetOnLine)
+bool InlineFlowBox::nodeAtPoint(RenderObject::NodeInfo& i, int x, int y, int tx, int ty)
 {
+    // Check children first.
+    for (InlineBox* curr = lastChild(); curr; curr = curr->prevOnLine()) {
+        if (!curr->object()->layer() && curr->nodeAtPoint(i, x, y, tx, ty)) {
+            object()->setInnerNode(i);
+            return true;
+        }
+    }
+
+    // Now check ourselves.
+    QRect rect(tx + m_x, ty + m_y, m_width, m_height);
+    if (object()->style()->visibility() == VISIBLE && rect.contains(x, y)) {
+        object()->setInnerNode(i);
+        return true;
+    }
+    
+    return false;
+}
+
+void InlineFlowBox::paint(RenderObject::PaintInfo& i, int tx, int ty)
+{
+    bool intersectsDamageRect = true;
+    int xPos = tx + m_x - object()->maximalOutlineSize(i.phase);
+    int w = width() + 2 * object()->maximalOutlineSize(i.phase);
+    if ((xPos >= i.r.x() + i.r.width()) || (xPos + w <= i.r.x()))
+        intersectsDamageRect = false;
+    
+    if (intersectsDamageRect) {
+        if (i.phase == PaintActionOutline) {
+            // Add ourselves to the paint info struct's list of inlines that need to paint their
+            // outlines.
+            if (object()->style()->visibility() == VISIBLE && object()->style()->outlineWidth() > 0 &&
+                !object()->isInlineContinuation()) {
+                if (!i.outlineObjects)
+                    i.outlineObjects = new QPtrDict<RenderFlow>;
+                if (!i.outlineObjects->find(flowObject()))
+                    i.outlineObjects->insert(flowObject(), flowObject());
+            }
+        }
+        else {
+            // 1. Paint our background and border.
+            paintBackgroundAndBorder(i, tx, ty);
+            
+            // 2. Paint our underline and overline.
+            paintDecorations(i, tx, ty, false);
+        }
+    }
+
+    // 3. Paint our children.
+    for (InlineBox* curr = firstChild(); curr; curr = curr->nextOnLine()) {
+        if (!curr->object()->layer())
+            curr->paint(i, tx, ty);
+    }
+
+    // 4. Paint our strike-through
+    if (intersectsDamageRect && i.phase != PaintActionOutline)
+        paintDecorations(i, tx, ty, true);
+}
+
+void InlineFlowBox::paintBackgrounds(QPainter* p, const QColor& c, const BackgroundLayer* bgLayer,
+                                     int my, int mh, int _tx, int _ty, int w, int h)
+{
+    if (!bgLayer)
+        return;
+    paintBackgrounds(p, c, bgLayer->next(), my, mh, _tx, _ty, w, h);
+    paintBackground(p, c, bgLayer, my, mh, _tx, _ty, w, h);
+}
+
+void InlineFlowBox::paintBackground(QPainter* p, const QColor& c, const BackgroundLayer* bgLayer,
+                                    int my, int mh, int _tx, int _ty, int w, int h)
+{
+    CachedImage* bg = bgLayer->backgroundImage();
+    bool hasBackgroundImage = bg && (bg->pixmap_size() == bg->valid_rect().size()) &&
+                              !bg->isTransparent() && !bg->isErrorImage();
+    if (!hasBackgroundImage || (!prevLineBox() && !nextLineBox()) || !parent())
+        object()->paintBackgroundExtended(p, c, bgLayer, my, mh, _tx, _ty, w, h, borderLeft(), borderRight());
+    else {
+        // We have a background image that spans multiple lines.
+        // We need to adjust _tx and _ty by the width of all previous lines.
+        // Think of background painting on inlines as though you had one long line, a single continuous
+        // strip.  Even though that strip has been broken up across multiple lines, you still paint it
+        // as though you had one single line.  This means each line has to pick up the background where
+        // the previous line left off.
+        int xOffsetOnLine = 0;
+        for (InlineRunBox* curr = prevLineBox(); curr; curr = curr->prevLineBox())
+            xOffsetOnLine += curr->width();
+        int startX = _tx - xOffsetOnLine;
+        int totalWidth = xOffsetOnLine;
+        for (InlineRunBox* curr = this; curr; curr = curr->nextLineBox())
+            totalWidth += curr->width();
+        QRect clipRect(_tx, _ty, width(), height());
+        clipRect = p->xForm(clipRect);
+        p->save();
+        p->addClip(clipRect);
+        object()->paintBackgroundExtended(p, c, bgLayer, my, mh, startX, _ty,
+                                          totalWidth, h, borderLeft(), borderRight());
+        p->restore();
+    }
+}
+
+void InlineFlowBox::paintBackgroundAndBorder(RenderObject::PaintInfo& i, int _tx, int _ty)
+{
+    if (!object()->shouldPaintWithinRoot(i) || object()->style()->visibility() != VISIBLE ||
+        i.phase != PaintActionForeground)
+        return;
+
     // Move x/y to our coordinates.
     _tx += m_x;
     _ty += m_y;
@@ -687,34 +846,8 @@ void InlineFlowBox::paintBackgroundAndBorder(RenderObject::PaintInfo& i, int _tx
     RenderStyle* styleToUse = object()->style(m_firstLine);
     if ((!parent() && m_firstLine && styleToUse != object()->style()) || 
         (parent() && object()->shouldPaintBackgroundOrBorder())) {
-        CachedImage* bg = styleToUse->backgroundImage();
-        bool hasBackgroundImage = bg && (bg->pixmap_size() == bg->valid_rect().size()) &&
-                                  !bg->isTransparent() && !bg->isErrorImage();
-        if (!hasBackgroundImage || (!prevLineBox() && !nextLineBox()) || !parent())
-            object()->paintBackgroundExtended(p, styleToUse->backgroundColor(),
-                                              bg, my, mh, _tx, _ty, w, h,
-                                              borderLeft(), borderRight());
-        else {
-            // We have a background image that spans multiple lines.
-            // We need to adjust _tx and _ty by the width of all previous lines.
-            // Think of background painting on inlines as though you had one long line, a single continuous
-            // strip.  Even though that strip has been broken up across multiple lines, you still paint it
-            // as though you had one single line.  This means each line has to pick up the background where
-            // the previous line left off.
-            int startX = _tx - xOffsetOnLine;
-            int totalWidth = xOffsetOnLine;
-            for (InlineRunBox* curr = this; curr; curr = curr->nextLineBox())
-                totalWidth += curr->width();
-            QRect clipRect(_tx, _ty, width(), height());
-            clipRect = p->xForm(clipRect);
-            p->save();
-            p->addClip(clipRect);
-            object()->paintBackgroundExtended(p, object()->style()->backgroundColor(),
-                                              object()->style()->backgroundImage(), my, mh, startX, _ty,
-                                              totalWidth, h,
-                                              borderLeft(), borderRight());
-            p->restore();
-        }
+        QColor c = styleToUse->backgroundColor();
+        paintBackgrounds(p, c, styleToUse->backgroundLayers(), my, mh, _tx, _ty, w, h);
 
         // :first-line cannot be used to put borders on a line. Always paint borders with our
         // non-first-line style.
@@ -743,8 +876,12 @@ static bool shouldDrawDecoration(RenderObject* obj)
 
 void InlineFlowBox::paintDecorations(RenderObject::PaintInfo& i, int _tx, int _ty, bool paintedChildren)
 {
-    // Now paint our text decorations. We only do this if we aren't in quirks mode (i.e., in
+    // Paint text decorations like underlines/overlines. We only do this if we aren't in quirks mode (i.e., in
     // almost-strict mode or strict mode).
+    if (object()->style()->htmlHacks() || !object()->shouldPaintWithinRoot(i) ||
+        object()->style()->visibility() != VISIBLE)
+        return;
+
     QPainter* p = i.p;
     _tx += m_x;
     _ty += m_y;
@@ -817,51 +954,37 @@ void InlineFlowBox::paintDecorations(RenderObject::PaintInfo& i, int _tx, int _t
 
 InlineBox* InlineFlowBox::firstLeafChild()
 {
-    InlineBox *box = firstChild();
-    while (box) {
-        InlineBox* next = 0;
-        if (!box->isInlineFlowBox())
-            break;
-        next = static_cast<InlineFlowBox*>(box)->firstChild();
-        if (!next)
-            break;
-        box = next;
-    }
-    return box;
+    return firstLeafChildAfterBox();
 }
 
 InlineBox* InlineFlowBox::lastLeafChild()
 {
-    InlineBox *box = lastChild();
-    while (box) {
-        InlineBox* next = 0;
-        if (!box->isInlineFlowBox())
-            break;
-        next = static_cast<InlineFlowBox*>(box)->lastChild();
-        if (!next)
-            break;
-        box = next;
-    }
-    return box;
+    return lastLeafChildBeforeBox();
 }
 
-InlineBox* InlineFlowBox::closestChildForXPos(int _x, int _tx)
+InlineBox* InlineFlowBox::firstLeafChildAfterBox(InlineBox* start)
 {
-    if (_x < _tx + firstChild()->m_x)
-        // if the x coordinate is to the left of the first child
-        return firstChild(); 
-    else if (_x >= _tx + lastChild()->m_x + lastChild()->m_width)
-        // if the x coordinate is to the right of the last child
-        return lastChild(); 
-    else
-        // look for the closest child;
-        // check only the right edges, since the left edge of the first
-        // box has already been checked
-        for (InlineBox *box = firstChild(); box; box = box->nextOnLine())
-            if (_x < _tx + box->m_x + box->m_width)
-                return box;
+    InlineBox* leaf = 0;
+    for (InlineBox* box = start ? start->nextOnLine() : firstChild(); box && !leaf; box = box->nextOnLine())
+        leaf = box->firstLeafChild();
+    if (start && !leaf && parent())
+        return parent()->firstLeafChildAfterBox(this);
+    return leaf;
+}
 
-    return 0;
+InlineBox* InlineFlowBox::lastLeafChildBeforeBox(InlineBox* start)
+{
+    InlineBox* leaf = 0;
+    for (InlineBox* box = start ? start->prevOnLine() : lastChild(); box && !leaf; box = box->prevOnLine())
+        leaf = box->lastLeafChild();
+    if (start && !leaf && parent())
+        return parent()->lastLeafChildBeforeBox(this);
+    return leaf;
+}
+
+RenderObject::SelectionState InlineFlowBox::selectionState()
+{
+    return RenderObject::SelectionNone;
 }
 
 bool InlineFlowBox::canAccommodateEllipsis(bool ltr, int blockEdge, int ellipsisWidth)
@@ -923,20 +1046,28 @@ void EllipsisBox::paint(RenderObject::PaintInfo& i, int _tx, int _ty)
         // Paint the markup box
         _tx += m_x + m_width - m_markupBox->xPos();
         _ty += m_y + m_baseline - (m_markupBox->yPos() + m_markupBox->baseline());
-        m_markupBox->object()->paint(i, _tx, _ty);
+        m_markupBox->paint(i, _tx, _ty);
     }
 }
 
-bool EllipsisBox::nodeAtPoint(RenderObject::NodeInfo& info, int _x, int _y, int _tx, int _ty,
-                              HitTestAction hitTestAction, bool inBox)
+bool EllipsisBox::nodeAtPoint(RenderObject::NodeInfo& info, int _x, int _y, int _tx, int _ty)
 {
+    // Hit test the markup box.
     if (m_markupBox) {
         _tx += m_x + m_width - m_markupBox->xPos();
         _ty += m_y + m_baseline - (m_markupBox->yPos() + m_markupBox->baseline());
-        inBox |= m_markupBox->object()->nodeAtPoint(info, _x, _y, _tx, _ty, hitTestAction, inBox);
+        if (m_markupBox->nodeAtPoint(info, _x, _y, _tx, _ty)) {
+            object()->setInnerNode(info);
+            return true;
+        }
     }
-    
-    return inBox;
+
+    QRect rect(_tx + m_x, _ty + m_y, m_width, m_height);
+    if (object()->style()->visibility() == VISIBLE && rect.contains(_x, _y)) {
+        object()->setInnerNode(info);
+        return true;
+    }
+    return false;
 }
 
 void RootInlineBox::detach(RenderArena* arena)
@@ -1004,16 +1135,26 @@ int RootInlineBox::placeEllipsisBox(bool ltr, int blockEdge, int ellipsisWidth, 
 
 void RootInlineBox::paintEllipsisBox(RenderObject::PaintInfo& i, int _tx, int _ty) const
 {
-    if (m_ellipsisBox)
+    if (m_ellipsisBox && object()->shouldPaintWithinRoot(i) && object()->style()->visibility() == VISIBLE &&
+        i.phase == PaintActionForeground)
         m_ellipsisBox->paint(i, _tx, _ty);
 }
 
-bool RootInlineBox::hitTestEllipsisBox(RenderObject::NodeInfo& info, int _x, int _y, int _tx, int _ty,
-                                       HitTestAction hitTestAction, bool inBox)
+void RootInlineBox::paint(RenderObject::PaintInfo& i, int tx, int ty)
 {
-    if (m_ellipsisBox)
-        inBox |= m_ellipsisBox->nodeAtPoint(info, _x, _y, _tx, _ty, hitTestAction, inBox);
-    return inBox;
+    InlineFlowBox::paint(i, tx, ty);
+    paintEllipsisBox(i, tx, ty);
+}
+
+bool RootInlineBox::nodeAtPoint(RenderObject::NodeInfo& i, int x, int y, int tx, int ty)
+{
+    if (m_ellipsisBox && object()->style()->visibility() == VISIBLE) {
+        if (m_ellipsisBox->nodeAtPoint(i, x, y, tx, ty)) {
+            object()->setInnerNode(i);
+            return true;
+        }
+    }
+    return InlineFlowBox::nodeAtPoint(i, x, y, tx, ty);
 }
 
 void RootInlineBox::adjustPosition(int dx, int dy)
@@ -1036,4 +1177,143 @@ void RootInlineBox::childRemoved(InlineBox* box)
     }
 }
 
+GapRects RootInlineBox::fillLineSelectionGap(int selTop, int selHeight, RenderBlock* rootBlock, int blockX, int blockY, int tx, int ty, 
+                                             const RenderObject::PaintInfo* i)
+{
+    GapRects result;
+    RenderObject::SelectionState lineState = selectionState();
+
+    bool leftGap, rightGap;
+    block()->getHorizontalSelectionGapInfo(lineState, leftGap, rightGap);
+
+    InlineBox* firstBox = firstSelectedBox();
+    InlineBox* lastBox = lastSelectedBox();
+    if (leftGap)
+        result.uniteLeft(block()->fillLeftSelectionGap(firstBox->parent()->object(), 
+                                                       firstBox->xPos(), selTop, selHeight, 
+                                                       rootBlock, blockX, blockY, tx, ty, i));
+    if (rightGap)
+        result.uniteRight(block()->fillRightSelectionGap(lastBox->parent()->object(), 
+                                                         lastBox->xPos() + lastBox->width(), selTop, selHeight, 
+                                                         rootBlock, blockX, blockY, tx, ty, i));
+
+    if (firstBox && firstBox != lastBox) {
+        // Now fill in any gaps on the line that occurred between two selected elements.
+        int lastX = firstBox->xPos() + firstBox->width();
+        for (InlineBox* box = firstBox->nextLeafChild(); box; box = box->nextLeafChild()) {
+            if (box->selectionState() != RenderObject::SelectionNone) {
+                result.uniteCenter(block()->fillHorizontalSelectionGap(box->parent()->object(),
+                                                                       lastX + tx, selTop + ty,
+                                                                       box->xPos() - lastX, selHeight, i));
+                lastX = box->xPos() + box->width();
+            }
+            if (box == lastBox)
+                break;
+        }
+    }
+      
+    return result;
 }
+
+void RootInlineBox::setHasSelectedChildren(bool b)
+{
+    if (m_hasSelectedChildren == b)
+        return;
+    m_hasSelectedChildren = b;
+}
+
+RenderObject::SelectionState RootInlineBox::selectionState()
+{
+    // Walk over all of the selected boxes.
+    RenderObject::SelectionState state = RenderObject::SelectionNone;
+    for (InlineBox* box = firstLeafChild(); box; box = box->nextLeafChild()) {
+        RenderObject::SelectionState boxState = box->selectionState();
+        if ((boxState == RenderObject::SelectionStart && state == RenderObject::SelectionEnd) ||
+            (boxState == RenderObject::SelectionEnd && state == RenderObject::SelectionStart))
+            state = RenderObject::SelectionBoth;
+        else if (state == RenderObject::SelectionNone ||
+                 ((boxState == RenderObject::SelectionStart || boxState == RenderObject::SelectionEnd) &&
+                  (state == RenderObject::SelectionNone || state == RenderObject::SelectionInside)))
+            state = boxState;
+        if (state == RenderObject::SelectionBoth)
+            break;
+    }
+    
+    return state;
+}
+
+InlineBox* RootInlineBox::firstSelectedBox()
+{
+    for (InlineBox* box = firstLeafChild(); box; box = box->nextLeafChild())
+        if (box->selectionState() != RenderObject::SelectionNone)
+            return box;
+    return 0;
+}
+
+InlineBox* RootInlineBox::lastSelectedBox()
+{
+    for (InlineBox* box = lastLeafChild(); box; box = box->prevLeafChild())
+        if (box->selectionState() != RenderObject::SelectionNone)
+            return box;
+    return 0;
+}
+
+int RootInlineBox::selectionTop()
+{
+    if (!prevRootBox())
+        return topOverflow();
+    
+    int prevBottom = prevRootBox()->bottomOverflow();
+    if (prevBottom < m_topOverflow && block()->containsFloats()) {
+        // This line has actually been moved further down, probably from a large line-height, but possibly because the
+        // line was forced to clear floats.  If so, let's check the offsets, and only be willing to use the previous
+        // line's bottom overflow if the offsets are greater on both sides.
+        int prevLeft = block()->leftOffset(prevBottom);
+        int prevRight = block()->rightOffset(prevBottom);
+        int newLeft = block()->leftOffset(m_topOverflow);
+        int newRight = block()->rightOffset(m_topOverflow);
+        if (prevLeft > newLeft || prevRight < newRight)
+            return m_topOverflow;
+    }
+    
+    return prevBottom;
+}
+ 
+RenderBlock* RootInlineBox::block() const
+{
+    return static_cast<RenderBlock*>(m_object);
+}
+
+InlineBox* RootInlineBox::closestLeafChildForXPos(int _x, int _tx)
+{
+    InlineBox *firstLeaf = firstLeafChildAfterBox();
+    InlineBox *lastLeaf = lastLeafChildBeforeBox();
+    if (firstLeaf == lastLeaf)
+        return firstLeaf;
+    
+    // Avoid returning a list marker when possible.
+    if (_x <= _tx + firstLeaf->m_x && !firstLeaf->object()->isListMarker())
+        // The x coordinate is less or equal to left edge of the firstLeaf.
+        // Return it.
+        return firstLeaf;
+    
+    if (_x >= _tx + lastLeaf->m_x + lastLeaf->m_width && !lastLeaf->object()->isListMarker())
+        // The x coordinate is greater or equal to right edge of the lastLeaf.
+        // Return it.
+        return lastLeaf;
+
+    for (InlineBox *leaf = firstLeaf; leaf && leaf != lastLeaf; leaf = leaf->nextLeafChild()) {
+        if (!leaf->object()->isListMarker()) {
+            int leafX = _tx + leaf->m_x;
+            if (_x < leafX + leaf->m_width)
+                // The x coordinate is less than the right edge of the box.
+                // Return it.
+                return leaf;
+        }
+    }
+
+    return lastLeaf;
+}
+
+}
+

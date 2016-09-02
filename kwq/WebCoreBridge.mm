@@ -25,33 +25,42 @@
 
 #import "WebCoreBridge.h"
 
+#include <CoreFoundation/CFCharacterSetPriv.h>
+
 #import "csshelper.h"
-#import "dom_node.h"
-#import "dom_docimpl.h"
-#import "dom_nodeimpl.h"
-#import "dom_position.h"
-#import "dom_selection.h"
 #import "dom2_eventsimpl.h"
+#import "dom2_range.h"
 #import "dom2_rangeimpl.h"
 #import "dom2_viewsimpl.h"
-#import "htmlediting.h"
+#import "dom_docimpl.h"
+#import "dom_node.h"
+#import "dom_nodeimpl.h"
+#import "dom_position.h"
 #import "html_documentimpl.h"
 #import "html_formimpl.h"
 #import "html_imageimpl.h"
 #import "htmlattrs.h"
+#import "htmlediting.h"
 #import "htmltags.h"
 #import "khtml_part.h"
 #import "khtmlview.h"
 #import "kjs_proxy.h"
 #import "kjs_window.h"
 #import "loader.h"
+#import "markup.h"
+#import "render_canvas.h"
 #import "render_frames.h"
 #import "render_image.h"
 #import "render_object.h"
-#import "render_canvas.h"
-#import "render_style.h"
 #import "render_replaced.h"
+#import "render_style.h"
+#import "selection.h"
+#import "visible_position.h"
+#import "visible_text.h"
+#import "visible_units.h"
+#import "xml_tokenizer.h"
 
+#import <JavaScriptCore/npruntime.h>
 #import <JavaScriptCore/jni_jsobject.h>
 #import <JavaScriptCore/object.h>
 #import <JavaScriptCore/runtime_root.h>
@@ -79,9 +88,10 @@
 #import "WebCoreViewFactory.h"
 #import "WebCoreSettings.h"
 
-#import <AppKit/NSView.h>
+@class NSView;
 
 using DOM::AtomicString;
+using DOM::CSSStyleDeclarationImpl;
 using DOM::DocumentFragmentImpl;
 using DOM::DocumentImpl;
 using DOM::DocumentTypeImpl;
@@ -97,26 +107,39 @@ using DOM::Node;
 using DOM::NodeImpl;
 using DOM::Position;
 using DOM::Range;
-using DOM::Selection;
 
+using khtml::ChildrenOnly;
+using khtml::createMarkup;
 using khtml::Decoder;
 using khtml::DeleteSelectionCommand;
-using khtml::EditCommand;
-using khtml::EditCommandImpl;
+using khtml::DOWNSTREAM;
+using khtml::EAffinity;
+using khtml::EditAction;
+using khtml::EditCommandPtr;
+using khtml::ETextGranularity;
+using khtml::IncludeNode;
 using khtml::MoveSelectionCommand;
-using khtml::ReplaceSelectionCommand;
 using khtml::parseURL;
-using khtml::ApplyStyleCommand;
 using khtml::RenderCanvas;
 using khtml::RenderImage;
 using khtml::RenderObject;
 using khtml::RenderPart;
 using khtml::RenderStyle;
 using khtml::RenderWidget;
+using khtml::ReplaceSelectionCommand;
+using khtml::Selection;
+using khtml::setAffinityUsingLinePosition;
+using khtml::Tokenizer;
+using khtml::TextIterator;
 using khtml::TypingCommand;
+using khtml::UPSTREAM;
+using khtml::VisiblePosition;
 
+using KJS::ExecState;
+using KJS::ObjectImp;
 using KJS::SavedProperties;
 using KJS::SavedBuiltins;
+using KJS::Window;
 
 using KParts::URLArgs;
 
@@ -138,26 +161,25 @@ NSString *WebCoreElementTitleKey =              @"WebCoreElementTitle"; // not i
 
 NSString *WebCorePageCacheStateKey =            @"WebCorePageCacheState";
 
+@interface WebCoreBridge (WebCoreBridgeInternal)
+- (RootObject *)executionContextForView:(NSView *)aView;
+@end
+
 static RootObject *rootForView(void *v)
 {
     NSView *aView = (NSView *)v;
     WebCoreBridge *aBridge = [[WebCoreViewFactory sharedFactory] bridgeForView:aView];
-    if (aBridge) {
-        KWQKHTMLPart *part = [aBridge part];
-        RootObject *root = new RootObject(v);    // The root gets deleted by JavaScriptCore.
-        
-        root->setRootObjectImp (static_cast<KJS::ObjectImp *>(KJS::Window::retrieveWindow(part)));
-        root->setInterpreter (KJSProxy::proxy(part)->interpreter());
-        part->addPluginRootObject (root);
-            
-        return root;
-    }
-    return 0;
+    RootObject *root = 0;
+
+    if (aBridge)
+        root = [aBridge executionContextForView:aView];
+
+    return root;
 }
 
 static pthread_t mainThread = 0;
 
-static void updateRenderingForBindings (KJS::ExecState *exec, KJS::ObjectImp *rootObject)
+static void updateRenderingForBindings (ExecState *exec, ObjectImp *rootObject)
 {
     if (pthread_self() != mainThread)
         return;
@@ -165,7 +187,7 @@ static void updateRenderingForBindings (KJS::ExecState *exec, KJS::ObjectImp *ro
     if (!rootObject)
         return;
         
-    KJS::Window *window = static_cast<KJS::Window*>(rootObject);
+    Window *window = static_cast<Window*>(rootObject);
     if (!window)
         return;
         
@@ -174,6 +196,29 @@ static void updateRenderingForBindings (KJS::ExecState *exec, KJS::ObjectImp *ro
         doc->updateRendering();
 }
 
+static BOOL partHasSelection(WebCoreBridge *bridge)
+{
+    if (!bridge)
+        return NO;
+    
+    KHTMLPart *part = bridge->_part;
+    if (!part)
+        return NO;
+        
+    if (part->selection().isNone())
+        return NO;
+
+    // If a part has a selection, it should also have a document.        
+    ASSERT(part->xmlDocImpl());
+
+    return YES;
+}
+
+static BOOL hasCaseInsensitivePrefix(NSString *string, NSString *prefix)
+{
+    return [string rangeOfString:prefix options:(NSCaseInsensitiveSearch | NSAnchoredSearch)].location !=
+        NSNotFound;
+}
 
 @implementation WebCoreBridge
 
@@ -200,8 +245,8 @@ static bool initializedKJS = FALSE;
     if (!initializedKJS) {
         mainThread = pthread_self();
         
-        KJS::Bindings::RootObject::setFindRootObjectForNativeHandleFunction (rootForView);
-        
+        RootObject::setFindRootObjectForNativeHandleFunction (rootForView);
+
         KJS::Bindings::Instance::setDidExecuteFunction(updateRenderingForBindings);
         
         initializedKJS = TRUE;
@@ -281,7 +326,7 @@ static bool initializedKJS = FALSE;
     if (pageCache) {
         KWQPageState *state = [pageCache objectForKey:WebCorePageCacheStateKey];
         _part->openURLFromPageCache(state);
-        [state invalidate];
+	[state invalidate];
         return;
     }
         
@@ -330,9 +375,29 @@ static bool initializedKJS = FALSE;
     _part->closeURL();
 }
 
-- (void)didNotOpenURL:(NSURL *)URL
+- (void)didNotOpenURL:(NSURL *)URL pageCache:(NSDictionary *)pageCache
 {
     _part->didNotOpenURL(KURL(URL).url());
+
+    // We might have made a page cache item, but now we're bailing out due to an error before we ever
+    // transitioned to the new page (before WebFrameState==commit).  The goal here is to restore any state
+    // so that the existing view (that wenever got far enough to replace) can continue being used.
+    DocumentImpl *doc = _part->xmlDocImpl();
+    if (doc) {
+        doc->setInPageCache(NO);
+    }
+    KWQPageState *state = [pageCache objectForKey:WebCorePageCacheStateKey];
+    [state invalidate];
+}
+
+- (BOOL)canLoadURL:(NSURL *)URL fromReferrer:(NSString *)referrer hideReferrer:(BOOL *)hideReferrer
+{
+    BOOL referrerIsWebURL = hasCaseInsensitivePrefix(referrer, @"http:") || hasCaseInsensitivePrefix(referrer, @"https:");
+    BOOL referrerIsLocalURL = hasCaseInsensitivePrefix(referrer, @"file:") || hasCaseInsensitivePrefix(referrer, @"applewebdata:");
+    BOOL URLIsFileURL = [URL scheme] != NULL && [[URL scheme] compare:@"file" options:(NSCaseInsensitiveSearch|NSLiteralSearch)] == NSOrderedSame;
+    
+    *hideReferrer = !referrerIsWebURL;
+    return !URLIsFileURL || referrerIsLocalURL;
 }
 
 - (void)saveDocumentState
@@ -372,6 +437,22 @@ static bool initializedKJS = FALSE;
     _part->scrollToAnchor(KURL(URL).url().latin1());
 }
 
+- (BOOL)scrollOverflowInDirection:(WebScrollDirection)direction granularity:(WebScrollGranularity)granularity
+{
+    if (_part == NULL) {
+        return NO;
+    }
+    return _part->scrollOverflow((KWQScrollDirection)direction, (KWQScrollGranularity)granularity);
+}
+
+- (BOOL)scrollOverflowWithScrollWheelEvent:(NSEvent *)event
+{
+    if (_part == NULL) {
+        return NO;
+    }    
+    return _part->scrollOverflowWithScrollWheelEvent(event);
+}
+
 - (BOOL)saveDocumentToPageCache
 {
     DocumentImpl *doc = _part->xmlDocImpl();
@@ -408,9 +489,19 @@ static bool initializedKJS = FALSE;
     return _part->canCachePage();
 }
 
+- (void)clear
+{
+    _part->clear();
+}
+
 - (void)end
 {
     _part->end();
+}
+
+- (void)stop
+{
+    _part->stop();
 }
 
 - (void)createKHTMLViewWithNSView:(NSView *)view marginWidth:(int)mw marginHeight:(int)mh
@@ -437,13 +528,23 @@ static bool initializedKJS = FALSE;
 - (BOOL)isSelectionEditable
 {
     // EDIT FIXME: This needs to consider the entire selected range
-	NodeImpl *startNode = _part->selection().start().node();
-	return startNode ? startNode->isContentEditable() : NO;
+    NodeImpl *startNode = _part->selection().start().node();
+    return startNode ? startNode->isContentEditable() : NO;
 }
 
-- (BOOL)haveSelection
+- (WebSelectionState)selectionState
 {
-    return _part->selection().state() == Selection::RANGE;
+    switch (_part->selection().state()) {
+        case Selection::NONE:
+            return WebSelectionStateNone;
+        case Selection::CARET:
+            return WebSelectionStateCaret;
+        case Selection::RANGE:
+            return WebSelectionStateRange;
+    }
+    
+    ASSERT_NOT_REACHED();
+    return WebSelectionStateNone;
 }
 
 - (NSString *)_documentTypeString
@@ -475,38 +576,31 @@ static bool initializedKJS = FALSE;
 
 - (NSArray *)nodesFromList:(QPtrList<NodeImpl> *)nodeList
 {
-    NSMutableArray *nodes = [NSMutableArray array];
-    unsigned int count = nodeList->count();
-    for (unsigned int i = 0; i < count; i++) {
-        [nodes addObject:[DOMNode _nodeWithImpl:nodeList->at(i)]];
-    }    
+    NSMutableArray *nodes = [NSMutableArray arrayWithCapacity:nodeList->count()];
+    for (QPtrListIterator<NodeImpl> i(*nodeList); i.current(); ++i) {
+        [nodes addObject:[DOMNode _nodeWithImpl:i.current()]];
+    }
     return nodes;
 }
 
 - (NSString *)markupStringFromNode:(DOMNode *)node nodes:(NSArray **)nodes
 {
-    QPtrList<NodeImpl> *nodeList = NULL;
+    // FIXME: This is never "for interchange". Is that right? See the next method.
+    QPtrList<NodeImpl> nodeList;
+    NSString *markupString = createMarkup([node _nodeImpl], IncludeNode, nodes ? &nodeList : 0).getNSString();
     if (nodes) {
-        nodeList = new QPtrList<NodeImpl>;
-    }
-    NSString *markupString = [node _nodeImpl]->recursive_toHTMLWithOptions(false, NULL, nodeList).getNSString();
-    if (nodes) {
-        *nodes = [self nodesFromList:nodeList];
-        delete nodeList;
+        *nodes = [self nodesFromList:&nodeList];
     }
     return [self _stringWithDocumentTypeStringAndMarkupString:markupString];
 }
 
 - (NSString *)markupStringFromRange:(DOMRange *)range nodes:(NSArray **)nodes
 {
-    QPtrList<NodeImpl> *nodeList = NULL;
+    // FIXME: This is always "for interchange". Is that right? See the previous method.
+    QPtrList<NodeImpl> nodeList;
+    NSString *markupString = createMarkup([range _rangeImpl], nodes ? &nodeList : 0, AnnotateForInterchange).getNSString();
     if (nodes) {
-        nodeList = new QPtrList<NodeImpl>;
-    }
-    NSString *markupString = [range _rangeImpl]->toHTMLWithOptions(nodeList).string().getNSString();
-    if (nodes) {
-        *nodes = [self nodesFromList:nodeList];
-        delete nodeList;
+        *nodes = [self nodesFromList:&nodeList];
     }
     return [self _stringWithDocumentTypeStringAndMarkupString:markupString];
 }
@@ -514,14 +608,14 @@ static bool initializedKJS = FALSE;
 - (NSString *)selectedString
 {
     QString text = _part->selectedText();
-    text.replace('\\', _part->backslashAsCurrencySymbol());
+    text.replace(QChar('\\'), _part->backslashAsCurrencySymbol());
     return [[text.getNSString() copy] autorelease];
 }
 
 - (NSString *)stringForRange:(DOMRange *)range
 {
     QString text = _part->text([range _rangeImpl]);
-    text.replace('\\', _part->backslashAsCurrencySymbol());
+    text.replace(QChar('\\'), _part->backslashAsCurrencySymbol());
     return [[text.getNSString() copy] autorelease];
 }
 
@@ -541,20 +635,12 @@ static bool initializedKJS = FALSE;
 
 - (void)deselectText
 {
-    _part->slotClearSelection();
+    _part->clearSelection();
 }
 
 - (BOOL)isFrameSet
 {
     return _part->isFrameSet();
-}
-
-- (NSString *)styleSheetForPrinting
-{
-    if (!_part->settings()->shouldPrintBackgrounds()) {
-        return @"* { background-image: none !important; background-color: white !important;}";
-    }
-    return nil;
 }
 
 - (void)reapplyStylesForDeviceType:(WebCoreDeviceType)deviceType
@@ -565,9 +651,6 @@ static bool initializedKJS = FALSE;
         static QPaintDevice screen;
         static QPrinter printer;
     	doc->setPaintDevice(deviceType == WebCoreDeviceScreen ? &screen : &printer);
-        if (deviceType != WebCoreDeviceScreen) {
-            doc->setPrintStyleSheet(QString::fromNSString([self styleSheetForPrinting]));
-        }
     }
     return _part->reparseConfiguration();
 }
@@ -629,8 +712,9 @@ static BOOL nowPrinting(WebCoreBridge *self)
 - (void)drawRect:(NSRect)rect
 {
     QPainter painter(nowPrinting(self));
-    painter.setUsesInactiveTextBackgroundColor(_part->usesInactiveTextBackgroundColor());
-    painter.setDrawsFocusRing(_part->showsFirstResponder());
+    bool displaysWithFocusAttributes = _part->displaysWithFocusAttributes();
+    painter.setUsesInactiveTextBackgroundColor(!displaysWithFocusAttributes);
+    painter.setDrawsFocusRing(displaysWithFocusAttributes);
     [self drawRect:rect withPainter:&painter];
 }
 
@@ -639,8 +723,15 @@ static BOOL nowPrinting(WebCoreBridge *self)
 {
     [self _setupRootForPrinting:YES];
     NSMutableArray* pages = [NSMutableArray arrayWithCapacity:5];
-    if (printWidthScaleFactor == 0 || printHeight == 0)
+    if (printWidthScaleFactor <= 0) {
+        ERROR("printWidthScaleFactor has bad value %.2f", printWidthScaleFactor);
         return pages;
+    }
+    
+    if (printHeight <= 0) {
+        ERROR("printHeight has bad value %.2f", printHeight);
+        return pages;
+    }
 	
     if (!_part || !_part->xmlDocImpl() || !_part->view()) return pages;
     RenderCanvas* root = static_cast<khtml::RenderCanvas *>(_part->xmlDocImpl()->renderer());
@@ -687,7 +778,7 @@ static BOOL nowPrinting(WebCoreBridge *self)
     }
     NSObject *copiedNode = [copier nodeWithName:node->nodeName().string().getNSString()
                                           value:node->nodeValue().string().getNSString()
-                                         source:node->recursive_toHTML(true).getNSString()
+                                         source:createMarkup(node, ChildrenOnly).getNSString()
                                        children:children];
     [children release];
     return copiedNode;
@@ -758,6 +849,11 @@ static BOOL nowPrinting(WebCoreBridge *self)
     _part->view()->initScrollBars();
 }
 
+- (void)setActivationEventNumber:(int)num
+{
+    _part->setActivationEventNumber(num);
+}
+
 - (void)mouseDown:(NSEvent *)event
 {
     _part->mouseDown(event);
@@ -822,7 +918,11 @@ static HTMLInputElementImpl *inputElementFromDOMElement(DOMElement *element)
 static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 {
     NodeImpl *node = [element _nodeImpl];
-    if (node && idFromNode(node) == ID_FORM) {
+    // This should not be necessary, but an XSL file on
+    // maps.google.com crashes otherwise because it is an xslt file
+    // that contains <form> elements that aren't in any namespace, so
+    // they come out as generic CML elements
+    if (node && node->isHTMLElement() && idFromNode(node) == ID_FORM) {
         return static_cast<HTMLFormElementImpl *>(node);
     }
     return nil;
@@ -832,7 +932,7 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 {
     HTMLFormElementImpl *formElement = formElementFromDOMElement(form);
     if (formElement) {
-        QPtrList<HTMLGenericFormElementImpl> elements = formElement->formElements;
+        QPtrVector<HTMLGenericFormElementImpl> &elements = formElement->formElements;
         QString targetName = QString::fromNSString(name);
         for (unsigned int i = 0; i < elements.count(); i++) {
             HTMLGenericFormElementImpl *elt = elements.at(i);
@@ -883,7 +983,7 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     NSMutableArray *results = nil;
     HTMLFormElementImpl *formElement = formElementFromDOMElement(form);
     if (formElement) {
-        QPtrList<HTMLGenericFormElementImpl> elements = formElement->formElements;
+        QPtrVector<HTMLGenericFormElementImpl> &elements = formElement->formElements;
         for (unsigned int i = 0; i < elements.count(); i++) {
             if (elements.at(i)->isEnumeratable()) {		// Skip option elements, other duds
                 NSView *view = viewForElement(elements.at(i));
@@ -917,7 +1017,7 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
         return nil;
     }
     RenderObject::NodeInfo nodeInfo(true, true);
-    renderer->layer()->nodeAtPoint(nodeInfo, (int)point.x, (int)point.y);
+    renderer->layer()->hitTest(nodeInfo, (int)point.x, (int)point.y);
     
     NSMutableDictionary *element = [NSMutableDictionary dictionary];
     [element setObject:[NSNumber numberWithBool:_part->isPointInsideSelection((int)point.x, (int)point.y)]
@@ -931,7 +1031,7 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
             if (!title.isNull()) {
                 // We found a node with a title.
                 QString titleText = title.string();
-                titleText.replace('\\', _part->backslashAsCurrencySymbol());
+                titleText.replace(QChar('\\'), _part->backslashAsCurrencySymbol());
                 [element setObject:titleText.getNSString() forKey:WebCoreElementTitleKey];
                 break;
             }
@@ -941,18 +1041,20 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     NodeImpl *URLNode = nodeInfo.URLElement();
     if (URLNode) {
         ElementImpl *e = static_cast<ElementImpl *>(URLNode);
+        DocumentImpl *doc = e->getDocument();
+        ASSERT(doc);
         
         const AtomicString& title = e->getAttribute(ATTR_TITLE);
         if (!title.isEmpty()) {
             QString titleText = title.string();
-            titleText.replace('\\', _part->backslashAsCurrencySymbol());
+            titleText.replace(QChar('\\'), _part->backslashAsCurrencySymbol());
             [element setObject:titleText.getNSString() forKey:WebCoreElementLinkTitleKey];
         }
         
         const AtomicString& link = e->getAttribute(ATTR_HREF);
         if (!link.isNull()) {
             if (e->firstChild()) {
-                Range r(_part->document());
+                Range r(doc);
                 r.setStartBefore(e->firstChild());
                 r.setEndAfter(e->lastChild());
                 QString t = _part->text(r);
@@ -961,12 +1063,12 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
                 }
             }
             QString URLString = parseURL(link).string();
-            [element setObject:_part->xmlDocImpl()->completeURL(URLString).getNSString() forKey:WebCoreElementLinkURLKey];
+            [element setObject:doc->completeURL(URLString).getNSString() forKey:WebCoreElementLinkURLKey];
         }
         
         DOMString target = e->getAttribute(ATTR_TARGET);
-        if (target.isEmpty() && _part->xmlDocImpl()) {
-            target = _part->xmlDocImpl()->baseTarget();
+        if (target.isEmpty() && doc) { // FIXME: Take out this doc check when we're not just before a release.
+            target = doc->baseTarget();
         }
         if (!target.isEmpty()) {
             [element setObject:target.string().getNSString() forKey:WebCoreElementLinkTargetFrameKey];
@@ -983,38 +1085,38 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
             // Only return image information if there is an image.
             if (image && !r->isDisplayingError()) {
                 [element setObject:r->pixmap().image() forKey:WebCoreElementImageKey];
+            }
                 
-                int x, y;
-                if (r->absolutePosition(x, y)) {
-                    NSValue *rect = [NSValue valueWithRect:NSMakeRect(x, y, r->contentWidth(), r->contentHeight())];
-                    [element setObject:rect forKey:WebCoreElementImageRectKey];
-                }
+            int x, y;
+            if (r->absolutePosition(x, y)) {
+                NSValue *rect = [NSValue valueWithRect:NSMakeRect(x, y, r->contentWidth(), r->contentHeight())];
+                [element setObject:rect forKey:WebCoreElementImageRectKey];
+            }
                 
-                ElementImpl *i = static_cast<ElementImpl*>(node);
-        
-                // FIXME: Code copied from RenderImage::updateFromElement; should share.
-                DOMString attr;
-                if (idFromNode(i) == ID_OBJECT) {
-                    attr = i->getAttribute(ATTR_DATA);
-                } else {
-                    attr = i->getAttribute(ATTR_SRC);
-                }
-                if (!attr.isEmpty()) {
-                    QString URLString = parseURL(attr).string();
-                    [element setObject:_part->xmlDocImpl()->completeURL(URLString).getNSString() forKey:WebCoreElementImageURLKey];
-                }
-                
-                // FIXME: Code copied from RenderImage::updateFromElement; should share.
-                DOMString alt;
-                if (idFromNode(i) == ID_INPUT)
-                    alt = static_cast<HTMLInputElementImpl *>(i)->altText();
-                else if (idFromNode(i) == ID_IMG)
-                    alt = static_cast<HTMLImageElementImpl *>(i)->altText();
-                if (!alt.isNull()) {
-                    QString altText = alt.string();
-                    altText.replace('\\', _part->backslashAsCurrencySymbol());
-                    [element setObject:altText.getNSString() forKey:WebCoreElementImageAltStringKey];
-                }
+            ElementImpl *i = static_cast<ElementImpl*>(node);
+    
+            // FIXME: Code copied from RenderImage::updateFromElement; should share.
+            DOMString attr;
+            if (idFromNode(i) == ID_OBJECT) {
+                attr = i->getAttribute(ATTR_DATA);
+            } else {
+                attr = i->getAttribute(ATTR_SRC);
+            }
+            if (!attr.isEmpty()) {
+                QString URLString = parseURL(attr).string();
+                [element setObject:i->getDocument()->completeURL(URLString).getNSString() forKey:WebCoreElementImageURLKey];
+            }
+            
+            // FIXME: Code copied from RenderImage::updateFromElement; should share.
+            DOMString alt;
+            if (idFromNode(i) == ID_INPUT)
+                alt = static_cast<HTMLInputElementImpl *>(i)->altText();
+            else if (idFromNode(i) == ID_IMG)
+                alt = static_cast<HTMLImageElementImpl *>(i)->altText();
+            if (!alt.isNull()) {
+                QString altText = alt.string();
+                altText.replace(QChar('\\'), _part->backslashAsCurrencySymbol());
+                [element setObject:altText.getNSString() forKey:WebCoreElementImageAltStringKey];
             }
         }
     }
@@ -1022,7 +1124,7 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     return element;
 }
 
-- (NSURL *)URLWithRelativeString:(NSString *)string
+- (NSURL *)URLWithAttributeString:(NSString *)string
 {
     DocumentImpl *doc = _part->xmlDocImpl();
     if (!doc) {
@@ -1040,6 +1142,25 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 - (void)jumpToSelection
 {
     _part->jumpToSelection();
+}
+
+- (NSString *)advanceToNextMisspelling
+{
+    return _part->advanceToNextMisspelling().getNSString();
+}
+
+- (NSString *)advanceToNextMisspellingStartingJustBeforeSelection
+{
+    return _part->advanceToNextMisspelling(true).getNSString();
+}
+
+- (void)unmarkAllMisspellings
+{
+    DocumentImpl *doc = _part->xmlDocImpl();
+    if (!doc) {
+        return;
+    }
+    doc->removeAllMarkers();
 }
 
 - (void)setTextSizeMultiplier:(float)multiplier
@@ -1076,23 +1197,44 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 
 - (NSView *)nextKeyViewInsideWebFrameViews
 {
-    return _part->nextKeyViewInFrameHierarchy(0, KWQSelectingNext);
+    DocumentImpl *doc = _part->xmlDocImpl();
+    if (!doc) {
+        return nil;
+    }
+    
+    return _part->nextKeyViewInFrameHierarchy(doc->focusNode(), KWQSelectingNext);
 }
 
 - (NSView *)previousKeyViewInsideWebFrameViews
 {
-    return _part->nextKeyViewInFrameHierarchy(0, KWQSelectingPrevious);
+    DocumentImpl *doc = _part->xmlDocImpl();
+    if (!doc) {
+        return nil;
+    }
+
+    return _part->nextKeyViewInFrameHierarchy(doc->focusNode(), KWQSelectingPrevious);
 }
 
 - (NSString *)stringByEvaluatingJavaScriptFromString:(NSString *)string
 {
+    return [self stringByEvaluatingJavaScriptFromString:string forceUserGesture:true];
+}
+
+// 
+- (NSString *)stringByEvaluatingJavaScriptFromString:(NSString *)string forceUserGesture:(BOOL)forceUserGesture
+{
     _part->createEmptyDocument();
-    return _part->executeScript(QString::fromNSString(string), true).asString().getNSString();
+    return _part->executeScript(QString::fromNSString(string), forceUserGesture).asString().getNSString();
 }
 
 - (WebScriptObject *)windowScriptObject
 {
     return _part->windowScriptObject();
+}
+
+- (NPObject *)windowScriptNPObject
+{
+    return _part->windowScriptNPObject();
 }
 
 - (DOMDocument *)DOMDocument
@@ -1103,13 +1245,6 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 - (DOMHTMLElement *)frameElement
 {
     return (DOMHTMLElement *)[[self DOMDocument] _ownerElement];
-}
-
-- (void)setSelectionFrom:(DOMNode *)start startOffset:(int)startOffset to:(DOMNode *)end endOffset:(int) endOffset
-{
-    Position s([start _nodeImpl], startOffset);
-    Position e([end _nodeImpl], endOffset);
-    _part->setSelection(Selection(s, e));
 }
 
 - (NSAttributedString *)selectedAttributedString
@@ -1124,35 +1259,6 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     return _part->attributedString([startNode _nodeImpl], startOffset, [endNode _nodeImpl], endOffset);
 }
 
-- (NSFont *)renderedFontForNode:(DOMNode *)node
-{
-    RenderObject *renderer = [node _nodeImpl]->renderer();
-    if (renderer) {
-        return renderer->style()->font().getNSFont();
-    }
-    return nil;
-}
-
-- (DOMNode *)selectionStart
-{
-    return [DOMNode _nodeWithImpl:_part->selectionStart()];
-}
-
-- (int)selectionStartOffset
-{
-    return _part->selectionStartOffset();
-}
-
-- (DOMNode *)selectionEnd
-{
-    return [DOMNode _nodeWithImpl:_part->selectionEnd()];
-}
-
-- (int)selectionEndOffset
-{
-    return _part->selectionEndOffset();
-}
-
 - (NSRect)selectionRect
 {
     return _part->selectionRect(); 
@@ -1161,6 +1267,36 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 - (NSRect)visibleSelectionRect
 {
     return _part->visibleSelectionRect(); 
+}
+
+- (void)centerSelectionInVisibleArea
+{
+    _part->centerSelectionInVisibleArea(); 
+}
+
+- (NSRect)caretRectAtNode:(DOMNode *)node offset:(int)offset affinity:(NSSelectionAffinity)affinity
+{
+    return [node _nodeImpl]->renderer()->caretRect(offset, static_cast<EAffinity>(affinity));
+}
+- (NSRect)firstRectForDOMRange:(DOMRange *)range
+{
+    int extraWidthToEndOfLine = 0;
+    QRect startCaretRect = [[range startContainer] _nodeImpl]->renderer()->caretRect([range startOffset], UPSTREAM, &extraWidthToEndOfLine);
+    QRect endCaretRect = [[range startContainer] _nodeImpl]->renderer()->caretRect([range endOffset], UPSTREAM);
+
+    if (startCaretRect.y() == endCaretRect.y()) {
+        // start and end are on the same line
+        return QRect(MIN(startCaretRect.x(), endCaretRect.x()), 
+                     startCaretRect.y(), 
+                     abs(endCaretRect.x() - startCaretRect.x()),
+                     MAX(startCaretRect.height(), endCaretRect.height()));
+    }
+
+    // start and end aren't on the same line, so go from start to the end of its line
+    return QRect(startCaretRect.x(), 
+                 startCaretRect.y(),
+                 startCaretRect.width() + extraWidthToEndOfLine,
+                 startCaretRect.height());
 }
 
 - (NSImage *)selectionImage
@@ -1183,9 +1319,33 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     return _part->url().getNSURL();
 }
 
+- (NSURL *)baseURL
+{
+    return _part->completeURL(_part->xmlDocImpl()->baseURL()).getNSURL();
+}
+
 - (NSString *)referrer
 {
     return _part->referrer().getNSString();
+}
+
+- (NSString *)domain
+{
+    DocumentImpl *doc = _part->xmlDocImpl();
+    if (doc && doc->isHTMLDocument()) {
+        return doc->domain().string().getNSString();
+    }
+    return nil;
+}
+
+- (WebCoreBridge *)opener
+{
+    KHTMLPart *openerPart = _part->opener();
+
+    if (openerPart)
+        return KWQ(openerPart)->bridge();
+
+    return nil;
 }
 
 + (NSString *)stringWithData:(NSData *)data textEncoding:(CFStringEncoding)textEncoding
@@ -1200,14 +1360,6 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 {
     CFStringEncoding textEncoding = KWQCFStringEncodingFromIANACharsetName([textEncodingName lossyCString]);
     return [WebCoreBridge stringWithData:data textEncoding:textEncoding];
-}
-
-+ (void)updateAllViews
-{
-    for (QPtrListIterator<KWQKHTMLPart> it(KWQKHTMLPart::instances()); it.current(); ++it) {
-        KWQKHTMLPart *part = it.current();
-        [part->bridge() setNeedsReapplyStyles];
-    }
 }
 
 - (BOOL)needsLayout
@@ -1233,19 +1385,19 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     return externalRepresentation(_part->renderer()).getNSString();
 }
 
-- (void)setUsesInactiveTextBackgroundColor:(BOOL)uses
+- (void)setSelectionFromNone
 {
-    _part->setUsesInactiveTextBackgroundColor(uses);
+    _part->setSelectionFromNone();
 }
 
-- (BOOL)usesInactiveTextBackgroundColor
+- (void)setDisplaysWithFocusAttributes:(BOOL)flag
 {
-    return _part->usesInactiveTextBackgroundColor();
+    _part->setDisplaysWithFocusAttributes(flag);
 }
 
-- (void)setShowsFirstResponder:(BOOL)flag
+- (void)setWindowHasFocus:(BOOL)flag
 {
-    _part->setShowsFirstResponder(flag);
+    _part->setWindowHasFocus(flag);
 }
 
 - (void)setShouldCreateRenderers:(BOOL)f
@@ -1267,6 +1419,17 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     return 0;
 }
 
+- (BOOL)doneProcessingData
+{
+    DocumentImpl *doc = _part->xmlDocImpl();
+    if (doc) {
+        Tokenizer* tok = doc->tokenizer();
+        if (tok)
+            return !tok->processingData();
+    }
+    return YES;
+}
+
 - (NSColor *)bodyBackgroundColor
 {
     return _part->bodyBackgroundColor();
@@ -1281,7 +1444,7 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
             return pseudoStyle->backgroundColor().getNSColor();
         }
     }
-    return _part->usesInactiveTextBackgroundColor() ? [NSColor secondarySelectedControlColor] : [NSColor selectedTextBackgroundColor];
+    return _part->displaysWithFocusAttributes() ? [NSColor selectedTextBackgroundColor] : [NSColor secondarySelectedControlColor];
 }
 
 - (void)adjustViewSize
@@ -1297,7 +1460,7 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     if (!_part || !_part->xmlDocImpl()) return nil;
     RenderCanvas* root = static_cast<khtml::RenderCanvas *>(_part->xmlDocImpl()->renderer());
     if (!root) return nil;
-    return _part->xmlDocImpl()->getOrCreateAccObjectCache()->accObject(root);
+    return _part->xmlDocImpl()->getAccObjectCache()->accObject(root);
 }
 
 - (void)setDrawsBackground:(BOOL)drawsBackground
@@ -1309,70 +1472,122 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 - (void)undoEditing:(id)arg
 {
     ASSERT([arg isKindOfClass:[KWQEditCommand class]]);
-    
-    EditCommand cmd([arg impl]);
-    cmd.unapply();
+    [arg command]->unapply();
 }
 
 - (void)redoEditing:(id)arg
 {
     ASSERT([arg isKindOfClass:[KWQEditCommand class]]);
-    
-    EditCommand cmd([arg impl]);
-    cmd.reapply();
+    [arg command]->reapply();
 }
 
-- (DOMRange *)selectedDOMRangeWithGranularity:(WebSelectionGranularity)granularity
+- (DOMRange *)rangeByExpandingSelectionWithGranularity:(WebSelectionGranularity)granularity
 {
-    if (!_part)
+    if (!partHasSelection(self))
         return nil;
         
     // NOTE: The enums *must* match the very similar ones declared in ktml_selection.h
     Selection selection(_part->selection());
-    selection.expandUsingGranularity(static_cast<Selection::ETextGranularity>(granularity));
+    selection.expandUsingGranularity(static_cast<ETextGranularity>(granularity));
     return [DOMRange _rangeWithImpl:selection.toRange().handle()];
 }
 
 - (DOMRange *)rangeByAlteringCurrentSelection:(WebSelectionAlteration)alteration direction:(WebSelectionDirection)direction granularity:(WebSelectionGranularity)granularity
 {
-    if (!_part)
+    if (!partHasSelection(self))
         return nil;
         
     // NOTE: The enums *must* match the very similar ones declared in ktml_selection.h
     Selection selection(_part->selection());
     selection.modify(static_cast<Selection::EAlter>(alteration), 
                      static_cast<Selection::EDirection>(direction), 
-                     static_cast<Selection::ETextGranularity>(granularity));
+                     static_cast<ETextGranularity>(granularity));
     return [DOMRange _rangeWithImpl:selection.toRange().handle()];
 }
 
 - (void)alterCurrentSelection:(WebSelectionAlteration)alteration direction:(WebSelectionDirection)direction granularity:(WebSelectionGranularity)granularity
 {
-    if (!_part)
+    if (!partHasSelection(self))
         return;
         
     // NOTE: The enums *must* match the very similar ones declared in dom_selection.h
     Selection selection(_part->selection());
     selection.modify(static_cast<Selection::EAlter>(alteration), 
                      static_cast<Selection::EDirection>(direction), 
-                     static_cast<Selection::ETextGranularity>(granularity));
+                     static_cast<ETextGranularity>(granularity));
 
-    // save vertical navigation x position if necessary
+    // save vertical navigation x position if necessary; many types of motion blow it away
     int xPos = KHTMLPart::NoXPosForVerticalArrowNavigation;
-    if (granularity == WebSelectByLine)
-        xPos = _part->xPosForVerticalArrowNavigation();
+    switch (granularity) {
+        case WebSelectByLine:
+        case WebSelectByParagraph:
+            xPos = _part->xPosForVerticalArrowNavigation();
+            break;
+        case WebSelectByCharacter:
+        case WebSelectByWord:
+        case WebSelectToLineBoundary:
+        case WebSelectToParagraphBoundary:
+        case WebSelectToDocumentBoundary:
+            break;
+    }
+
     
     // setting the selection always clears saved vertical navigation x position
     _part->setSelection(selection);
+    
+    // altering the selection also sets the granularity back to character
+    // NOTE: The one exception is that we need to keep word granularity
+    // to preserve smart delete behavior when extending by word.  e.g. double-click,
+    // then shift-option-rightarrow, then delete needs to smart delete, per TextEdit.
+    if (!((alteration == WebSelectByExtending) &&
+          (granularity == WebSelectByWord) && (_part->selectionGranularity() == khtml::WORD)))
+        _part->setSelectionGranularity(static_cast<ETextGranularity>(WebSelectByCharacter));
     
     // restore vertical navigation x position if necessary
     if (xPos != KHTMLPart::NoXPosForVerticalArrowNavigation)
         _part->setXPosForVerticalArrowNavigation(xPos);
 
-    [self ensureCaretVisible];
+    _part->selectFrameElementInParentIfFullySelected();
+
+    [self ensureSelectionVisible];
 }
 
-- (void)setSelectedDOMRange:(DOMRange *)range affinity:(NSSelectionAffinity)selectionAffinity
+- (DOMRange *)rangeByAlteringCurrentSelection:(WebSelectionAlteration)alteration verticalDistance:(float)verticalDistance
+{
+    if (!partHasSelection(self))
+        return nil;
+        
+    Selection selection(_part->selection());
+    selection.modify(static_cast<Selection::EAlter>(alteration), static_cast<int>(verticalDistance));
+    return [DOMRange _rangeWithImpl:selection.toRange().handle()];
+}
+
+- (void)alterCurrentSelection:(WebSelectionAlteration)alteration verticalDistance:(float)verticalDistance
+{
+    if (!partHasSelection(self))
+        return;
+        
+    Selection selection(_part->selection());
+    selection.modify(static_cast<Selection::EAlter>(alteration), static_cast<int>(verticalDistance));
+
+    // setting the selection always clears saved vertical navigation x position, so preserve it
+    int xPos = _part->xPosForVerticalArrowNavigation();
+    _part->setSelection(selection);
+    _part->setSelectionGranularity(static_cast<ETextGranularity>(WebSelectByCharacter));
+    _part->setXPosForVerticalArrowNavigation(xPos);
+
+    _part->selectFrameElementInParentIfFullySelected();
+
+    [self ensureSelectionVisible];
+}
+
+- (WebSelectionGranularity)selectionGranularity
+{
+    // NOTE: The enums *must* match the very similar ones declared in dom_selection.h
+    return static_cast<WebSelectionGranularity>(_part->selectionGranularity());
+}
+
+- (void)setSelectedDOMRange:(DOMRange *)range affinity:(NSSelectionAffinity)selectionAffinity closeTyping:(BOOL)closeTyping
 {
     NodeImpl *startContainer = [[range startContainer] _nodeImpl];
     NodeImpl *endContainer = [[range endContainer] _nodeImpl];
@@ -1381,11 +1596,29 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     ASSERT(startContainer->getDocument());
     ASSERT(startContainer->getDocument() == endContainer->getDocument());
     
-    DocumentImpl *doc = startContainer->getDocument();
-    doc->updateLayout();
-    Selection selection(Position(startContainer, [range startOffset]), Position(endContainer, [range endOffset]));
-    selection.setAffinity(static_cast<Selection::EAffinity>(selectionAffinity));
-    _part->setSelection(selection);
+    _part->xmlDocImpl()->updateLayout();
+
+    EAffinity affinity = static_cast<EAffinity>(selectionAffinity);
+
+    bool rangeCollapsed = [range collapsed];
+    if (!rangeCollapsed)
+        affinity = DOWNSTREAM;
+    
+    // Work around bug where isRenderedContent returns false for <br> elements at the ends of lines.
+    // If that bug wasn't an issue, we could just make the position from the range directly.
+    Position start(startContainer, [range startOffset]);
+    Position end(endContainer, [range endOffset]);
+    VisiblePosition visibleStart(start, affinity, khtml::VisiblePosition::INIT_UP);
+    start = visibleStart.deepEquivalent();
+
+    if (rangeCollapsed) {
+        setAffinityUsingLinePosition(visibleStart);
+        affinity = visibleStart.affinity();
+    }
+
+    // FIXME: Can we provide extentAffinity?
+    Selection selection(start, affinity, end, khtml::SEL_DEFAULT_AFFINITY);
+    _part->setSelection(selection, closeTyping);
 }
 
 - (DOMRange *)selectedDOMRange
@@ -1393,78 +1626,289 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     return [DOMRange _rangeWithImpl:_part->selection().toRange().handle()];
 }
 
+- (NSRange)convertToNSRange:(DOM::RangeImpl *)drange
+{
+    if (!drange) {
+        return NSMakeRange(NSNotFound, 0);
+    }
+
+    Range toStartRange, toEndRange;
+    Range actualRange = Range(drange);
+    long startPosition, endPosition;
+
+    toStartRange = Range (_part->xmlDocImpl()->createRange());
+    toStartRange.setEnd (actualRange.startContainer(), actualRange.startOffset());
+    toEndRange = Range (_part->xmlDocImpl()->createRange());
+    toEndRange.setEnd (actualRange.endContainer(), actualRange.endOffset());
+    
+    startPosition = TextIterator::rangeLength (toStartRange);
+    endPosition = TextIterator::rangeLength (toEndRange);
+    
+    return NSMakeRange(startPosition, endPosition - startPosition);
+}
+
+- (DOM::Range)convertToDOMRange:(NSRange)nsrange
+{
+    // Set the range to cover the entire document.  This assumes that the start
+    // and end node of the range are the document node.
+    DOM::Range docRange = Range (_part->xmlDocImpl()->createRange());
+    docRange.setEnd (docRange.endContainer(), docRange.endContainer().handle()->childNodeCount());
+
+    DOM::Range resultRange = Range (_part->xmlDocImpl()->createRange());
+    TextIterator::setRangeFromLocationAndLength (docRange, resultRange, nsrange.location, nsrange.length);
+    
+    return resultRange;
+}
+
+- (DOMRange *)convertToObjCDOMRange:(NSRange)nsrange
+{
+    return [DOMRange _rangeWithImpl:[self convertToDOMRange:nsrange].handle()];
+}
+
+- (void)selectNSRange:(NSRange)range
+{
+    DOM::Range replaceRange = [self convertToDOMRange:range];
+    _part->setSelection(Selection(replaceRange.handle(), khtml::SEL_DEFAULT_AFFINITY, khtml::SEL_DEFAULT_AFFINITY));
+}
+
+- (NSRange)selectedNSRange
+{
+    return [self convertToNSRange:_part->selection().toRange().handle()];
+}
+
 - (NSSelectionAffinity)selectionAffinity
 {
-    return static_cast<NSSelectionAffinity>(_part->selection().affinity());
+    return static_cast<NSSelectionAffinity>(_part->selection().startAffinity());
+}
+
+- (void)setMarkDOMRange:(DOMRange *)range
+{
+    _part->setMark(Selection([range _rangeImpl], khtml::SEL_DEFAULT_AFFINITY, khtml::SEL_DEFAULT_AFFINITY));
+}
+
+- (DOMRange *)markDOMRange
+{
+    return [DOMRange _rangeWithImpl:_part->mark().toRange().handle()];
+}
+
+- (void)setMarkedTextDOMRange:(DOMRange *)range customAttributes:(NSArray *)attributes ranges:(NSArray *)ranges
+{
+    _part->setMarkedTextRange([range _rangeImpl], attributes, ranges);
+}
+
+- (DOMRange *)markedTextDOMRange
+{
+    return [DOMRange _rangeWithImpl:_part->markedTextRange().handle()];
+}
+
+- (NSRange)markedTextNSRange
+{
+    return [self convertToNSRange:_part->markedTextRange().handle()];
+}
+
+- (void)replaceMarkedTextWithText:(NSString *)text
+{
+    if (!partHasSelection(self))
+        return;
+    
+    Range markedTextRange = _part->markedTextRange();
+    if (!markedTextRange.isNull() && !markedTextRange.collapsed())
+        TypingCommand::deleteKeyPressed(_part->xmlDocImpl(), NO);
+    
+    if ([text length] > 0)
+        TypingCommand::insertText(_part->xmlDocImpl(), text, YES);
+    
+    [self ensureSelectionVisible];
+}
+
+- (BOOL)canDeleteRange:(DOMRange *)range
+{
+    NodeImpl *startContainer = [[range startContainer] _nodeImpl];
+    NodeImpl *endContainer = [[range endContainer] _nodeImpl];
+    if (startContainer == nil || endContainer == nil)
+        return NO;
+    
+    if (!startContainer->isContentEditable() || !endContainer->isContentEditable())
+        return NO;
+    
+    if ([range collapsed]) {
+        VisiblePosition start(startContainer, [range startOffset], DOWNSTREAM);
+        if (isStartOfEditableContent(start))
+            return NO;
+    }
+    
+    return YES;
+}
+
+// Given proposedRange, returns an extended range that includes adjacent whitespace that should
+// be deleted along with the proposed range in order to preserve proper spacing and punctuation of
+// the text surrounding the deletion.
+- (DOMRange *)smartDeleteRangeForProposedRange:(DOMRange *)proposedRange
+{
+    NodeImpl *startContainer = [[proposedRange startContainer] _nodeImpl];
+    NodeImpl *endContainer = [[proposedRange endContainer] _nodeImpl];
+    if (startContainer == nil || endContainer == nil)
+        return nil;
+
+    ASSERT(startContainer->getDocument());
+    ASSERT(startContainer->getDocument() == endContainer->getDocument());
+    
+    _part->xmlDocImpl()->updateLayout();
+
+    Position start(startContainer, [proposedRange startOffset]);
+    Position end(endContainer, [proposedRange endOffset]);
+    Position newStart = start.upstream(DOM::StayInBlock).leadingWhitespacePosition(khtml::DOWNSTREAM, true);
+    if (newStart.isNull())
+        newStart = start;
+    Position newEnd = end.downstream(DOM::StayInBlock).trailingWhitespacePosition(khtml::DOWNSTREAM, true);
+    if (newEnd.isNull())
+        newEnd = end;
+
+    return [DOMRange _rangeWithImpl:Range(newStart.node(), newStart.offset(), newEnd.node(), newEnd.offset()).handle()];
+}
+
+// Determines whether whitespace needs to be added around aString to preserve proper spacing and
+// punctuation when itÕs inserted into the receiverÕs text over charRange. Returns by reference
+// in beforeString and afterString any whitespace that should be added, unless either or both are
+// nil. Both are returned as nil if aString is nil or if smart insertion and deletion are disabled.
+- (void)smartInsertForString:(NSString *)pasteString replacingRange:(DOMRange *)rangeToReplace beforeString:(NSString **)beforeString afterString:(NSString **)afterString
+{
+    // give back nil pointers in case of early returns
+    if (beforeString)
+        *beforeString = nil;
+    if (afterString)
+        *afterString = nil;
+        
+    // inspect destination
+    NodeImpl *startContainer = [[rangeToReplace startContainer] _nodeImpl];
+    NodeImpl *endContainer = [[rangeToReplace endContainer] _nodeImpl];
+
+    Position startPos(startContainer, [rangeToReplace startOffset]);
+    Position endPos(endContainer, [rangeToReplace endOffset]);
+
+    VisiblePosition startVisiblePos = VisiblePosition(startPos, khtml::VP_DEFAULT_AFFINITY);
+    VisiblePosition endVisiblePos = VisiblePosition(endPos, khtml::VP_DEFAULT_AFFINITY);
+    
+    // this check also ensures startContainer, startPos, endContainer, and endPos are non-null
+    if (startVisiblePos.isNull() || endVisiblePos.isNull())
+        return;
+
+    bool addLeadingSpace = startPos.leadingWhitespacePosition(khtml::VP_DEFAULT_AFFINITY, true).isNull() && !isFirstVisiblePositionInParagraph(startVisiblePos);
+    if (addLeadingSpace) {
+        QChar previousChar = startVisiblePos.previous().character();
+        if (!previousChar.isNull()) {
+            addLeadingSpace = !_part->isCharacterSmartReplaceExempt(previousChar, true);
+        }
+    }
+    
+    bool addTrailingSpace = endPos.trailingWhitespacePosition(khtml::VP_DEFAULT_AFFINITY, true).isNull() && !isLastVisiblePositionInParagraph(endVisiblePos);
+    if (addTrailingSpace) {
+        QChar thisChar = endVisiblePos.character();
+        if (!thisChar.isNull()) {
+            addTrailingSpace = !_part->isCharacterSmartReplaceExempt(thisChar, false);
+        }
+    }
+    
+    // inspect source
+    bool hasWhitespaceAtStart = false;
+    bool hasWhitespaceAtEnd = false;
+    unsigned pasteLength = [pasteString length];
+    if (pasteLength > 0) {
+        NSCharacterSet *whiteSet = [NSCharacterSet whitespaceAndNewlineCharacterSet];
+        
+        if ([whiteSet characterIsMember:[pasteString characterAtIndex:0]]) {
+            hasWhitespaceAtStart = YES;
+        }
+        if ([whiteSet characterIsMember:[pasteString characterAtIndex:(pasteLength - 1)]]) {
+            hasWhitespaceAtEnd = YES;
+        }
+    }
+    
+    // issue the verdict
+    if (beforeString && addLeadingSpace && !hasWhitespaceAtStart)
+        *beforeString = @" ";
+    if (afterString && addTrailingSpace && !hasWhitespaceAtEnd)
+        *afterString = @" ";
 }
 
 - (DOMDocumentFragment *)documentFragmentWithMarkupString:(NSString *)markupString baseURLString:(NSString *)baseURLString 
 {
-    DOM::DocumentImpl *document = _part->xmlDocImpl();
-    DOM::DocumentFragmentImpl *fragment = static_cast<HTMLElementImpl *>(document->documentElement())->createContextualFragment(markupString);
-    ASSERT(fragment);
-    
-    if ([baseURLString length] > 0) {
-        DOM::DOMString baseURL = baseURLString;
-        if (baseURL != document->baseURL()) {
-            fragment->recursive_completeURLs(baseURL.string());
-        }
-    }
+    if (!_part || !_part->xmlDocImpl())
+        return 0;
+
+    DocumentFragmentImpl *fragment = createFragmentFromMarkup(_part->xmlDocImpl(), QString::fromNSString(markupString), QString::fromNSString(baseURLString));
     return [DOMDocumentFragment _documentFragmentWithImpl:fragment];
 }
 
 - (DOMDocumentFragment *)documentFragmentWithText:(NSString *)text
 {
-    DOMDocument *document = [self DOMDocument];
-    DOMDocumentFragment *fragment = [document createDocumentFragment];
-    [fragment appendChild:[document createTextNode:text]];
-    return fragment;
+    if (!partHasSelection(self) || !text)
+        return 0;
+    
+    return [DOMDocumentFragment _documentFragmentWithImpl:createFragmentFromText(_part->xmlDocImpl(), QString::fromNSString(text))];
 }
 
-- (void)replaceSelectionWithFragment:(DOMDocumentFragment *)fragment selectReplacement:(BOOL)selectReplacement
+- (void)replaceSelectionWithFragment:(DOMDocumentFragment *)fragment selectReplacement:(BOOL)selectReplacement smartReplace:(BOOL)smartReplace matchStyle:(BOOL)matchStyle
 {
-    if (!_part || !_part->xmlDocImpl() || !fragment)
+    if (!partHasSelection(self) || !fragment)
         return;
     
-    ReplaceSelectionCommand cmd(_part->xmlDocImpl(), [fragment _fragmentImpl], selectReplacement);
-    cmd.apply();
-    [self ensureCaretVisible];
+    EditCommandPtr(new ReplaceSelectionCommand(_part->xmlDocImpl(), [fragment _fragmentImpl], selectReplacement, smartReplace, matchStyle)).apply();
+    [self ensureSelectionVisible];
 }
 
-- (void)replaceSelectionWithNode:(DOMNode *)node selectReplacement:(BOOL)selectReplacement
+- (void)replaceSelectionWithNode:(DOMNode *)node selectReplacement:(BOOL)selectReplacement smartReplace:(BOOL)smartReplace
 {
     DOMDocumentFragment *fragment = [[self DOMDocument] createDocumentFragment];
     [fragment appendChild:node];
-    [self replaceSelectionWithFragment:fragment selectReplacement:selectReplacement];
+    [self replaceSelectionWithFragment:fragment selectReplacement:selectReplacement smartReplace:smartReplace matchStyle:NO];
 }
 
-- (void)replaceSelectionWithMarkupString:(NSString *)markupString baseURLString:(NSString *)baseURLString selectReplacement:(BOOL)selectReplacement
+- (void)replaceSelectionWithMarkupString:(NSString *)markupString baseURLString:(NSString *)baseURLString selectReplacement:(BOOL)selectReplacement smartReplace:(BOOL)smartReplace
 {
     DOMDocumentFragment *fragment = [self documentFragmentWithMarkupString:markupString baseURLString:baseURLString];
-    [self replaceSelectionWithFragment:fragment selectReplacement:selectReplacement];
+    [self replaceSelectionWithFragment:fragment selectReplacement:selectReplacement smartReplace:smartReplace matchStyle:NO];
 }
 
-- (void)replaceSelectionWithText:(NSString *)text selectReplacement:(BOOL)selectReplacement
+- (void)replaceSelectionWithText:(NSString *)text selectReplacement:(BOOL)selectReplacement smartReplace:(BOOL)smartReplace
 {
-    [self replaceSelectionWithFragment:[self documentFragmentWithText:text] selectReplacement:selectReplacement];
+    [self replaceSelectionWithFragment:[self documentFragmentWithText:text] selectReplacement:selectReplacement smartReplace:smartReplace matchStyle:YES];
 }
 
-- (void)insertNewline
+- (void)insertLineBreak
 {
-    if (!_part || !_part->xmlDocImpl())
+    if (!partHasSelection(self))
         return;
     
-    TypingCommand::insertNewline(_part->xmlDocImpl());
-    [self ensureCaretVisible];
+    TypingCommand::insertLineBreak(_part->xmlDocImpl());
+    [self ensureSelectionVisible];
 }
 
-- (void)insertText:(NSString *)text
+- (void)insertParagraphSeparator
 {
-    if (!_part || !_part->xmlDocImpl())
+    if (!partHasSelection(self))
         return;
     
-    TypingCommand::insertText(_part->xmlDocImpl(), text);
-    [self ensureCaretVisible];
+    TypingCommand::insertParagraphSeparator(_part->xmlDocImpl());
+    [self ensureSelectionVisible];
+}
+
+- (void)insertParagraphSeparatorInQuotedContent
+{
+    if (!partHasSelection(self))
+        return;
+    
+    TypingCommand::insertParagraphSeparatorInQuotedContent(_part->xmlDocImpl());
+    [self ensureSelectionVisible];
+}
+
+- (void)insertText:(NSString *)text selectInsertedText:(BOOL)selectInsertedText
+{
+    if (!partHasSelection(self))
+        return;
+    
+    TypingCommand::insertText(_part->xmlDocImpl(), text, selectInsertedText);
+    [self ensureSelectionVisible];
 }
 
 - (void)setSelectionToDragCaret
@@ -1472,29 +1916,31 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
     _part->setSelection(_part->dragCaret());
 }
 
-- (void)moveSelectionToDragCaret:(DOMDocumentFragment *)selectionFragment
+- (void)moveSelectionToDragCaret:(DOMDocumentFragment *)selectionFragment smartMove:(BOOL)smartMove
 {
     Position base = _part->dragCaret().base();
-    MoveSelectionCommand cmd(_part->xmlDocImpl(), [selectionFragment _fragmentImpl], base);
-    cmd.apply();
+    EditCommandPtr(new MoveSelectionCommand(_part->xmlDocImpl(), [selectionFragment _fragmentImpl], base, smartMove)).apply();
 }
 
-- (Position)_positionForPoint:(NSPoint)point
+- (VisiblePosition)_visiblePositionForPoint:(NSPoint)point
 {
     RenderObject *renderer = _part->renderer();
     if (!renderer) {
-        return Position();
+        return VisiblePosition();
     }
     
     RenderObject::NodeInfo nodeInfo(true, true);
-    renderer->layer()->nodeAtPoint(nodeInfo, (int)point.x, (int)point.y);
+    renderer->layer()->hitTest(nodeInfo, (int)point.x, (int)point.y);
     NodeImpl *node = nodeInfo.innerNode();
-    return node->positionForCoordinates((int)point.x, (int)point.y);
+    if (!node->renderer())
+        return VisiblePosition();
+    
+    return node->renderer()->positionForCoordinates((int)point.x, (int)point.y);
 }
 
 - (void)moveDragCaretToPoint:(NSPoint)point
-{    
-    Selection dragCaret([self _positionForPoint:point]);
+{   
+    Selection dragCaret([self _visiblePositionForPoint:point]);
     _part->setDragCaret(dragCaret);
 }
 
@@ -1510,59 +1956,168 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 
 - (DOMRange *)editableDOMRangeForPoint:(NSPoint)point
 {
-    Position position = [self _positionForPoint:point];
-    return position.isEmpty() ? nil : [DOMRange _rangeWithImpl:Selection(position).toRange().handle()];
+    VisiblePosition position = [self _visiblePositionForPoint:point];
+    return position.isNull() ? nil : [DOMRange _rangeWithImpl:Selection(position).toRange().handle()];
 }
 
-- (void)deleteSelection
+- (void)deleteSelectionWithSmartDelete:(BOOL)smartDelete
+{
+    if (!partHasSelection(self))
+        return;
+    
+    EditCommandPtr(new DeleteSelectionCommand(_part->xmlDocImpl(), smartDelete)).apply();
+}
+
+- (void)deleteKeyPressedWithSmartDelete:(BOOL)smartDelete
 {
     if (!_part || !_part->xmlDocImpl())
         return;
     
-    Selection selection(_part->selection());
-    if (selection.state() != Selection::RANGE)
-        return;
-    
-    DeleteSelectionCommand cmd(_part->xmlDocImpl());
-    cmd.apply();
+    TypingCommand::deleteKeyPressed(_part->xmlDocImpl(), smartDelete);
+    [self ensureSelectionVisible];
 }
 
-- (void)deleteKeyPressed
+- (void)forwardDeleteKeyPressedWithSmartDelete:(BOOL)smartDelete
 {
     if (!_part || !_part->xmlDocImpl())
         return;
     
-    TypingCommand::deleteKeyPressed(_part->xmlDocImpl());
-    [self ensureCaretVisible];
+    TypingCommand::forwardDeleteKeyPressed(_part->xmlDocImpl(), smartDelete);
+    [self ensureSelectionVisible];
 }
 
-- (void)applyStyle:(DOMCSSStyleDeclaration *)style
+- (DOMCSSStyleDeclaration *)typingStyle
+{
+    if (!_part || !_part->typingStyle())
+        return nil;
+    return [DOMCSSStyleDeclaration _styleDeclarationWithImpl:_part->typingStyle()];
+}
+
+- (void)setTypingStyle:(DOMCSSStyleDeclaration *)style withUndoAction:(WebUndoAction)undoAction
 {
     if (!_part)
         return;
-    _part->applyStyle([style _styleDeclarationImpl]);
+    _part->computeAndSetTypingStyle([style _styleDeclarationImpl], static_cast<EditAction>(undoAction));
 }
 
-- (NSFont *)fontForCurrentPosition
-{
-    return _part ? _part->fontForCurrentPosition() : nil;
-}
-
-- (void)ensureCaretVisible
+- (void)applyStyle:(DOMCSSStyleDeclaration *)style withUndoAction:(WebUndoAction)undoAction
 {
     if (!_part)
+        return;
+    _part->applyStyle([style _styleDeclarationImpl], static_cast<EditAction>(undoAction));
+}
+
+- (void)applyParagraphStyle:(DOMCSSStyleDeclaration *)style withUndoAction:(WebUndoAction)undoAction
+{
+    if (!_part)
+        return;
+    _part->applyParagraphStyle([style _styleDeclarationImpl], static_cast<EditAction>(undoAction));
+}
+
+- (BOOL)selectionStartHasStyle:(DOMCSSStyleDeclaration *)style
+{
+    if (!_part)
+        return NO;
+    return _part->selectionStartHasStyle([style _styleDeclarationImpl]);
+}
+
+- (NSCellStateValue)selectionHasStyle:(DOMCSSStyleDeclaration *)style
+{
+    if (!_part)
+        return NSOffState;
+    switch (_part->selectionHasStyle([style _styleDeclarationImpl])) {
+        case KHTMLPart::falseTriState:
+            return NSOffState;
+        case KHTMLPart::trueTriState:
+            return NSOnState;
+        case KHTMLPart::mixedTriState:
+            return NSMixedState;
+    }
+    return NSOffState;
+}
+
+- (void)applyEditingStyleToBodyElement
+{
+    if (!_part)
+        return;
+    _part->applyEditingStyleToBodyElement();
+}
+
+- (void)removeEditingStyleFromBodyElement
+{
+    if (!_part)
+        return;
+    _part->removeEditingStyleFromBodyElement();
+}
+
+- (void)applyEditingStyleToElement:(DOMElement *)element
+{
+    if (!_part)
+        return;
+    _part->applyEditingStyleToElement([element _elementImpl]);
+}
+
+- (void)removeEditingStyleFromElement:(DOMElement *)element
+{
+    if (!_part)
+        return;
+    _part->removeEditingStyleFromElement([element _elementImpl]);
+}
+
+- (NSFont *)fontForSelection:(BOOL *)hasMultipleFonts
+{
+    bool multipleFonts = false;
+    NSFont *font = nil;
+    if (_part)
+        font = _part->fontForSelection(hasMultipleFonts ? &multipleFonts : 0);
+    if (hasMultipleFonts)
+        *hasMultipleFonts = multipleFonts;
+    return font;
+}
+
+- (NSDictionary *)fontAttributesForSelectionStart
+{
+    return _part ? _part->fontAttributesForSelectionStart() : nil;
+}
+
+- (NSWritingDirection)baseWritingDirectionForSelectionStart
+{
+    return _part ? _part->baseWritingDirectionForSelectionStart() : NSWritingDirectionLeftToRight;
+}
+
+- (void)ensureSelectionVisible
+{
+    if (!partHasSelection(self))
         return;
     
     KHTMLView *v = _part->view();
     if (!v)
         return;
 
-    QRect r(_part->selection().getRepaintRect());
-    v->ensureVisible(r.right(), r.bottom());
-    v->ensureVisible(r.left(), r.top());
+    Position extent = _part->selection().extent();
+    if (extent.isNull())
+        return;
+    
+    RenderObject *renderer = extent.node()->renderer();
+    if (!renderer)
+        return;
+    
+    NSView *documentView = v->getDocumentView();
+    if (!documentView)
+        return;
+    
+    QRect extentRect = renderer->caretRect(extent.offset(), _part->selection().extentAffinity());
+    if (!NSContainsRect([documentView visibleRect], NSRect(extentRect))) {
+        v->ensureRectVisibleCentered(extentRect, true);
+    }
 }
 
 // [info draggingLocation] is in window coords
+
+- (BOOL)eventMayStartDrag:(NSEvent *)event
+{
+    return _part ? _part->eventMayStartDrag(event) : NO;
+}
 
 - (NSDragOperation)dragOperationForDraggingInfo:(id <NSDraggingInfo>)info
 {
@@ -1620,6 +2175,7 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
             KWQClipboard::AccessPolicy policy = _part->baseURL().isLocalFile() ? KWQClipboard::Readable : KWQClipboard::TypesReadable;
             KWQClipboard *clipboard = new KWQClipboard(true, [info draggingPasteboard], policy);
             clipboard->ref();
+            clipboard->setSourceOperation([info draggingSourceOperationMask]);
             
             v->cancelDragAndDrop(QPoint([info draggingLocation]), clipboard);
             clipboard->setAccessPolicy(KWQClipboard::Numb);    // invalidate clipboard here for security
@@ -1640,6 +2196,7 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 
             KWQClipboard *clipboard = new KWQClipboard(true, [info draggingPasteboard], KWQClipboard::Readable);
             clipboard->ref();
+            clipboard->setSourceOperation([info draggingSourceOperationMask]);
 
             BOOL result = v->performDragAndDrop(QPoint([info draggingLocation]), clipboard);
             clipboard->setAccessPolicy(KWQClipboard::Numb);    // invalidate clipboard here for security
@@ -1663,9 +2220,23 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 - (void)dragSourceEndedAt:(NSPoint)windowLoc operation:(NSDragOperation)operation
 {
     if (_part) {
-        // FIXME must handle operation
-        _part->dragSourceEndedAt(QPoint(windowLoc));
+        _part->dragSourceEndedAt(QPoint(windowLoc), operation);
     }
+}
+
+- (BOOL)mayDHTMLCut
+{
+    return _part->mayCut();
+}
+
+- (BOOL)mayDHTMLCopy
+{
+    return _part->mayCopy();
+}
+
+- (BOOL)mayDHTMLPaste
+{
+    return _part->mayPaste();
 }
 
 - (BOOL)tryDHTMLCut
@@ -1681,6 +2252,43 @@ static HTMLFormElementImpl *formElementFromDOMElement(DOMElement *element)
 - (BOOL)tryDHTMLPaste
 {
     return _part->tryPaste();
+}
+
+- (DOMRange *)rangeOfCharactersAroundCaret
+{
+    if (!_part)
+        return nil;
+        
+    Selection selection(_part->selection());
+    if (!selection.isCaret())
+        return nil;
+
+    VisiblePosition caret(selection.start(), selection.startAffinity());
+    VisiblePosition next = caret.next();
+    VisiblePosition previous = caret.previous();
+    if (caret == next || caret == previous)
+        return nil;
+
+    return [DOMRange _rangeWithImpl:makeRange(previous, next).handle()];
+}
+
+- (NSMutableDictionary *)dashboardRegions
+{
+    return _part->dashboardRegionsDictionary();
+}
+
+@end
+
+@implementation WebCoreBridge (WebCoreBridgeInternal)
+
+- (RootObject *)executionContextForView:(NSView *)aView
+{
+    KWQKHTMLPart *part = [self part];
+    RootObject *root = new RootObject(aView);    // The root gets deleted by JavaScriptCore.
+    root->setRootObjectImp(static_cast<ObjectImp *>(Window::retrieveWindow(part)));
+    root->setInterpreter(KJSProxy::proxy(part)->interpreter());
+    part->addPluginRootObject(root);
+    return root;
 }
 
 @end

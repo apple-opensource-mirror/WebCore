@@ -58,6 +58,8 @@ RenderImage::RenderImage(NodeImpl *_node)
 
     setIntrinsicWidth( 0 );
     setIntrinsicHeight( 0 );
+    if (element())
+        updateAltText();
 }
 
 RenderImage::~RenderImage()
@@ -84,11 +86,15 @@ void RenderImage::setContentObject(CachedObject* co)
 
 void RenderImage::setImage(CachedImage* newImage)
 {
-    if (image)
-        image->deref(this);
-    image = newImage;
-    if (image)
-        image->ref(this);
+    if (image != newImage) {
+        if (image)
+            image->deref(this);
+        image = newImage;
+        if (image)
+            image->ref(this);
+        if (image->isErrorImage())
+            setPixmap(image->pixmap(), QRect(0,0,16,16), image);
+    }
 }
 
 void RenderImage::setPixmap( const QPixmap &p, const QRect& r, CachedImage *o)
@@ -101,11 +107,11 @@ void RenderImage::setPixmap( const QPixmap &p, const QRect& r, CachedImage *o)
     bool iwchanged = false;
 
     if(o->isErrorImage()) {
-        int iw = p.width() + 8;
-        int ih = p.height() + 8;
+        int iw = p.width() + 4;
+        int ih = p.height() + 4;
 
         // we have an alt and the user meant it (its not a text we invented)
-        if ( element() && !alt.isEmpty() && !element()->getAttribute( ATTR_ALT ).isNull()) {
+        if (!alt.isEmpty()) {
             const QFontMetrics &fm = style()->fontMetrics();
             QRect br = fm.boundingRect (  0, 0, 1024, 256, Qt::AlignAuto|Qt::WordBreak, alt.string() );
             if ( br.width() > iw )
@@ -207,16 +213,11 @@ void RenderImage::setPixmap( const QPixmap &p, const QRect& r, CachedImage *o)
 }
 
 #if APPLE_CHANGES
-QColor RenderImage::selectionTintColor(QPainter *p) const
+void RenderImage::resetAnimation()
 {
-    QColor color;
-    RenderStyle* pseudoStyle = getPseudoStyle(RenderStyle::SELECTION);
-    if (pseudoStyle && pseudoStyle->backgroundColor().isValid()) {
-        color = pseudoStyle->backgroundColor();
-    } else {
-        color = p->selectedTextBackgroundColor();
-    }
-    return QColor(qRgba(color.red(), color.green(), color.blue(), 160));
+    pix.resetAnimation();
+    if (!needsLayout())
+        repaint();
 }
 #endif
 
@@ -278,11 +279,10 @@ void RenderImage::paint(PaintInfo& i, int _tx, int _ty)
             
             bool errorPictureDrawn = false;
             int imageX = 0, imageY = 0;
-            int usableWidth = cWidth - leftBorder - borderRight() - leftPad - paddingRight();
-            int usableHeight = cHeight - topBorder - borderBottom() - topPad - paddingBottom();
+            int usableWidth = cWidth;
+            int usableHeight = cHeight;
             
-            if(berrorPic && !pix.isNull() && (usableWidth >= pix.width()) && (usableHeight >= pix.height()) )
-            {
+            if (berrorPic && !pix.isNull() && (usableWidth >= pix.width()) && (usableHeight >= pix.height())) {
                 // Center the error image, accounting for border and padding.
                 int centerX = (usableWidth - pix.width())/2;
                 if (centerX < 0)
@@ -292,13 +292,13 @@ void RenderImage::paint(PaintInfo& i, int _tx, int _ty)
                     centerY = 0;
                 imageX = leftBorder + leftPad + centerX;
                 imageY = topBorder + topPad + centerY;
-                p->drawPixmap( QPoint(_tx + imageX, _ty + imageY), pix, pix.rect() );
+                p->drawPixmap(QPoint(_tx + imageX, _ty + imageY), pix, pix.rect());
                 errorPictureDrawn = true;
             }
             
-            if(!alt.isEmpty()) {
+            if (!alt.isEmpty()) {
                 QString text = alt.string();
-                text.replace('\\', backslashAsCurrencySymbol());
+                text.replace(QChar('\\'), backslashAsCurrencySymbol());
                 p->setFont (style()->font());
                 p->setPen (style()->color());
                 int ax = _tx + leftBorder + leftPad;
@@ -309,11 +309,11 @@ void RenderImage::paint(PaintInfo& i, int _tx, int _ty)
                 // Only draw the alt text if it'll fit within the content box,
                 // and only if it fits above the error image.
                 int textWidth = fm.width (text, text.length());
-                if (errorPictureDrawn){
-                    if (usableWidth > textWidth && fm.height() <= imageY)
+                if (errorPictureDrawn) {
+                    if (usableWidth >= textWidth && fm.height() <= imageY)
                         p->drawText(ax, ay+ascent, 0 /* ignored */, 0 /* ignored */, Qt::WordBreak  /* not supported */, text );
                 }
-                else if (usableWidth >= textWidth && cHeight>=fm.height())
+                else if (usableWidth >= textWidth && cHeight >= fm.height())
                     p->drawText(ax, ay+ascent, 0 /* ignored */, 0 /* ignored */, Qt::WordBreak  /* not supported */, text );
             }
 #else /* not APPLE_CHANGES */
@@ -342,51 +342,7 @@ void RenderImage::paint(PaintInfo& i, int _tx, int _ty)
 #endif /* APPLE_CHANGES not defined */
         }
     }
-    else if (image && !image->isTransparent())
-    {
-#if APPLE_CHANGES
-        // Do the calculations to draw selections as tall as the line.
-        // Ignore the passed-in value for _ty.
-        // Use the bottom of the line above as the y position (if there is one, 
-        // otherwise use the top of this renderer's line) and the height of the line as the height. 
-        // This mimics Cocoa.
-        int selectionTop = -1;
-        int selectionHeight = -1;
-        int selectionLeft = -1;
-        int selectionRight = -1;
-        bool extendSelectionToLeft = false;
-        bool extendSelectionToRight = false;
-        if (drawSelectionTint) {
-            InlineBox *box = inlineBox();
-            if (box) {
-                // Get a value for selectionTop that is relative to the containing block.
-                // This value is used for determining left and right offset for the selection, if necessary,
-                // and for calculating the selection height.
-                if (box->root()->prevRootBox())
-                    selectionTop = box->root()->prevRootBox()->bottomOverflow();
-                else
-                    selectionTop = box->root()->topOverflow();
-
-                selectionHeight = box->root()->bottomOverflow() - selectionTop;
-
-                int absx, absy;
-                containingBlock()->absolutePosition(absx, absy);
-
-                if (selectionState() == SelectionInside && box->root()->firstLeafChild() == box) {
-                    extendSelectionToLeft = true;
-                    selectionLeft = absx + containingBlock()->leftOffset(selectionTop);
-                }
-                if (selectionState() == SelectionInside && box->root()->lastLeafChild() == box) {
-                    extendSelectionToRight = true;
-                    selectionRight = absx + containingBlock()->rightOffset(selectionTop);
-                }
-        
-                // Now make the selectionTop an absolute coordinate.
-                selectionTop += absy;
-            }
-        }
-#endif
-
+    else if (image && !image->isTransparent()) {
         if ( (cWidth != intrinsicWidth() ||  cHeight != intrinsicHeight()) &&
              pix.width() > 0 && pix.height() > 0 && image->valid_rect().isValid())
         {
@@ -435,16 +391,9 @@ void RenderImage::paint(PaintInfo& i, int _tx, int _ty)
             }
 #if APPLE_CHANGES
             if (drawSelectionTint) {
-                int left = _tx + leftBorder + leftPad;
-                int width = tintSize.width();
-                int top = selectionTop >= 0 ? selectionTop : _ty + topBorder + topPad;
-                int height = selectionHeight >= 0 ? selectionHeight : tintSize.height();
-                QBrush brush(selectionTintColor(p));
-                p->fillRect(left, top, width, height, brush);
-                if (extendSelectionToLeft)
-                    p->fillRect(selectionLeft, selectionTop, left - selectionLeft, selectionHeight, brush);
-                if (extendSelectionToRight)
-                    p->fillRect(left + width, selectionTop, selectionRight - (left + width), selectionHeight, brush);
+                QBrush brush(selectionColor(p));
+                QRect selRect(selectionRect());
+                p->fillRect(selRect.x(), selRect.y(), selRect.width(), selRect.height(), brush);
             }
 #endif
         }
@@ -478,16 +427,9 @@ void RenderImage::paint(PaintInfo& i, int _tx, int _ty)
              }
 #if APPLE_CHANGES
              if (drawSelectionTint) {
-                int left = offs.x() + rect.x();
-                int width = rect.width();
-                int top = selectionTop >= 0 ? selectionTop : offs.y() + rect.y();
-                int height = selectionHeight >= 0 ? selectionHeight : rect.height();
-                QBrush brush(selectionTintColor(p));
-                p->fillRect(left, top, width, height, brush);
-                if (extendSelectionToLeft)
-                    p->fillRect(selectionLeft, selectionTop, left - selectionLeft, selectionHeight, brush);
-                if (extendSelectionToRight)
-                    p->fillRect(left + width, selectionTop, selectionRight - (left + width), selectionHeight, brush);
+                 QBrush brush(selectionColor(p));
+                 QRect selRect(selectionRect());
+                 p->fillRect(selRect.x(), selRect.y(), selRect.width(), selRect.height(), brush);
              }
 #endif
         }
@@ -548,9 +490,9 @@ HTMLMapElementImpl* RenderImage::imageMap()
 }
 
 bool RenderImage::nodeAtPoint(NodeInfo& info, int _x, int _y, int _tx, int _ty,
-                              HitTestAction hitTestAction, bool inside)
+                              HitTestAction hitTestAction)
 {
-    inside |= RenderReplaced::nodeAtPoint(info, _x, _y, _tx, _ty, hitTestAction, inside);
+    bool inside = RenderReplaced::nodeAtPoint(info, _x, _y, _tx, _ty, hitTestAction);
 
     if (inside && element()) {
         int tx = _tx + m_x;
@@ -605,9 +547,10 @@ int RenderImage::calcReplacedWidth() const
 {
     // If height is specified and not width, preserve aspect ratio.
     if (isHeightSpecified() && !isWidthSpecified()) {
-        if (intrinsicHeight() == 0){
+        if (intrinsicHeight() == 0)
             return 0;
-        }
+        if (!image || image->isErrorImage())
+            return intrinsicWidth(); // Don't bother scaling.
         return calcReplacedHeight() * intrinsicWidth() / intrinsicHeight();
     }
     return RenderReplaced::calcReplacedWidth();
@@ -617,9 +560,10 @@ int RenderImage::calcReplacedHeight() const
 {
     // If width is specified and not height, preserve aspect ratio.
     if (isWidthSpecified() && !isHeightSpecified()) {
-        if (intrinsicWidth() == 0){
+        if (intrinsicWidth() == 0)
             return 0;
-        }
+        if (!image || image->isErrorImage())
+            return intrinsicHeight(); // Don't bother scaling.
         return calcReplacedWidth() * intrinsicHeight() / intrinsicWidth();
     }
     return RenderReplaced::calcReplacedHeight();

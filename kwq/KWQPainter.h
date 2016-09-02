@@ -83,6 +83,7 @@ public:
     void drawConvexPolygon(const QPointArray &);
 
     void fillRect(int, int, int, int, const QBrush &);
+    void fillRect(const QRect &, const QBrush &);
 
     void drawPixmap(const QPoint &, const QPixmap &);
     void drawPixmap(const QPoint &, const QPixmap &, const QRect &);
@@ -91,6 +92,8 @@ public:
 			    int sx=0, int sy=0, int sw=-1, int sh=-1, int compositeOperator=-1, CGContextRef context=0);
     void drawPixmap( int x, int y, int w, int h, const QPixmap &,
 			    int sx=0, int sy=0, int sw=-1, int sh=-1, int compositeOperator=-1, CGContextRef context=0);
+    void drawFloatPixmap( float x, float y, float w, float h, const QPixmap &,
+			    float sx=0, float sy=0, float sw=-1, float sh=-1, int compositeOperator=-1, CGContextRef context=0);
     void drawTiledPixmap(int, int, int, int, const QPixmap &, int sx=0, int sy=0, CGContextRef context=0);
 
     void addClip(const QRect &);
@@ -99,7 +102,7 @@ public:
     void setRasterOp(RasterOp);
 
     void drawText(int x, int y, int, int, int alignmentFlags, const QString &);
-    void drawHighlightForText(int x, int minX, int maxX, int y, int h, 
+    void drawHighlightForText(int x, int y, int h, 
                   const QChar *, int length, int from, int to, int toAdd,
                   const QColor& backgroundColor, QPainter::TextDirection d, bool visuallyOrdered,
                   int letterSpacing, int wordSpacing, bool smallCaps);
@@ -107,6 +110,8 @@ public:
                   const QColor& backgroundColor, QPainter::TextDirection d, bool visuallyOrdered,
                   int letterSpacing, int wordSpacing, bool smallCaps);
     void drawLineForText(int x, int y, int yOffset, int width);
+    void drawLineForMisspelling(int x, int y, int width);
+    int misspellingLineThickness() const;
 
     QColor selectedTextBackgroundColor() const;
     void setUsesInactiveTextBackgroundColor(bool u) { _usesInactiveTextBackgroundColor = u; }
@@ -134,6 +139,10 @@ public:
     static void setCompositeOperation (CGContextRef context, QString operation);
     static void setCompositeOperation (CGContextRef context, int operation);
 
+    static CGColorSpaceRef rgbColorSpace();
+    static CGColorSpaceRef grayColorSpace();
+    static CGColorSpaceRef cmykColorSpace();
+
 private:
     // no copying or assignment
     QPainter(const QPainter &);
@@ -142,7 +151,6 @@ private:
     void _setColorFromBrush();
     void _setColorFromPen();
 
-    // A fillRect designed to work around buggy behavior in NSRectFill.
     void _fillRect(float x, float y, float w, float h, const QColor& color);
     
     void _drawPoints(const QPointArray &_points, bool winding, int index, int _npoints, bool fill);

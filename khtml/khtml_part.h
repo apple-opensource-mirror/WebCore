@@ -27,15 +27,11 @@
 #ifndef __khtml_part_h__
 #define __khtml_part_h__
 
-#include "dom/html_document.h"
-#include "dom/dom2_range.h"
-#include "dom/dom_misc.h"
-#include "editing/htmlediting.h"
+#include "editing/text_granularity.h"
+#include "editing/edit_actions.h"
 
 #include <kparts/part.h>
 #include <kparts/browserextension.h>
-
-#include <qregexp.h>
 
 class KHTMLPartPrivate;
 class KHTMLPartBrowserExtension;
@@ -46,8 +42,13 @@ class KJavaAppletContext;
 
 namespace DOM
 {
+  class CSSComputedStyleDeclarationImpl;
+  class CSSMutableStyleDeclarationImpl;
   class CSSStyleDeclarationImpl;
+  class DOMString;
+  class Document;
   class DocumentImpl;
+  class ElementImpl;
   class EventListener;
   class HTMLAnchorElementImpl;
   class HTMLDocument;
@@ -63,7 +64,6 @@ namespace DOM
   class Node;
   class NodeImpl;
   class Range;
-  class Selection;
 }
 
 namespace khtml
@@ -73,7 +73,8 @@ namespace khtml
   class CSSStyleSelector;
   class DocLoader;
   class DrawContentsEvent;
-  class EditCommand;
+  class EditCommandPtr;
+  class FormData;
   class HTMLTokenizer;
   class MouseDoubleClickEvent;
   class MouseEvent;
@@ -83,17 +84,17 @@ namespace khtml
   class RenderPart;
   class RenderPartObject;
   class RenderWidget;
+  class Selection;
   class XMLTokenizer;
-};
+}
 
 namespace KJS {
+    class DOMDocument;
     class Selection;
     class SelectionFunc;
     class Window;
     class WindowFunc;
-    class JSEventListener;
-    class DOMDocument;
-};
+}
 
 namespace KParts
 {
@@ -158,7 +159,6 @@ class KHTMLPart : public KParts::ReadOnlyPart
   friend class KJS::SelectionFunc;
   friend class KJS::Window;
   friend class KJS::WindowFunc;
-  friend class KJS::JSEventListener;
   friend class KJS::DOMDocument;
   friend class KJSProxy;
   friend class KHTMLPartBrowserExtension;
@@ -211,6 +211,8 @@ public:
    * Reimplemented from @ref KParts::ReadOnlyPart::openURL .
    */
   virtual bool openURL( const KURL &url );
+
+  void didExplicitOpen();
 
   /**
    * Stops loading the document and kill all data requests (for images, etc.)
@@ -302,7 +304,7 @@ public:
   /**
    * Implementation of CSS property -khtml-user-drag == auto
    */
-  virtual bool shouldDragAutoNode(DOM::NodeImpl*) const;
+  virtual bool shouldDragAutoNode(DOM::NodeImpl*, int x, int y) const;
   
   /**
    * Enables/disables Java applet support. Note that calling this function
@@ -386,9 +388,15 @@ public:
 
   /**
    * Schedules a redirection after @p delay seconds.
-   * Note that this is used for JavaScript-triggered location changes as well.
    */
-  void scheduleRedirection( double delay, const QString &url, bool lockHistory = true, bool userGesture = false );
+  void scheduleRedirection(double delay, const QString &url, bool lockHistory = true);
+
+  /**
+   * Schedules a location change.
+   * This is used for JavaScript-triggered location changes.
+   */
+  void scheduleLocationChange(const QString &url, const QString &referrer, bool lockHistory = true, bool userGesture = false);
+  bool isScheduledLocationChangePending() const;
 
   /**
    * Schedules a history navigation operation (go forward, go back, etc.).
@@ -455,6 +463,13 @@ public:
    * Call this after your last call to @ref write().
    */
   virtual void end();
+
+  void endIfNotLoading();
+
+  /**
+   * Similar to end, but called to abort a load rather than cleanly end.
+   */
+  void stop();
 
   /*
    * Prints the current HTML page layed out for the printer.
@@ -565,7 +580,7 @@ public:
    */
   int zoomFactor() const;
 
-/**
+  /**
    * Returns the text the user has marked.
    */
   virtual QString selectedText() const;
@@ -573,22 +588,42 @@ public:
   /**
    * Returns the selected part of the HTML.
    */
-  const DOM::Selection &selection() const;
+  const khtml::Selection &selection() const;
+
+  /**
+   * Returns the granularity of the selection (character, word, line, paragraph).
+   */
+  khtml::ETextGranularity selectionGranularity() const;
+  
+  /**
+   * Sets the granularity of the selection (character, word, line, paragraph).
+   */
+  void KHTMLPart::setSelectionGranularity(khtml::ETextGranularity granularity) const;
 
   /**
    * Returns the drag caret of the HTML.
    */
-  const DOM::Selection &dragCaret() const;
+  const khtml::Selection &dragCaret() const;
 
   /**
    * Sets the current selection.
    */
-  void setSelection(const DOM::Selection &, bool closeTyping=true);
+  void setSelection(const khtml::Selection &, bool closeTyping = true, bool keepTypingStyle = false);
 
   /**
-      * Sets the current drag cart.
+   * Returns a mark, to be used as emacs uses it.
    */
-  void setDragCaret(const DOM::Selection &);
+  const khtml::Selection &mark() const;
+
+  /**
+   * Returns the mark.
+   */
+  void setMark(const khtml::Selection &);
+
+  /**
+   * Sets the current drag cart.
+   */
+  void setDragCaret(const khtml::Selection &);
   
   /**
    * Clears the current selection.
@@ -603,7 +638,7 @@ public:
   /**
    * Controls the visibility of the selection.
    */
-  void setSelectionVisible(bool flag=true);
+  void setCaretVisible(bool flag=true);
 
   /**
    * Paints the caret.
@@ -648,47 +683,47 @@ public:
   /**
    * Returns whether editing should end in the given range
    */
-  bool shouldBeginEditing(const DOM::Range &) const;
+  virtual bool shouldBeginEditing(const DOM::Range &) const;
 
   /**
    * Returns whether editing should end in the given range
    */
-  bool shouldEndEditing(const DOM::Range &) const;
+  virtual bool shouldEndEditing(const DOM::Range &) const;
 
   /**
    * Returns the contentEditable "override" value for the part
    */
-  bool isContentEditable() const;
+  virtual bool isContentEditable() const;
 
   /**
    * Returns the most recent edit command applied.
    */
-  khtml::EditCommand lastEditCommand();
+  khtml::EditCommandPtr lastEditCommand();
 
   /**
    * Called when editing has been applied.
    */
-  void appliedEditing(khtml::EditCommand &);
+  void appliedEditing(khtml::EditCommandPtr &);
 
   /**
    * Called when editing has been unapplied.
    */
-  void unappliedEditing(khtml::EditCommand &);
+  void unappliedEditing(khtml::EditCommandPtr &);
 
   /**
    * Called when editing has been reapplied.
    */
-  void reappliedEditing(khtml::EditCommand &);
+  void reappliedEditing(khtml::EditCommandPtr &);
 
   /**
    * Returns the typing style for the document.
    */
-  DOM::CSSStyleDeclarationImpl *typingStyle() const;
+  DOM::CSSMutableStyleDeclarationImpl *typingStyle() const;
 
   /**
    * Sets the typing style for the document.
    */
-  void setTypingStyle(DOM::CSSStyleDeclarationImpl *);
+  void setTypingStyle(DOM::CSSMutableStyleDeclarationImpl *);
 
   /**
    * Clears the typing style for the document.
@@ -736,6 +771,8 @@ public:
   virtual void restoreState( QDataStream &stream );
 #endif
 
+  virtual void tokenizerProcessedData() {};
+
   /**
    * Returns the @p Node currently under the mouse
    */
@@ -762,6 +799,8 @@ public:
   QStringList frameNames() const;
 
   QPtrList<KParts::ReadOnlyPart> frames() const;
+
+  KHTMLPart *childFrameNamed(const QString &name) const;
 
   /**
    * Finds a frame by name. Returns 0L if frame can't be found.
@@ -854,16 +893,27 @@ public:
   void copyToPasteboard();
   void cutToPasteboard();
   void pasteFromPasteboard();
+  void pasteAndMatchStyle();
   bool canPaste() const;
   void redo();
   void undo();
   bool canRedo() const;
   bool canUndo() const;
-  void applyStyle(DOM::CSSStyleDeclarationImpl *);
+  void computeAndSetTypingStyle(DOM::CSSStyleDeclarationImpl *, khtml::EditAction editingAction=khtml::EditActionUnspecified);
+  void applyStyle(DOM::CSSStyleDeclarationImpl *, khtml::EditAction editingAction=khtml::EditActionUnspecified);
+  void applyParagraphStyle(DOM::CSSStyleDeclarationImpl *, khtml::EditAction editingAction=khtml::EditActionUnspecified);
   TriState selectionHasStyle(DOM::CSSStyleDeclarationImpl *) const;
   bool selectionStartHasStyle(DOM::CSSStyleDeclarationImpl *) const;
   DOM::DOMString selectionStartStylePropertyValue(int stylePropertyID) const;
+  void applyEditingStyleToBodyElement() const;
+  void removeEditingStyleFromBodyElement() const;
+  void applyEditingStyleToElement(DOM::ElementImpl *) const;
+  void removeEditingStyleFromElement(DOM::ElementImpl *) const;
   void print();
+  virtual bool isCharacterSmartReplaceExempt(const QChar &, bool);
+
+  // Used to keep the part alive when running a script that might destroy it.
+  void keepAlive();
 
 signals:
   /**
@@ -890,13 +940,15 @@ signals:
    */
   void nodeActivated(const DOM::Node &);
 
-protected:
+public:
 
   /**
    * returns a KURL object for the given url. Use when
    * you know what you're doing.
    */
   KURL completeURL( const QString &url );
+
+protected:
 
   /**
    * presents a detailed error message to the user.
@@ -929,6 +981,8 @@ protected:
    * Eventhandler for the khtml::DrawContentsEvent.
    */
   virtual void khtmlDrawContentsEvent( khtml::DrawContentsEvent * );
+  
+  void selectClosestWordFromMouseEvent(QMouseEvent *mouse, DOM::Node &innerNode, int x, int y);
 
 #if !APPLE_CHANGES
   /**
@@ -1062,6 +1116,10 @@ private slots:
   void slotIncZoom();
   void slotDecZoom();
 
+#if APPLE_CHANGES
+  void childBegin();
+#endif
+
   void slotLoadImages();
 
   /**
@@ -1140,6 +1198,8 @@ private slots:
    */
   void slotClearSelection();
 
+  void slotEndLifeSupport();
+
 private:
 
 
@@ -1156,17 +1216,12 @@ private:
   /**
    * @internal
    */
-  void setFocusNodeIfNeeded(const DOM::Selection &);
+  void setFocusNodeIfNeeded();
 
   /**
    * @internal
    */
   void selectionLayoutChanged();
-
-  /**
-   * @internal
-   */
-  void notifySelectionChanged(bool closeTyping=true);
 
   /**
    * @internal
@@ -1195,7 +1250,7 @@ private:
   /**
    * @internal
    */
-  void submitForm( const char *action, const QString &url, const QByteArray &formData,
+  void submitForm( const char *action, const QString &url, const khtml::FormData &formData,
                    const QString &target, const QString& contentType = QString::null,
                    const QString& boundary = QString::null );
 
@@ -1214,7 +1269,7 @@ private:
   QVariant executeScheduledScript();
 
   bool requestFrame( khtml::RenderPart *frame, const QString &url, const QString &frameName,
-                     const QStringList &args = QStringList(), bool isIFrame = false );
+                     const QStringList &paramNames = QStringList(), const QStringList &paramValues = QStringList(), bool isIFrame = false );
 
   /**
    * @internal returns a name for a frame without a name.
@@ -1226,23 +1281,27 @@ private:
   QString requestFrameName();
 
   bool requestObject( khtml::RenderPart *frame, const QString &url, const QString &serviceType,
-                      const QStringList &args = QStringList() );
+                      const QStringList &paramNames = QStringList(), const QStringList &paramValues = QStringList()  );
 
   bool requestObject( khtml::ChildFrame *child, const KURL &url, const KParts::URLArgs &args = KParts::URLArgs() );
 
-  DOM::EventListener *createHTMLEventListener( QString code );
+  DOM::EventListener *createHTMLEventListener( QString code, DOM::NodeImpl *node );
 
-#if APPLE_CHANGES
-  public:
-#endif
-  DOM::HTMLDocumentImpl *docImpl() const;
+public:
   DOM::DocumentImpl *xmlDocImpl() const;
-#if APPLE_CHANGES
-  private:
-#endif
+  void replaceDocImpl(DOM::DocumentImpl* newDoc);
+
+  // Workaround for the fact that it's hard to delete a frame.
+  // Call this after doing user-triggered selections to make it easy to delete the frame you entirely selected.
+  void selectFrameElementInParentIfFullySelected();
+  
+private:
   khtml::ChildFrame *childFrame( const QObject *obj );
 
   khtml::ChildFrame *recursiveFrameRequest( const KURL &url, const KParts::URLArgs &args, bool callParent = true );
+
+  void connectChild(const khtml::ChildFrame *) const;
+  void disconnectChild(const khtml::ChildFrame *) const;
 
   bool checkLinkSecurity(const KURL &linkURL,const QString &message = QString::null, const QString &button = QString::null);
   QVariant executeScript(QString filename, int baseLine, const DOM::Node &n, const QString &script);
@@ -1251,7 +1310,13 @@ private:
 
   KJSProxy *jScript();
 
+#if APPLE_CHANGES
+ public:
+#endif
   KHTMLPart *opener();
+#if APPLE_CHANGES
+ private:
+#endif
   long cacheId() const;
   void setOpener(KHTMLPart *_opener);
   bool openedByJS();
@@ -1279,11 +1344,11 @@ private:
   void handleMousePressEventTripleClick(khtml::MousePressEvent *event);
 #endif
 
-  DOM::CSSStyleDeclarationImpl *selectionComputedStyle(DOM::NodeImpl *&nodeToRemove) const;
+  DOM::CSSComputedStyleDeclarationImpl *selectionComputedStyle(DOM::NodeImpl *&nodeToRemove) const;
 
   KHTMLPartPrivate *d;
   friend class KHTMLPartPrivate;
-  friend class DOM::Selection;
+  friend class khtml::Selection;
 
 #if APPLE_CHANGES
 public:  
@@ -1295,6 +1360,7 @@ public:
   void setStatusBarText(const QString &);
   void started(KIO::Job *);
   void frameDetached();
+  virtual void didFirstLayout() {}
 #endif
 
   int frameCount;

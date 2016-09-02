@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
- * Copyright (C) 2003 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -34,7 +34,7 @@
 #include "html/htmltokenizer.h"
 
 #include "misc/htmlhashes.h"
-#include "misc/khtml_text_operations.h"
+#include "editing/visible_text.h"
 
 #include "khtmlview.h"
 #include "khtml_part.h"
@@ -46,9 +46,9 @@
 #include "css/cssproperties.h"
 #include "css/cssvalues.h"
 #include "css/css_ruleimpl.h"
-#include "xml/dom_selection.h"
 #include "xml/dom_textimpl.h"
 #include "xml/dom2_eventsimpl.h"
+#include "editing/markup.h"
 
 #include <kdebug.h>
 
@@ -111,6 +111,22 @@ void HTMLElementImpl::removeMappedAttributeDecl(MappedAttributeEntry entryType, 
     if (!attrValueDict)
         return;
     attrValueDict->remove(attrValue.implementation());
+}
+
+void HTMLElementImpl::invalidateStyleAttribute()
+{
+    m_isStyleAttributeValid = false;
+}
+
+void HTMLElementImpl::updateStyleAttributeIfNeeded() const
+{
+    if (!m_isStyleAttributeValid) {
+        m_isStyleAttributeValid = true;
+        m_synchronizingStyleAttribute = true;
+        if (m_inlineStyleDecl)
+            const_cast<HTMLElementImpl*>(this)->setAttribute(ATTR_STYLE, m_inlineStyleDecl->cssText());
+        m_synchronizingStyleAttribute = false;
+    }
 }
 
 HTMLAttributeImpl::~HTMLAttributeImpl()
@@ -179,15 +195,15 @@ void HTMLNamedAttrMapImpl::parseClassAttribute(const DOMString& classStr)
         (classStr.implementation()->isLower() ? classStr : DOMString(classStr.implementation()->lower())) :
         classStr;
     
-    if (classAttr.find(' ') == -1)
+    if (classAttr.find(' ') == -1 && classAttr.find('\n') == -1)
         m_classList.setString(AtomicString(classAttr));
     else {
         QString val = classAttr.string();
+        val.replace('\n', ' ');
         QStringList list = QStringList::split(' ', val);
         
         AtomicStringList* curr = 0;
-        for (QStringList::Iterator it = list.begin(); it != list.end(); ++it)
-        {
+        for (QStringList::Iterator it = list.begin(); it != list.end(); ++it) {
             const QString& singleClass = *it;
             if (!singleClass.isEmpty()) {
                 if (curr) {
@@ -209,14 +225,13 @@ HTMLElementImpl::HTMLElementImpl(DocumentPtr *doc)
     : ElementImpl(doc)
 {
     m_inlineStyleDecl = 0;
+    m_isStyleAttributeValid = true;
+    m_synchronizingStyleAttribute = false;
 }
 
 HTMLElementImpl::~HTMLElementImpl()
 {
-    if (m_inlineStyleDecl) {
-        m_inlineStyleDecl->setParent(0);
-        m_inlineStyleDecl->deref();
-    }
+    destroyInlineStyleDecl();
 }
 
 AttributeImpl* HTMLElementImpl::createAttribute(NodeImpl::Id id, DOMStringImpl* value)
@@ -268,11 +283,30 @@ bool HTMLElementImpl::isInline() const
 
 void HTMLElementImpl::createInlineStyleDecl()
 {
-    m_inlineStyleDecl = new CSSStyleDeclarationImpl(0);
+    m_inlineStyleDecl = new CSSMutableStyleDeclarationImpl;
     m_inlineStyleDecl->ref();
     m_inlineStyleDecl->setParent(getDocument()->elementSheet());
     m_inlineStyleDecl->setNode(this);
     m_inlineStyleDecl->setStrictParsing(!getDocument()->inCompatMode());
+}
+
+void HTMLElementImpl::destroyInlineStyleDecl()
+{
+    if (m_inlineStyleDecl) {
+        m_inlineStyleDecl->setNode(0);
+        m_inlineStyleDecl->setParent(0);
+        m_inlineStyleDecl->deref();
+        m_inlineStyleDecl = 0;
+    }
+}
+
+NodeImpl *HTMLElementImpl::cloneNode(bool deep)
+{
+    HTMLElementImpl *n = static_cast<HTMLElementImpl *>(ElementImpl::cloneNode(deep));
+    if (n && m_inlineStyleDecl) {
+        *n->getInlineStyleDecl() = *m_inlineStyleDecl;
+    }
+    return n;
 }
 
 void HTMLElementImpl::attributeChanged(AttributeImpl* attr, bool preserveDecls)
@@ -331,6 +365,9 @@ bool HTMLElementImpl::mapToEntry(NodeImpl::Id attr, MappedAttributeEntry& result
         case ATTR_DIR:
             result = eUniversal;
             return false;
+        case ATTR_STYLE:
+            result = eNone;
+            return !m_synchronizingStyleAttribute;
         default:
             break;
     }
@@ -358,7 +395,7 @@ void HTMLElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
             if (attr->isNull())
                 namedAttrMap->setID(nullAtom);
             else if (getDocument()->inCompatMode() && !attr->value().implementation()->isLower())
-                namedAttrMap->setID(AtomicString(attr->value().implementation()->lower()));
+                namedAttrMap->setID(AtomicString(attr->value().domString().lower()));
             else
                 namedAttrMap->setID(attr->value());
         }
@@ -374,12 +411,12 @@ void HTMLElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
         setContentEditable(attr);
         break;
     case ATTR_STYLE:
-        // ### we need to remove old style info in case there was any!
-        // ### the inline sheet ay contain more than 1 property!
-        // stylesheet info
-        setHasStyle();
-        if (!m_inlineStyleDecl) createInlineStyleDecl();
-        m_inlineStyleDecl->setProperty(attr->value());
+        setHasStyle(!attr->isNull());
+        if (attr->isNull())
+            destroyInlineStyleDecl();
+        else
+            getInlineStyleDecl()->parseDeclaration(attr->value());
+        m_isStyleAttributeValid = true;
         setChanged();
         break;
     case ATTR_TABINDEX:
@@ -397,111 +434,111 @@ void HTMLElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
 // standard events
     case ATTR_ONCLICK:
 	setHTMLEventListener(EventImpl::KHTML_CLICK_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+            getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONCONTEXTMENU:
 	setHTMLEventListener(EventImpl::CONTEXTMENU_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONDBLCLICK:
 	setHTMLEventListener(EventImpl::KHTML_DBLCLICK_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONMOUSEDOWN:
         setHTMLEventListener(EventImpl::MOUSEDOWN_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONMOUSEMOVE:
         setHTMLEventListener(EventImpl::MOUSEMOVE_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONMOUSEOUT:
         setHTMLEventListener(EventImpl::MOUSEOUT_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONMOUSEOVER:
         setHTMLEventListener(EventImpl::MOUSEOVER_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONMOUSEUP:
         setHTMLEventListener(EventImpl::MOUSEUP_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONFOCUS:
         setHTMLEventListener(EventImpl::DOMFOCUSIN_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONKEYDOWN:
         setHTMLEventListener(EventImpl::KEYDOWN_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
 	break;
     case ATTR_ONKEYPRESS:
         setHTMLEventListener(EventImpl::KEYPRESS_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
 	break;
     case ATTR_ONKEYUP:
         setHTMLEventListener(EventImpl::KEYUP_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONSCROLL:
         setHTMLEventListener(EventImpl::SCROLL_EVENT,
-            getDocument()->createHTMLEventListener(attr->value().string()));
+            getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONBEFORECUT:
         setHTMLEventListener(EventImpl::BEFORECUT_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONCUT:
         setHTMLEventListener(EventImpl::CUT_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONBEFORECOPY:
         setHTMLEventListener(EventImpl::BEFORECOPY_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONCOPY:
         setHTMLEventListener(EventImpl::COPY_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONBEFOREPASTE:
         setHTMLEventListener(EventImpl::BEFOREPASTE_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONPASTE:
         setHTMLEventListener(EventImpl::PASTE_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;        
     case ATTR_ONDRAGENTER:
         setHTMLEventListener(EventImpl::DRAGENTER_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONDRAGOVER:
         setHTMLEventListener(EventImpl::DRAGOVER_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONDRAGLEAVE:
         setHTMLEventListener(EventImpl::DRAGLEAVE_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONDROP:
         setHTMLEventListener(EventImpl::DROP_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONDRAGSTART:
         setHTMLEventListener(EventImpl::DRAGSTART_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONDRAG:
         setHTMLEventListener(EventImpl::DRAG_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONDRAGEND:
         setHTMLEventListener(EventImpl::DRAGEND_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONSELECTSTART:
         setHTMLEventListener(EventImpl::SELECTSTART_EVENT,
-                             getDocument()->createHTMLEventListener(attr->value().string()));
+                             getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
         // other misc attributes
     default:
@@ -519,14 +556,14 @@ void HTMLElementImpl::createAttributeMap() const
     namedAttrMap->ref();
 }
 
-CSSStyleDeclarationImpl* HTMLElementImpl::getInlineStyleDecl()
+CSSMutableStyleDeclarationImpl* HTMLElementImpl::getInlineStyleDecl()
 {
     if (!m_inlineStyleDecl)
         createInlineStyleDecl();
     return m_inlineStyleDecl;
 }
 
-CSSStyleDeclarationImpl* HTMLElementImpl::additionalAttributeStyleDecl()
+CSSMutableStyleDeclarationImpl* HTMLElementImpl::additionalAttributeStyleDecl()
 {
     return 0;
 }
@@ -693,29 +730,20 @@ void HTMLElementImpl::createMappedDecl(HTMLAttributeImpl* attr)
 
 DOMString HTMLElementImpl::innerHTML() const
 {
-    return toHTML();
+    return createMarkup(this, ChildrenOnly);
 }
 
 DOMString HTMLElementImpl::outerHTML() const
 {
-    return recursive_toHTML(true);
+    return createMarkup(this);
 }
 
 DOMString HTMLElementImpl::innerText() const
 {
-    Node startContainer(const_cast<HTMLElementImpl *>(this));
-    long startOffset = 0;
-    Node endContainer(const_cast<HTMLElementImpl *>(this));
-
-    long endOffset = 0;
-
-    for (NodeImpl *child = firstChild(); child; child = child->nextSibling()) {
-	endOffset++;
-    }
-
-    Range innerRange(startContainer, startOffset, endContainer, endOffset);
-
-    return plainText(innerRange);
+    // We need to update layout, since plainText uses line boxes in the render tree.
+    getDocument()->updateLayout();
+    return plainText(Range(const_cast<HTMLElementImpl *>(this), 0,
+        const_cast<HTMLElementImpl *>(this), childNodeCount()));
 }
 
 DOMString HTMLElementImpl::outerText() const
@@ -724,15 +752,14 @@ DOMString HTMLElementImpl::outerText() const
     // setting is different. You would think this should get the plain
     // text for the outer range, but this is wrong, <br> for instance
     // would return different values for inner and outer text by such
-    // a rule, but it doesn't.
+    // a rule, but it doesn't in WinIE, and we want to match that.
     return innerText();
 }
 
-
-DocumentFragmentImpl *HTMLElementImpl::createContextualFragment( const DOMString &html )
+DocumentFragmentImpl *HTMLElementImpl::createContextualFragment(const DOMString &html)
 {
     // the following is in accordance with the definition as used by IE
-    if( endTag[id()] == FORBIDDEN )
+    if( endTagRequirement(id()) == FORBIDDEN )
         return NULL;
     // IE disallows innerHTML on inline elements. I don't see why we should have this restriction, as our
     // dhtml engine can cope with it. Lars
@@ -743,10 +770,6 @@ DocumentFragmentImpl *HTMLElementImpl::createContextualFragment( const DOMString
         case ID_FRAMESET:
         case ID_HEAD:
         case ID_STYLE:
-        case ID_TABLE:
-        case ID_TBODY:
-        case ID_TFOOT:
-        case ID_THEAD:
         case ID_TITLE:
             return NULL;
         default:
@@ -758,10 +781,11 @@ DocumentFragmentImpl *HTMLElementImpl::createContextualFragment( const DOMString
     DocumentFragmentImpl *fragment = new DocumentFragmentImpl( docPtr() );
     fragment->ref();
     {
-        HTMLTokenizer tok( docPtr(), fragment );
-        tok.begin();
+        HTMLTokenizer tok(docPtr(), fragment);
+        tok.setForceSynchronous(true);            // disable asynchronous parsing
         tok.write( html.string(), true );
-        tok.end();
+        tok.finish();
+        assert(!tok.processingData());            // make sure we're done (see 3963151)
     }
 
     // Exceptions are ignored because none ought to happen here.
@@ -774,7 +798,8 @@ DocumentFragmentImpl *HTMLElementImpl::createContextualFragment( const DOMString
     NodeImpl *nextNode;
     for (NodeImpl *node = fragment->firstChild(); node != NULL; node = nextNode) {
         nextNode = node->nextSibling();
-	if (node->id() == ID_HTML || node->id() == ID_BODY) {
+	node->ref();
+        if (node->id() == ID_HTML || node->id() == ID_BODY) {
 	    NodeImpl *firstChild = node->firstChild();
             if (firstChild != NULL) {
                 nextNode = firstChild;
@@ -788,11 +813,14 @@ DocumentFragmentImpl *HTMLElementImpl::createContextualFragment( const DOMString
                 child->deref();
 	    }
             fragment->removeChild(node, ignoredExceptionCode);
-            // FIXME: Does node leak here?
 	} else if (node->id() == ID_HEAD) {
 	    fragment->removeChild(node, ignoredExceptionCode);
-            // FIXME: Does node leak here?
 	}
+        // Important to do this deref after removeChild, because if the only thing
+        // keeping a node around is a parent that is non-0, removeChild will not
+        // delete the node. This works fine in JavaScript because there's always
+        // a ref of the node, but here in C++ we need to do it explicitly.
+        node->deref();
     }
 
     // Trick to get the fragment back to the floating state, with 0
@@ -814,7 +842,6 @@ bool HTMLElementImpl::setInnerHTML( const DOMString &html )
     removeChildren();
     int ec = 0;
     appendChild( fragment, ec );
-    delete fragment;
     return !ec;
 }
 
@@ -826,7 +853,11 @@ bool HTMLElementImpl::setOuterHTML( const DOMString &html )
     }
     
     int ec = 0;
-    parentNode()->replaceChild(fragment, this, ec);
+    
+    if (parentNode()) {
+        parentNode()->replaceChild(fragment, this, ec);
+    }
+    
     return !ec;
 }
 
@@ -834,7 +865,7 @@ bool HTMLElementImpl::setOuterHTML( const DOMString &html )
 bool HTMLElementImpl::setInnerText( const DOMString &text )
 {
     // following the IE specs.
-    if( endTag[id()] == FORBIDDEN )
+    if( endTagRequirement(id()) == FORBIDDEN )
         return false;
     // IE disallows innerText on inline elements. I don't see why we should have this restriction, as our
     // dhtml engine can cope with it. Lars
@@ -868,7 +899,7 @@ bool HTMLElementImpl::setInnerText( const DOMString &text )
 bool HTMLElementImpl::setOuterText( const DOMString &text )
 {
     // following the IE specs.
-    if( endTag[id()] == FORBIDDEN )
+    if( endTagRequirement(id()) == FORBIDDEN )
         return false;
     switch( id() ) {
         case ID_COL:
@@ -1014,13 +1045,23 @@ DOMString HTMLElementImpl::contentEditable() const
 
 void HTMLElementImpl::setContentEditable(HTMLAttributeImpl* attr) 
 {
+    KHTMLPart *part = getDocument()->part();
     const AtomicString& enabled = attr->value();
-    if (enabled.isEmpty() || strcasecmp(enabled, "true") == 0)
+    if (enabled.isEmpty() || strcasecmp(enabled, "true") == 0) {
         addCSSProperty(attr, CSS_PROP__KHTML_USER_MODIFY, CSS_VAL_READ_WRITE);
-    else if (strcasecmp(enabled, "false") == 0)
+        if (part)
+            part->applyEditingStyleToElement(this);    
+    }
+    else if (strcasecmp(enabled, "false") == 0) {
         addCSSProperty(attr, CSS_PROP__KHTML_USER_MODIFY, CSS_VAL_READ_ONLY);
-    else if (strcasecmp(enabled, "inherit") == 0)
+        if (part)
+            part->removeEditingStyleFromElement(this);    
+    }
+    else if (strcasecmp(enabled, "inherit") == 0) {
         addCSSProperty(attr, CSS_PROP__KHTML_USER_MODIFY, CSS_VAL_INHERIT);
+        if (part)
+            part->removeEditingStyleFromElement(this);    
+    }
 }
 
 void HTMLElementImpl::setContentEditable(const DOMString &enabled) {
@@ -1032,18 +1073,38 @@ void HTMLElementImpl::setContentEditable(const DOMString &enabled) {
         setAttribute(ATTR_CONTENTEDITABLE, enabled.isEmpty() ? "true" : enabled);
 }
 
-void HTMLElementImpl::click()
+void HTMLElementImpl::click(bool sendMouseEvents)
 {
     int x = 0;
     int y = 0;
-    if (renderer()) {
-        renderer()->absolutePosition(x,y);
-        x += renderer()->width() / 2;
-        y += renderer()->height() / 2;
+    RenderObject *r = renderer();
+    if (r)
+        r->absolutePosition(x,y);
+
+    // send mousedown and mouseup before the click, if requested
+    if (sendMouseEvents) {
+        QMouseEvent pressEvt(QEvent::MouseButtonPress, QPoint(x,y), Qt::LeftButton, 0);
+        dispatchMouseEvent(&pressEvt, EventImpl::MOUSEDOWN_EVENT);
+        QMouseEvent upEvent(QEvent::MouseButtonRelease, QPoint(x,y), Qt::LeftButton, 0);
+        dispatchMouseEvent(&upEvent, EventImpl::MOUSEUP_EVENT);
     }
+    
     // always send click
-    QMouseEvent evt(QEvent::MouseButtonRelease, QPoint(x,y), Qt::LeftButton, 0);
-    dispatchMouseEvent(&evt, EventImpl::KHTML_CLICK_EVENT);
+    QMouseEvent clickEvent(QEvent::MouseButtonRelease, QPoint(x,y), Qt::LeftButton, 0);
+    dispatchMouseEvent(&clickEvent, EventImpl::KHTML_CLICK_EVENT);
+}
+
+// accessKeyAction is used by the accessibility support code
+// to send events to elements that our JavaScript caller does
+// does not.  The elements JS is interested in have subclasses
+// that override this method to direct the click appropriately.
+// Here in the base class, then, we only send the click if
+// the caller wants it to go to any HTMLElementImpl, and we say
+// to send the mouse events in addition to the click.
+void HTMLElementImpl::accessKeyAction(bool sendToAnyElement)
+{
+    if (sendToAnyElement)
+        click(true);
 }
 
 DOMString HTMLElementImpl::toString() const
@@ -1052,7 +1113,7 @@ DOMString HTMLElementImpl::toString() const
 	DOMString result = openTagStartToString();
 	result += ">";
 
-	if (endTag[id()] == REQUIRED) {
+	if (endTagRequirement(id()) == REQUIRED) {
 	    result += "</";
 	    result += tagName();
 	    result += ">";

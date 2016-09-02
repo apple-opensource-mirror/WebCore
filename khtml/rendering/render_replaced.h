@@ -22,7 +22,7 @@
 #ifndef render_replaced_h
 #define render_replaced_h
 
-#include "render_box.h"
+#include "render_container.h"
 #include <qobject.h>
 class KHTMLView;
 class QWidget;
@@ -54,16 +54,23 @@ public:
     void setIntrinsicWidth(int w) {  m_intrinsicWidth = w; }
     void setIntrinsicHeight(int h) { m_intrinsicHeight = h; }
 
-    virtual bool canHaveChildren() const;
-
     virtual long caretMinOffset() const;
     virtual long caretMaxOffset() const;
     virtual unsigned long caretMaxRenderedOffset() const;
-    virtual DOM::Position positionForCoordinates(int x, int y);
+    virtual VisiblePosition positionForCoordinates(int x, int y);
     
-private:
+    virtual bool canBeSelectionLeaf() const { return true; }
+    virtual SelectionState selectionState() const { return m_selectionState; }
+    virtual void setSelectionState(SelectionState s);
+    virtual QRect selectionRect();
+    
+    virtual QColor selectionColor(QPainter *p) const;
+
+protected:
     int m_intrinsicWidth;
     int m_intrinsicHeight;
+    
+    SelectionState m_selectionState : 3;
 };
 
 
@@ -89,7 +96,6 @@ public:
     RenderArena *ref() { _ref++; return renderArena(); }
     void deref(RenderArena *arena);
     
-    virtual SelectionState selectionState() const {return m_selectionState;}
     virtual void setSelectionState(SelectionState s);
 
 #if APPLE_CHANGES 
@@ -109,8 +115,6 @@ protected:
     bool m_deleteWidget;
     QWidget *m_widget;
     KHTMLView* m_view;
-    
-    SelectionState m_selectionState : 3 ;
 };
 
 };

@@ -14,7 +14,7 @@
 
 function editingTest() {
     selectAllCommand();
-    insertNewlineCommand();
+    insertLineBreakCommand();
     for (i = 0; i < 3; i++) {
         typeCharacterCommand();
     }
@@ -24,10 +24,8 @@ function editingTest() {
 
 <title>Editing Test</title> 
 </head> 
-<body>
-<div contenteditable id="root" class="editing">
+<body contenteditable id="root" class="editing">
 <span id="test">Foo    <i>  bar</i></span>
-</div>
 
 <script>
 runEditingTest();

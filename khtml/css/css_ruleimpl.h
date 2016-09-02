@@ -20,7 +20,7 @@
  * the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 02111-1307, USA.
  *
- * $Id: css_ruleimpl.h,v 1.10 2004/02/05 01:45:16 hyatt Exp $
+ * $Id: css_ruleimpl.h,v 1.12 2004/11/19 00:12:20 darin Exp $
  */
 #ifndef _CSS_css_ruleimpl_h_
 #define _CSS_css_ruleimpl_h_
@@ -38,10 +38,10 @@ namespace khtml {
 
 namespace DOM {
 
+class CSSMutableStyleDeclarationImpl;
 class CSSRule;
 class CSSStyleSheet;
 class CSSStyleSheetImpl;
-class CSSStyleDeclarationImpl;
 class MediaListImpl;
 
 class CSSRuleImpl : public StyleBaseImpl
@@ -88,12 +88,12 @@ public:
 
     virtual ~CSSFontFaceRuleImpl();
 
-    CSSStyleDeclarationImpl *style() const { return m_style; }
+    CSSMutableStyleDeclarationImpl *style() const { return m_style; }
 
     virtual bool isFontFaceRule() { return true; }
 
 protected:
-    CSSStyleDeclarationImpl *m_style;
+    CSSMutableStyleDeclarationImpl *m_style;
 };
 
 
@@ -181,7 +181,7 @@ public:
 
     virtual ~CSSPageRuleImpl();
 
-    CSSStyleDeclarationImpl *style() const { return m_style; }
+    CSSMutableStyleDeclarationImpl *style() const { return m_style; }
 
     virtual bool isPageRule() { return true; }
 
@@ -189,7 +189,7 @@ public:
     void setSelectorText(DOM::DOMString str);
 
 protected:
-    CSSStyleDeclarationImpl *m_style;
+    CSSMutableStyleDeclarationImpl *m_style;
 };
 
 class CSSImportantRuleImpl;
@@ -201,7 +201,7 @@ public:
 
     virtual ~CSSStyleRuleImpl();
 
-    CSSStyleDeclarationImpl *style() const { return m_style; }
+    CSSMutableStyleDeclarationImpl *style() const { return m_style; }
 
     virtual bool isStyleRule() { return true; }
 
@@ -211,13 +211,13 @@ public:
     virtual bool parseString( const DOMString &string, bool = false );
 
     void setSelector(CSSSelector* selector) { m_selector = selector; }
-    void setDeclaration( CSSStyleDeclarationImpl *style);
+    void setDeclaration( CSSMutableStyleDeclarationImpl *style);
 
     CSSSelector* selector() { return m_selector; }
-    CSSStyleDeclarationImpl *declaration() { return m_style; }
+    CSSMutableStyleDeclarationImpl *declaration() { return m_style; }
  
 protected:
-    CSSStyleDeclarationImpl *m_style;
+    CSSMutableStyleDeclarationImpl *m_style;
     CSSSelector* m_selector;
 };
 

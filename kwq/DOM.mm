@@ -27,33 +27,40 @@
 
 #include <objc/objc-class.h>
 
-#import <dom/dom_doc.h>
-#import <dom/dom_element.h>
-#import <dom/dom_exception.h>
-#import <dom/dom_node.h>
-#import <dom/dom_string.h>
-#import <dom/dom_text.h>
-#import <dom/dom_xml.h>
-#import <dom/dom2_range.h>
-#import <dom/dom2_traversal.h>
-#import <html/html_elementimpl.h>
-#import <misc/htmltags.h>
-#import <xml/dom_docimpl.h>
-#import <xml/dom_elementimpl.h>
-#import <xml/dom_nodeimpl.h>
-#import <xml/dom_stringimpl.h>
-#import <xml/dom_textimpl.h>
-#import <xml/dom_xmlimpl.h>
-#import <xml/dom2_rangeimpl.h>
-#import <xml/dom2_viewsimpl.h>
-
 #import <JavaScriptCore/WebScriptObjectPrivate.h>
+
+#import "csshelper.h"
+#import "dom2_range.h"
+#import "dom2_rangeimpl.h"
+#import "dom2_traversal.h"
+#import "dom2_viewsimpl.h"
+#import "dom_doc.h"
+#import "dom_docimpl.h"
+#import "dom_element.h"
+#import "dom_elementimpl.h"
+#import "dom_exception.h"
+#import "dom_node.h"
+#import "dom_nodeimpl.h"
+#import "dom_string.h"
+#import "dom_stringimpl.h"
+#import "dom_text.h"
+#import "dom_textimpl.h"
+#import "dom_xml.h"
+#import "dom_xmlimpl.h"
+#import "html_elementimpl.h"
+#import "htmltags.h"
+
+#import "khtml_part.h"
+
+#import "render_object.h"
 
 #import "DOMEventsInternal.h"
 #import "DOMHTML.h"
 #import "DOMInternal.h"
+#import "DOMPrivate.h"
 #import "KWQAssertions.h"
 #import "KWQFoundationExtras.h"
+#import "KWQKHTMLPart.h"
 
 using DOM::Attr;
 using DOM::AttrImpl;
@@ -86,6 +93,8 @@ using DOM::RangeException;
 using DOM::RangeImpl;
 using DOM::TextImpl;
 using DOM::TreeWalkerImpl;
+
+using khtml::RenderObject;
 
 @interface DOMAttr (WebCoreInternal)
 + (DOMAttr *)_attrWithImpl:(AttrImpl *)impl;
@@ -193,6 +202,21 @@ inline Document DocumentImpl::createInstance(DocumentImpl *impl)
         DOM_cast<NodeImpl *>(_internal)->deref();
     }
     [super finalize];
+}
+
+- (NSString *)description
+{
+    if (!_internal) {
+        return [NSString stringWithFormat:@"<%@: null>",
+            [[self class] description], self];
+    }
+    NSString *value = [self nodeValue];
+    if (value) {
+        return [NSString stringWithFormat:@"<%@ [%@]: %p '%@'>",
+            [[self class] description], [self nodeName], _internal, value];
+    }
+    return [NSString stringWithFormat:@"<%@ [%@]: %p>",
+        [[self class] description], [self nodeName], _internal];
 }
 
 - (NSString *)nodeName
@@ -608,6 +632,23 @@ inline Document DocumentImpl::createInstance(DocumentImpl *impl)
 - (BOOL)isContentEditable
 {
     return [self _nodeImpl]->isContentEditable();
+}
+
+- (const KJS::Bindings::RootObject *)_executionContext
+{
+    NodeImpl *n = [self _nodeImpl];
+    if (!n)
+        return 0;
+    
+    DocumentImpl *doc = n->getDocument();
+    if (!doc)
+        return 0;
+    
+    KWQKHTMLPart *p = KWQ(doc->part());
+    if (!p)
+        return 0;
+        
+    return p->executionContextForDOM();
 }
 
 @end
@@ -1521,6 +1562,27 @@ inline Document DocumentImpl::createInstance(DocumentImpl *impl)
 
 @end
 
+@implementation DOMElement (WebPrivate)
+
+- (NSFont *)_font
+{
+    RenderObject *renderer = [self _elementImpl]->renderer();
+    if (renderer) {
+        return renderer->style()->font().getNSFont();
+    }
+    return nil;
+}
+
+- (NSURL *)_getURLAttribute:(NSString *)name
+{
+    ASSERT(name);
+    ElementImpl *e = [self _elementImpl];
+    ASSERT(e);
+    return KURL(e->getDocument()->completeURL(khtml::parseURL(e->getAttribute(name)).string())).getNSURL();
+}
+
+@end
+
 //------------------------------------------------------------------------------------------
 // DOMText
 
@@ -1703,6 +1765,15 @@ inline Document DocumentImpl::createInstance(DocumentImpl *impl)
         DOM_cast<RangeImpl *>(_internal)->deref();
     }
     [super finalize];
+}
+
+- (NSString *)description
+{
+    if (!_internal)
+        return @"<DOMRange: null>";
+    return [NSString stringWithFormat:@"<DOMRange: %@ %ld %@ %ld>",
+        [self startContainer], [self startOffset],
+        [self endContainer], [self endOffset]];
 }
 
 - (DOMNode *)startContainer
@@ -1915,6 +1986,15 @@ inline Document DocumentImpl::createInstance(DocumentImpl *impl)
 - (RangeImpl *)_rangeImpl
 {
     return DOM_cast<RangeImpl *>(_internal);
+}
+
+@end
+
+@implementation DOMRange (WebPrivate)
+
+- (NSString *)_text
+{
+    return [self _rangeImpl]->text().string().getNSString();
 }
 
 @end

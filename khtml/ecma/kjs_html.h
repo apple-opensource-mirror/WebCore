@@ -2,7 +2,7 @@
 /*
  *  This file is part of the KDE libraries
  *  Copyright (C) 1999 Harri Porten (porten@kde.org)
- *  Copyright (C) 2003 Apple Computer, Inc.
+ *  Copyright (C) 2004 Apple Computer, Inc.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -33,9 +33,13 @@
 
 #include <qguardedptr.h>
 
+#include <ApplicationServices/ApplicationServices.h>
+
 class HTMLElement;
 
 namespace KJS {
+
+  class JSAbstractEventListener;
 
   class HTMLDocument : public DOMDocument {
   public:
@@ -65,6 +69,11 @@ namespace KJS {
     virtual void pushEventHandlerScope(ExecState *exec, ScopeChain &scope) const;
     virtual const ClassInfo* classInfo() const;
     static const ClassInfo info;
+
+#if APPLE_CHANGES
+    virtual Value call(ExecState *exec, Object &thisObj, const List&args);
+    virtual bool implementsCall() const;
+#endif
 
     static const ClassInfo html_info, head_info, link_info, title_info,
       meta_info, base_info, isIndex_info, style_info, body_info, form_info,
@@ -141,10 +150,10 @@ namespace KJS {
            TableCellCh, TableCellVAlign, TableCellRowSpan, TableCellHeaders,
            TableCellAlign, TableCellAxis, TableCellScope, FrameSetCols,
            FrameSetRows, FrameSrc, FrameLocation, FrameFrameBorder, FrameScrolling,
-           FrameMarginWidth, FrameLongDesc, FrameMarginHeight, FrameName, FrameContentDocument,
+           FrameMarginWidth, FrameLongDesc, FrameMarginHeight, FrameName, FrameContentDocument, FrameContentWindow, 
            FrameNoResize, IFrameLongDesc, IFrameDocument, IFrameAlign,
            IFrameFrameBorder, IFrameSrc, IFrameName, IFrameHeight,
-           IFrameMarginHeight, IFrameMarginWidth, IFrameScrolling, IFrameWidth, IFrameContentDocument,
+           IFrameMarginHeight, IFrameMarginWidth, IFrameScrolling, IFrameWidth, IFrameContentDocument, IFrameContentWindow,
            MarqueeStart, MarqueeStop,
            GetContext,
            ElementInnerHTML, ElementTitle, ElementId, ElementDir, ElementLang,
@@ -216,7 +225,7 @@ namespace KJS {
 
   class Image : public DOMObject, public khtml::CachedObjectClient {
   public:
-    Image(const DOM::Document &d);
+    Image(const DOM::Document &d, bool ws, int w, bool hs, int h);
     ~Image();
     virtual Value tryGet(ExecState *exec, const Identifier &propertyName) const;
     Value getValueProperty(ExecState *exec, int token) const;
@@ -226,7 +235,7 @@ namespace KJS {
     virtual bool toBoolean(ExecState *) const { return true; }
     virtual const ClassInfo* classInfo() const { return &info; }
     static const ClassInfo info;
-    enum { Src, Complete, OnLoad };
+    enum { Src, Complete, OnLoad, Width, Height };
     
     khtml::CachedImage* image() { return img; }
     
@@ -234,7 +243,11 @@ namespace KJS {
     UString src;
     QGuardedPtr<DOM::DocumentImpl> doc;
     khtml::CachedImage* img;
-    JSEventListener *onLoadListener;
+    JSAbstractEventListener *onLoadListener;
+    bool widthSet;
+    bool heightSet;
+    int width;
+    int height;
   };
 
   ////////////////////// Context2D Object ////////////////////////
@@ -253,19 +266,145 @@ namespace KJS {
     static const ClassInfo info;
 
     enum { 
+        StrokeStyle,
+        FillStyle,
+        LineWidth,
+        LineCap,
+        LineJoin,
+        MiterLimit,
+        ShadowOffsetX,
+        ShadowOffsetY,
+        ShadowBlur,
+        ShadowColor,
+        GlobalAlpha,
+        GlobalCompositeOperation,
         Save, Restore,
         Scale, Rotate, Translate,
         BeginPath, ClosePath, 
         SetStrokeColor, SetFillColor, SetLineWidth, SetLineCap, SetLineJoin, SetMiterLimit, 
-        FillPath, StrokePath, 
-        MoveToPoint, AddLineToPoint, AddQuadraticCurveToPoint, AddBezierCurveToPoint, AddArcToPoint, AddArc, AddRect, Clip,
+        Fill, Stroke, 
+        MoveTo, LineTo, QuadraticCurveTo, BezierCurveTo, ArcTo, Arc, Rect, Clip,
         ClearRect, FillRect, StrokeRect,
         DrawImage, DrawImageFromRect,
         SetShadow, ClearShadow,
-        SetAlpha, SetCompositeOperation};
+        SetAlpha, SetCompositeOperation,
+        CreateLinearGradient,
+        CreateRadialGradient,
+        CreatePattern
+    };
+
+    static CGColorRef Context2D::colorRefFromValue(ExecState *exec, const Value &value);
+    static QColor Context2D::colorFromValue(ExecState *exec, const Value &value);
+
+private:
+    
+    void save();
+    void restore();
+    
+    CGContextRef drawingContext();
+    void setShadow(ExecState *exec);
 
     DOM::HTMLElementImpl *_element;
     unsigned int _needsFlushRasterCache;
+    
+    QPtrList<List> stateStack;
+    
+    ProtectedValue _strokeStyle;
+    ProtectedValue _fillStyle;
+    ProtectedValue _lineWidth;
+    ProtectedValue _lineCap;
+    ProtectedValue _lineJoin;
+    ProtectedValue _miterLimit;
+    ProtectedValue _shadowOffsetX;
+    ProtectedValue _shadowOffsetY;
+    ProtectedValue _shadowBlur;
+    ProtectedValue _shadowColor;
+    ProtectedValue _globalAlpha;
+    ProtectedValue _globalComposite;
+  };
+
+    struct ColorStop {
+        float stop;
+        float red;
+        float green;
+        float blue;
+        float alpha;
+        
+        ColorStop(float s, float r, float g, float b, float a) : stop(s), red(r), green(g), blue(b), alpha(a) {};
+    };
+
+
+  class Gradient : public DOMObject {
+  friend class Context2DFunction;
+  public:
+    //Gradient(const DOM::HTMLElement &e);
+    Gradient(float x0, float y0, float x1, float y1);
+    Gradient(float x0, float y0, float r0, float x1, float y1, float r1);
+    ~Gradient();
+    virtual Value tryGet(ExecState *exec, const Identifier &propertyName) const;
+    Value getValueProperty(ExecState *exec, int token) const;
+    virtual void tryPut(ExecState *exec, const Identifier &propertyName, const Value& value, int attr = None);
+    void putValue(ExecState *exec, int token, const Value& value, int /*attr*/);
+    virtual bool toBoolean(ExecState *) const { return true; }
+    virtual const ClassInfo* classInfo() const { return &info; }
+    static const ClassInfo info;
+
+    enum { 
+        AddColorStop
+    };
+    
+    enum {
+        Radial, Linear
+    };
+
+    CGShadingRef getShading();
+    
+    void addColorStop (float s, float r, float g, float b, float alpha);
+    const ColorStop *colorStops(int *count) const;
+    
+    int lastStop;
+    int nextStop;
+    
+private:    
+    void commonInit();
+    
+    int _gradientType;
+    float _x0, _y0, _r0, _x1, _y1, _r1;
+    CGShadingRef _shadingRef;
+    
+    int maxStops;
+    int stopCount;
+    ColorStop *stops;
+    mutable int adjustedStopCount;
+    mutable ColorStop *adjustedStops;
+    mutable unsigned int stopsNeedAdjusting:1;
+    mutable unsigned int regenerateShading:1;
+  };
+
+  class ImagePattern : public DOMObject {
+  public:
+    ImagePattern(Image *i, int type);
+    ~ImagePattern();
+    virtual Value tryGet(ExecState *exec, const Identifier &propertyName) const;
+    Value getValueProperty(ExecState *exec, int token) const;
+    virtual void tryPut(ExecState *exec, const Identifier &propertyName, const Value& value, int attr = None);
+    void putValue(ExecState *exec, int token, const Value& value, int /*attr*/);
+    virtual bool toBoolean(ExecState *) const { return true; }
+    virtual const ClassInfo* classInfo() const { return &info; }
+    static const ClassInfo info;
+    
+    CGPatternRef getPattern() { return _patternRef; }
+    
+    QPixmap pixmap() { return _pixmap; }
+    
+    enum {
+        Repeat, RepeatX, RepeatY, NoRepeat
+    };
+    
+private:
+    int _repetitionType;
+    QPixmap _pixmap;
+    CGPatternRef _patternRef;
   };
 
   Value getHTMLCollection(ExecState *exec, const DOM::HTMLCollection &c);

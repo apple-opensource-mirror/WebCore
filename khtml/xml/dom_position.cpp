@@ -25,17 +25,26 @@
 
 #include "dom_position.h"
 
+#include <qstring.h>
+
+#include "css_computedstyle.h"
+#include "css_valueimpl.h"
+#include "dom_elementimpl.h"
+#include "dom_nodeimpl.h"
+#include "dom_positioniterator.h"
+#include "dom2_range.h"
+#include "dom2_rangeimpl.h"
+#include "dom2_viewsimpl.h"
 #include "helper.h"
 #include "htmltags.h"
-#include "qstring.h"
+#include "text_affinity.h"
+#include "visible_position.h"
 #include "rendering/render_block.h"
+#include "rendering/render_flow.h"
 #include "rendering/render_line.h"
-#include "rendering/render_object.h"
 #include "rendering/render_style.h"
 #include "rendering/render_text.h"
-#include "xml/dom_positioniterator.h"
-#include "xml/dom_elementimpl.h"
-#include "xml/dom_nodeimpl.h"
+#include "editing/visible_text.h"
 
 #if APPLE_CHANGES
 #include "KWQAssertions.h"
@@ -45,22 +54,19 @@
 #define LOG(channel, formatAndArgs...) ((void)0)
 #endif
 
+using khtml::EAffinity;
 using khtml::InlineBox;
-using khtml::InlineFlowBox;
 using khtml::InlineTextBox;
+using khtml::isCollapsibleWhitespace;
 using khtml::RenderBlock;
+using khtml::RenderFlow;
 using khtml::RenderObject;
 using khtml::RenderText;
 using khtml::RootInlineBox;
+using khtml::VISIBLE;
+using khtml::VisiblePosition;
 
 namespace DOM {
-
-static bool renderersOnDifferentLine(RenderObject *r1, long o1, RenderObject *r2, long o2)
-{
-    InlineBox *b1 = r1 ? r1->inlineBox(o1) : 0;
-    InlineBox *b2 = r2 ? r2->inlineBox(o2) : 0;
-    return (b1 && b2 && b1->root() != b2->root());
-}
 
 static NodeImpl *nextRenderedEditable(NodeImpl *node)
 {
@@ -92,24 +98,23 @@ static NodeImpl *previousRenderedEditable(NodeImpl *node)
 
 
 Position::Position(NodeImpl *node, long offset) 
-    : m_node(0), m_offset(offset) 
+    : m_node(node), m_offset(offset) 
 { 
     if (node) {
-        m_node = node;
-        m_node->ref();
+        node->ref();
     }
-};
+}
 
 Position::Position(const Position &o)
-    : m_node(0), m_offset(o.offset()) 
+    : m_node(o.m_node), m_offset(o.m_offset) 
 {
-    if (o.node()) {
-        m_node = o.node();
+    if (m_node) {
         m_node->ref();
     }
 }
 
-Position::~Position() {
+Position::~Position()
+{
     if (m_node) {
         m_node->deref();
     }
@@ -120,25 +125,39 @@ Position &Position::operator=(const Position &o)
     if (m_node) {
         m_node->deref();
     }
-    m_node = o.node();
+    m_node = o.m_node;
     if (m_node) {
         m_node->ref();
     }
 
-    m_offset = o.offset();
+    m_offset = o.m_offset;
     
     return *this;
 }
 
+void Position::clear()
+{
+    if (m_node) {
+        m_node->deref();
+        m_node = 0;
+    }
+    m_offset = 0;
+}
+
 ElementImpl *Position::element() const
 {
-    if (isEmpty())
-        return 0;
-        
-    NodeImpl *n = node();
-    for (; n && !n->isElementNode(); n = n->parentNode()); //loop
-        
+    NodeImpl *n;
+    for (n = node(); n && !n->isElementNode(); n = n->parentNode())
+        ; // empty loop body
     return static_cast<ElementImpl *>(n);
+}
+
+CSSComputedStyleDeclarationImpl *Position::computedStyle() const
+{
+    ElementImpl *elem = element();
+    if (!elem)
+        return 0;
+    return new CSSComputedStyleDeclarationImpl(elem);
 }
 
 long Position::renderedOffset() const
@@ -165,78 +184,16 @@ long Position::renderedOffset() const
     return result;
 }
 
-Position Position::equivalentLeafPosition() const
+Position Position::previousCharacterPosition(EAffinity affinity) const
 {
-    if (isEmpty())
-        return Position();
-
-    if (!node()->renderer() || !node()->renderer()->firstChild())
-        return *this;
-    
-    NodeImpl *n = node();
-    int count = 0;
-    while (1) {
-        n = n->nextLeafNode();
-        if (!n || !n->inSameContainingBlockFlowElement(node()))
-            return *this;
-        if (count + n->maxOffset() >= offset()) {
-            count = offset() - count;
-            break;
-        }
-        count += n->maxOffset();
-    }
-    return Position(n, count);
-}
-
-Position Position::previousRenderedEditablePosition() const
-{
-    if (isEmpty())
-        return Position();
-
-    if (node()->isContentEditable() && node()->hasChildNodes() == false && inRenderedContent())
-        return *this;
-
-    NodeImpl *n = node();
-    while (1) {
-        n = n->previousEditable();
-        if (!n)
-            return Position();
-        if (n->renderer() && n->renderer()->style()->visibility() == khtml::VISIBLE)
-            break;
-    }
-    
-    return Position(n, 0);
-}
-
-Position Position::nextRenderedEditablePosition() const
-{
-    if (isEmpty())
-        return Position();
-
-    if (node()->isContentEditable() && node()->hasChildNodes() == false && inRenderedContent())
-        return *this;
-
-    NodeImpl *n = node();
-    while (1) {
-        n = n->nextEditable();
-        if (!n)
-            return Position();
-        if (n->renderer() && n->renderer()->style()->visibility() == khtml::VISIBLE)
-            break;
-    }
-    
-    return Position(n, 0);
-}
-
-Position Position::previousCharacterPosition() const
-{
-    if (isEmpty())
+    if (isNull())
         return Position();
 
     NodeImpl *fromRootEditableElement = node()->rootEditableElement();
     PositionIterator it(*this);
 
-    bool atStartOfLine = isFirstRenderedPositionOnLine();
+    bool atStartOfLine = isFirstVisiblePositionOnLine(VisiblePosition(*this, affinity));
+    bool rendered = inRenderedContent();
     
     while (!it.atStart()) {
         Position pos = it.previous();
@@ -244,7 +201,7 @@ Position Position::previousCharacterPosition() const
         if (pos.node()->rootEditableElement() != fromRootEditableElement)
             return *this;
 
-        if (atStartOfLine) {
+        if (atStartOfLine || !rendered) {
             if (pos.inRenderedContent())
                 return pos;
         }
@@ -255,15 +212,16 @@ Position Position::previousCharacterPosition() const
     return *this;
 }
 
-Position Position::nextCharacterPosition() const
+Position Position::nextCharacterPosition(EAffinity affinity) const
 {
-    if (isEmpty())
+    if (isNull())
         return Position();
 
     NodeImpl *fromRootEditableElement = node()->rootEditableElement();
     PositionIterator it(*this);
 
-    bool atEndOfLine = isLastRenderedPositionOnLine();
+    bool atEndOfLine = isLastVisiblePositionOnLine(VisiblePosition(*this, affinity));
+    bool rendered = inRenderedContent();
     
     while (!it.atEnd()) {
         Position pos = it.next();
@@ -271,7 +229,7 @@ Position Position::nextCharacterPosition() const
         if (pos.node()->rootEditableElement() != fromRootEditableElement)
             return *this;
 
-        if (atEndOfLine) {
+        if (atEndOfLine || !rendered) {
             if (pos.inRenderedContent())
                 return pos;
         }
@@ -282,186 +240,45 @@ Position Position::nextCharacterPosition() const
     return *this;
 }
 
-Position Position::previousWordPosition() const
+Position Position::upstream(EStayInBlock stayInBlock) const
 {
-    if (isEmpty())
+    Position start = equivalentDeepPosition();
+    NodeImpl *startNode = start.node();
+    if (!startNode)
         return Position();
 
-    Position pos = *this;
-    for (PositionIterator it(*this); !it.atStart(); it.previous()) {
-        if (it.current().node()->nodeType() == Node::TEXT_NODE || it.current().node()->nodeType() == Node::CDATA_SECTION_NODE) {
-            DOMString t = it.current().node()->nodeValue();
-            QChar *chars = t.unicode();
-            uint len = t.length();
-            int start, end;
-            khtml::findWordBoundary(chars, len, it.current().offset(), &start, &end);
-            pos = Position(it.current().node(), start);
-        }
-        else {
-            pos = Position(it.current().node(), it.current().node()->caretMinOffset());
-        }
-        if (pos != *this)
-            return pos;
-        it.setPosition(pos);
-    }
+    NodeImpl *block = startNode->enclosingBlockFlowOrTableElement();
+    Position lastVisible;
     
-    return *this;
-}
+    PositionIterator it(start);
+    for (; !it.atStart(); it.previous()) {
+        NodeImpl *currentNode = it.current().node();
 
-Position Position::nextWordPosition() const
-{
-    if (isEmpty())
-        return Position();
-
-    Position pos = *this;
-    for (PositionIterator it(*this); !it.atEnd(); it.next()) {
-        if (it.current().node()->nodeType() == Node::TEXT_NODE || it.current().node()->nodeType() == Node::CDATA_SECTION_NODE) {
-            DOMString t = it.current().node()->nodeValue();
-            QChar *chars = t.unicode();
-            uint len = t.length();
-            int start, end;
-            khtml::findWordBoundary(chars, len, it.current().offset(), &start, &end);
-            pos = Position(it.current().node(), end);
+        if (stayInBlock) {
+            NodeImpl *currentBlock = currentNode->enclosingBlockFlowOrTableElement();
+            if (block != currentBlock)
+                return it.next();
         }
-        else {
-            pos = Position(it.current().node(), it.current().node()->caretMaxOffset());
-        }
-        if (pos != *this)
-            return pos;
-        it.setPosition(pos);
-    }
-    
-    return *this;
-}
 
-Position Position::previousLinePosition(int x) const
-{
-    if (!node())
-        return Position();
-
-    if (!node()->renderer())
-        return *this;
-
-    InlineBox *box = node()->renderer()->inlineBox(offset());
-    if (!box)
-        return *this;
-
-    RenderBlock *containingBlock = 0;
-    RootInlineBox *root = box->root()->prevRootBox();
-    if (root) {
-        containingBlock = node()->renderer()->containingBlock();
-    }
-    else {
-        // This containing editable block does not have a previous line.
-        // Need to move back to previous containing editable block in this root editable
-        // block and find the last root line box in that block.
-        NodeImpl *startBlock = node()->enclosingBlockFlowElement();
-        NodeImpl *n = node()->previousEditable();
-        while (n && startBlock == n->enclosingBlockFlowElement())
-            n = n->previousEditable();
-        if (n) {
-            while (n && !Position(n, n->caretMaxOffset()).inRenderedContent())
-                n = n->previousEditable();
-            if (n && n->inSameRootEditableElement(node())) {
-                ASSERT(n->renderer());
-                box = n->renderer()->inlineBox(n->caretMaxOffset());
-                ASSERT(box);
-                // previous root line box found
-                root = box->root();
-                containingBlock = n->renderer()->containingBlock();
-            }
-        }
-    }
-    
-    if (root) {
-        int absx, absy;
-        containingBlock->absolutePosition(absx, absy);
-        RenderObject *renderer = root->closestLeafChildForXPos(x, absx)->object();
-        return renderer->positionForCoordinates(x, absy + root->topOverflow());
-    }
-    
-    return *this;
-}
-
-Position Position::nextLinePosition(int x) const
-{
-    if (!node())
-        return Position();
-
-    if (!node()->renderer())
-        return *this;
-
-    InlineBox *box = node()->renderer()->inlineBox(offset());
-    if (!box)
-        return *this;
-
-    RenderBlock *containingBlock = 0;
-    RootInlineBox *root = box->root()->nextRootBox();
-    if (root) {
-        containingBlock = node()->renderer()->containingBlock();
-    }
-    else {
-        // This containing editable block does not have a next line.
-        // Need to move forward to next containing editable block in this root editable
-        // block and find the first root line box in that block.
-        NodeImpl *startBlock = node()->enclosingBlockFlowElement();
-        NodeImpl *n = node()->nextEditable();
-        while (n && startBlock == n->enclosingBlockFlowElement())
-            n = n->nextEditable();
-        if (n) {
-            while (n && !Position(n, n->caretMinOffset()).inRenderedContent())
-                n = n->nextEditable();
-            if (n && n->inSameRootEditableElement(node())) {
-                ASSERT(n->renderer());
-                box = n->renderer()->inlineBox(n->caretMinOffset());
-                ASSERT(box);
-                // previous root line box found
-                root = box->root();
-                containingBlock = n->renderer()->containingBlock();
-            }
-        }
-    }
-    
-    if (root) {
-        int absx, absy;
-        containingBlock->absolutePosition(absx, absy);
-        RenderObject *renderer = root->closestLeafChildForXPos(x, absx)->object();
-        return renderer->positionForCoordinates(x, absy + root->topOverflow());
-    }
-
-    return *this;
-}
-
-Position Position::equivalentUpstreamPosition() const
-{
-    if (!node())
-        return Position();
-
-    NodeImpl *block = node()->enclosingBlockFlowElement();
-    
-    PositionIterator it(*this);            
-    for (; !it.atStart(); it.previous()) {   
-        NodeImpl *currentBlock = it.current().node()->enclosingBlockFlowElement();
-        if (block != currentBlock)
-            return it.next();
-
-        RenderObject *renderer = it.current().node()->renderer();
+        RenderObject *renderer = currentNode->renderer();
         if (!renderer)
             continue;
 
-        if (renderer->style()->visibility() != khtml::VISIBLE)
+        if (renderer->style()->visibility() != VISIBLE)
             continue;
 
-        if (renderer->isBlockFlow() || renderer->isReplaced() || renderer->isBR()) {
+        lastVisible = it.current();
+
+        if (renderer->isReplaced() || renderer->isBR()) {
             if (it.current().offset() >= renderer->caretMaxOffset())
-                return Position(it.current().node(), renderer->caretMaxOffset());
+                return Position(currentNode, renderer->caretMaxOffset());
             else
                 continue;
         }
 
         if (renderer->isText() && static_cast<RenderText *>(renderer)->firstTextBox()) {
-            if (it.current().node() != node())
-                return Position(it.current().node(), renderer->caretMaxOffset());
+            if (currentNode != startNode)
+                return Position(currentNode, renderer->caretMaxOffset());
 
             if (it.current().offset() < 0)
                 continue;
@@ -471,43 +288,74 @@ Position Position::equivalentUpstreamPosition() const
             for (InlineTextBox *box = textRenderer->firstTextBox(); box; box = box->nextTextBox()) {
                 if (textOffset > box->start() && textOffset <= box->start() + box->len())
                     return it.current();
+                else if (box != textRenderer->lastTextBox() && 
+                         !box->nextOnLine() && 
+                         textOffset == box->start() + box->len() + 1)
+                    return it.current();
             }
         }
     }
     
-    return it.current();
+    return lastVisible.isNotNull() ? lastVisible : *this;
 }
 
-Position Position::equivalentDownstreamPosition() const
+Position Position::downstream(EStayInBlock stayInBlock) const
 {
-    if (!node())
+    Position start = equivalentDeepPosition();
+    NodeImpl *startNode = start.node();
+    if (!startNode)
         return Position();
 
-    NodeImpl *block = node()->enclosingBlockFlowElement();
+    NodeImpl *block = startNode->enclosingBlockFlowOrTableElement();
+    Position lastVisible;
     
-    PositionIterator it(*this);            
+    PositionIterator it(start);            
     for (; !it.atEnd(); it.next()) {   
-        NodeImpl *currentBlock = it.current().node()->enclosingBlockFlowElement();
-        if (block != currentBlock)
-            return it.previous();
+        NodeImpl *currentNode = it.current().node();
 
-        RenderObject *renderer = it.current().node()->renderer();
+        if (stayInBlock) {
+            NodeImpl *currentBlock = currentNode->enclosingBlockFlowOrTableElement();
+            if (block != currentBlock)
+                return it.previous();
+        }
+
+        RenderObject *renderer = currentNode->renderer();
         if (!renderer)
             continue;
 
-        if (renderer->style()->visibility() != khtml::VISIBLE)
+        if (renderer->style()->visibility() != VISIBLE)
             continue;
 
-        if (renderer->isBlockFlow() || renderer->isReplaced() || renderer->isBR()) {
+        lastVisible = it.current();
+
+        if (currentNode != startNode && renderer->isBlockFlow()) {
+            if (it.current().offset() == 0) {
+                // If no first child, or first visible child is a not a block, return; otherwise continue.
+                if (!currentNode->firstChild())
+                    return Position(currentNode, 0);
+                for (NodeImpl *child = currentNode->firstChild(); child; child = child->nextSibling()) {
+                    RenderObject *r = child->renderer();
+                    if (r && r->style()->visibility() == VISIBLE) {
+                         if (r->isBlockFlow())
+                            break; // break causes continue code below to run.
+                         else
+                            return Position(child, 0);
+                    }
+                }
+                continue;
+            }
+        }
+
+        if (renderer->isReplaced() || renderer->isBR()) {
             if (it.current().offset() <= renderer->caretMinOffset())
-                return Position(it.current().node(), renderer->caretMinOffset());
+                return Position(currentNode, renderer->caretMinOffset());
             else
                 continue;
         }
 
         if (renderer->isText() && static_cast<RenderText *>(renderer)->firstTextBox()) {
-            if (it.current().node() != node())
-                return Position(it.current().node(), renderer->caretMinOffset());
+            if (currentNode != start.node())
+                return Position(currentNode, renderer->caretMinOffset());
 
             if (it.current().offset() < 0)
                 continue;
@@ -517,69 +365,92 @@ Position Position::equivalentDownstreamPosition() const
             for (InlineTextBox *box = textRenderer->firstTextBox(); box; box = box->nextTextBox()) {
                 if (textOffset >= box->start() && textOffset <= box->end())
                     return it.current();
+                else if (box != textRenderer->lastTextBox() && 
+                         !box->nextOnLine() && 
+                         textOffset == box->start() + box->len())
+                    return it.current();
             }
         }
     }
     
-    return it.current();
+    return lastVisible.isNotNull() ? lastVisible : *this;
 }
 
 Position Position::equivalentRangeCompliantPosition() const
 {
-    if (isEmpty())
-        return *this;
+    if (isNull())
+        return Position();
+
+    // Make sure that 0 <= constrainedOffset <= num kids, otherwise using this Position
+    // in DOM calls can result in exceptions.
+    long maxOffset = node()->isTextNode() ? static_cast<TextImpl *>(node())->length(): node()->childNodeCount();
+    long constrainedOffset = offset() <= 0 ? 0 : kMin(maxOffset, offset());
 
     if (!node()->parentNode())
-        return *this;
+        return Position(node(), constrainedOffset);
 
     RenderObject *renderer = node()->renderer();
     if (!renderer)
-        return *this;
+        return Position(node(), constrainedOffset);
         
     if (!renderer->isReplaced() && !renderer->isBR())
-        return *this;
+        return Position(node(), constrainedOffset);
     
-    int o = 0;
+    long o = offset();
     const NodeImpl *n = node();
     while ((n = n->previousSibling()))
         o++;
     
-    return Position(node()->parentNode(), o + offset());
+    // Make sure that 0 <= constrainedOffset <= num kids, as above.
+    NodeImpl *parent = node()->parentNode();
+    maxOffset = parent->isTextNode() ? static_cast<TextImpl *>(parent)->length(): parent->childNodeCount();
+    constrainedOffset = o <= 0 ? 0 : kMin(maxOffset, o);
+    return Position(parent, constrainedOffset);
 }
 
-Position Position::equivalentShallowPosition() const
+Position Position::equivalentDeepPosition() const
 {
-    if (isEmpty())
+    if (isNull() || node()->isAtomicNode())
         return *this;
 
+    NodeImpl *child = 0;
     Position pos(*this);
-    while (pos.offset() == pos.node()->caretMinOffset() && pos.node()->parentNode() && pos.node() == pos.node()->parentNode()->firstChild())
-        pos = Position(pos.node()->parentNode(), 0);
+    if (offset() >= (int)node()->childNodeCount()) {
+        child = node()->lastChild();
+        pos = Position(child, child->caretMaxOffset());
+        ASSERT(child);
+        while (!child->isAtomicNode() && pos.node()->hasChildNodes()) {
+            child = pos.node()->lastChild();
+            ASSERT(child);
+            pos = Position(child, child->caretMaxOffset());
+        }
+    }
+    else {
+        child = node()->childNode(offset());
+        ASSERT(child);
+        pos = Position(child, 0);
+        while (!child->isAtomicNode() && pos.node()->hasChildNodes()) {
+            child = pos.node()->firstChild();
+            ASSERT(child);
+            pos = Position(child, 0);
+        }
+    }
     return pos;
-}
-
-bool Position::atStartOfContainingEditableBlock() const
-{
-    return renderedOffset() == 0 && inFirstEditableInContainingEditableBlock();
-}
-
-bool Position::atStartOfRootEditableElement() const
-{
-    return renderedOffset() == 0 && inFirstEditableInRootEditableElement();
 }
 
 bool Position::inRenderedContent() const
 {
-    if (isEmpty())
+    if (isNull())
         return false;
         
     RenderObject *renderer = node()->renderer();
-    if (!renderer || !renderer->isEditable())
+    if (!renderer)
         return false;
     
-    if (renderer->style()->visibility() != khtml::VISIBLE)
+    if (renderer->style()->visibility() != VISIBLE)
         return false;
 
+    // FIXME: This check returns false for a <br> at the end of a line!
     if (renderer->isBR() && static_cast<RenderText *>(renderer)->firstTextBox()) {
         return offset() == 0;
     }
@@ -598,10 +469,12 @@ bool Position::inRenderedContent() const
         }
     }
     else if (offset() >= renderer->caretMinOffset() && offset() <= renderer->caretMaxOffset()) {
-        // don't return containing editable blocks unless they are empty
-        if (node()->enclosingBlockFlowElement() == node() && node()->firstChild())
-            return false;
-        return true;
+        // return true for replaced elements, for inline flows if they have a line box
+        // and for blocks if they are empty
+        if (renderer->isReplaced() ||
+            (renderer->isInlineFlow() && static_cast<RenderFlow *>(renderer)->firstLineBox()) ||
+            (renderer->isBlockFlow() && !renderer->firstChild() && renderer->height()))
+            return true;
     }
     
     return false;
@@ -609,7 +482,7 @@ bool Position::inRenderedContent() const
 
 bool Position::inRenderedText() const
 {
-    if (!node()->isTextNode())
+    if (isNull() || !node()->isTextNode())
         return false;
         
     RenderObject *renderer = node()->renderer();
@@ -631,35 +504,33 @@ bool Position::inRenderedText() const
     return false;
 }
 
-bool Position::rendersOnSameLine(const Position &pos) const
+bool Position::isRenderedCharacter() const
 {
-    if (isEmpty() || pos.isEmpty())
+    if (isNull() || !node()->isTextNode())
         return false;
-
-    if (node() == pos.node() && offset() == pos.offset())
-        return true;
-
-    if (node()->enclosingBlockFlowElement() != pos.node()->enclosingBlockFlowElement())
-        return false;
-
+        
     RenderObject *renderer = node()->renderer();
     if (!renderer)
         return false;
     
-    RenderObject *posRenderer = pos.node()->renderer();
-    if (!posRenderer)
-        return false;
-
-    if (renderer->style()->visibility() != khtml::VISIBLE ||
-        posRenderer->style()->visibility() != khtml::VISIBLE)
-        return false;
-
-    return renderersOnDifferentLine(renderer, offset(), posRenderer, pos.offset());
+    RenderText *textRenderer = static_cast<RenderText *>(renderer);
+    for (InlineTextBox *box = textRenderer->firstTextBox(); box; box = box->nextTextBox()) {
+        if (offset() < box->m_start) {
+            // The offset we're looking for is before this node
+            // this means the offset must be in content that is
+            // not rendered. Return false.
+            return false;
+        }
+        if (offset() >= box->m_start && offset() < box->m_start + box->m_len)
+            return true;
+    }
+    
+    return false;
 }
 
 bool Position::rendersInDifferentPosition(const Position &pos) const
 {
-    if (isEmpty() || pos.isEmpty())
+    if (isNull() || pos.isNull())
         return false;
 
     RenderObject *renderer = node()->renderer();
@@ -670,8 +541,8 @@ bool Position::rendersInDifferentPosition(const Position &pos) const
     if (!posRenderer)
         return false;
 
-    if (renderer->style()->visibility() != khtml::VISIBLE ||
-        posRenderer->style()->visibility() != khtml::VISIBLE)
+    if (renderer->style()->visibility() != VISIBLE ||
+        posRenderer->style()->visibility() != VISIBLE)
         return false;
     
     if (node() == pos.node()) {
@@ -708,7 +579,6 @@ bool Position::rendersInDifferentPosition(const Position &pos) const
     if (renderer == posRenderer && thisRenderedOffset == posRenderedOffset)
         return false;
 
-    LOG(Editing, "onDifferentLine:        %s\n", renderersOnDifferentLine(renderer, offset(), posRenderer, pos.offset()) ? "YES" : "NO");
     LOG(Editing, "renderer:               %p [%p]\n", renderer, renderer ? renderer->inlineBox(offset()) : 0);
     LOG(Editing, "thisRenderedOffset:         %d\n", thisRenderedOffset);
     LOG(Editing, "posRenderer:            %p [%p]\n", posRenderer, posRenderer ? posRenderer->inlineBox(offset()) : 0);
@@ -741,152 +611,116 @@ bool Position::rendersInDifferentPosition(const Position &pos) const
     return true;
 }
 
-bool Position::isFirstRenderedPositionOnLine() const
+Position Position::leadingWhitespacePosition(EAffinity affinity, bool considerNonCollapsibleWhitespace) const
 {
-    if (isEmpty())
-        return false;
-
-    RenderObject *renderer = node()->renderer();
-    if (!renderer)
-        return false;
-
-    if (renderer->style()->visibility() != khtml::VISIBLE)
-        return false;
+    if (isNull())
+        return Position();
     
-    Position pos(node(), offset());
-    PositionIterator it(pos);
-    while (!it.atStart()) {
-        it.previous();
-        if (it.current().inRenderedContent())
-            return renderersOnDifferentLine(renderer, offset(), it.current().node()->renderer(), it.current().offset());
+    if (upstream(StayInBlock).node()->id() == ID_BR)
+        return Position();
+
+    Position prev = previousCharacterPosition(affinity);
+    if (prev != *this && prev.node()->inSameContainingBlockFlowElement(node()) && prev.node()->isTextNode()) {
+        DOMString string = static_cast<TextImpl *>(prev.node())->data();
+        const QChar &c = string[prev.offset()];
+        if (considerNonCollapsibleWhitespace ? (c.isSpace() || c.unicode() == 0xa0) : isCollapsibleWhitespace(c))
+            return prev;
     }
-    
-    return true;
+
+    return Position();
 }
 
-bool Position::isLastRenderedPositionOnLine() const
+Position Position::trailingWhitespacePosition(EAffinity affinity, bool considerNonCollapsibleWhitespace) const
 {
-    if (isEmpty())
-        return false;
+    if (isNull())
+        return Position();
 
-    RenderObject *renderer = node()->renderer();
-    if (!renderer)
-        return false;
-
-    if (renderer->style()->visibility() != khtml::VISIBLE)
-        return false;
-    
-    if (node()->id() == ID_BR)
-        return true;
-    
-    Position pos(node(), offset());
-    PositionIterator it(pos);
-    while (!it.atEnd()) {
-        it.next();
-        if (it.current().inRenderedContent())
-            return renderersOnDifferentLine(renderer, offset(), it.current().node()->renderer(), it.current().offset());
-    }
-    
-    return true;
-}
-
-bool Position::isLastRenderedPositionInEditableBlock() const
-{
-    if (isEmpty())
-        return false;
-
-    RenderObject *renderer = node()->renderer();
-    if (!renderer)
-        return false;
-
-    if (renderer->style()->visibility() != khtml::VISIBLE)
-        return false;
-
-    if (renderedOffset() != (long)node()->caretMaxRenderedOffset())
-        return false;
-
-    Position pos(node(), offset());
-    PositionIterator it(pos);
-    while (!it.atEnd()) {
-        it.next();
-        if (!it.current().node()->inSameContainingBlockFlowElement(node()))
-            return true;
-        if (it.current().inRenderedContent())
-            return false;
-    }
-    return true;
-}
-
-bool Position::inFirstEditableInRootEditableElement() const
-{
-    if (isEmpty() || !inRenderedContent())
-        return false;
-
-    PositionIterator it(*this);
-    while (!it.atStart()) {
-        if (it.previous().inRenderedContent())
-            return false;
+    if (node()->isTextNode()) {
+        TextImpl *textNode = static_cast<TextImpl *>(node());
+        if (offset() < (long)textNode->length()) {
+            DOMString string = static_cast<TextImpl *>(node())->data();
+            const QChar &c = string[offset()];
+            if (considerNonCollapsibleWhitespace ? (c.isSpace() || c.unicode() == 0xa0) : isCollapsibleWhitespace(c))
+                return *this;
+            return Position();
+        }
     }
 
-    return true;
-}
+    if (downstream(StayInBlock).node()->id() == ID_BR)
+        return Position();
 
-bool Position::inLastEditableInRootEditableElement() const
-{
-    if (isEmpty() || !inRenderedContent())
-        return false;
-
-    PositionIterator it(*this);
-    while (!it.atEnd()) {
-        if (it.next().inRenderedContent())
-            return false;
+    Position next = nextCharacterPosition(affinity);
+    if (next != *this && next.node()->inSameContainingBlockFlowElement(node()) && next.node()->isTextNode()) {
+        DOMString string = static_cast<TextImpl *>(next.node())->data();
+        const QChar &c = string[0];
+        if (considerNonCollapsibleWhitespace ? (c.isSpace() || c.unicode() == 0xa0) : isCollapsibleWhitespace(c))
+            return next;
     }
 
-    return true;
-}
-
-bool Position::inFirstEditableInContainingEditableBlock() const
-{
-    if (isEmpty() || !inRenderedContent())
-        return false;
-    
-    NodeImpl *block = node()->enclosingBlockFlowElement();
-
-    PositionIterator it(*this);
-    while (!it.atStart()) {
-        it.previous();
-        if (!it.current().inRenderedContent())
-            continue;
-        return block != it.current().node()->enclosingBlockFlowElement();
-    }
-
-    return true;
-}
-
-bool Position::inLastEditableInContainingEditableBlock() const
-{
-    if (isEmpty() || !inRenderedContent())
-        return false;
-    
-    NodeImpl *block = node()->enclosingBlockFlowElement();
-
-    PositionIterator it(*this);
-    while (!it.atEnd()) {
-        it.next();
-        if (!it.current().inRenderedContent())
-            continue;
-        return block != it.current().node()->enclosingBlockFlowElement();
-    }
-
-    return true;
+    return Position();
 }
 
 void Position::debugPosition(const char *msg) const
 {
-    if (isEmpty())
-        fprintf(stderr, "Position [%s]: empty\n");
+    if (isNull())
+        fprintf(stderr, "Position [%s]: null\n", msg);
     else
-        fprintf(stderr, "Position [%s]: %s [%p] at %d\n", msg, getTagName(node()->id()).string().latin1(), node(), offset());
+        fprintf(stderr, "Position [%s]: %s [%p] at %d\n", msg, node()->nodeName().string().latin1(), node(), offset());
+}
+
+#ifndef NDEBUG
+#define FormatBufferSize 1024
+void Position::formatForDebugger(char *buffer, unsigned length) const
+{
+    DOMString result;
+    DOMString s;
+    
+    if (isNull()) {
+        result = "<null>";
+    }
+    else {
+        char s[FormatBufferSize];
+        result += "offset ";
+        result += QString::number(m_offset);
+        result += " of ";
+        m_node->formatForDebugger(s, FormatBufferSize);
+        result += s;
+    }
+          
+    strncpy(buffer, result.string().latin1(), length - 1);
+}
+#undef FormatBufferSize
+#endif
+
+
+Position startPosition(const Range &r)
+{
+    if (r.isNull() || r.isDetached())
+        return Position();
+    return Position(r.startContainer().handle(), r.startOffset());
+}
+
+Position startPosition(const RangeImpl *r)
+{
+    if (!r || r->isDetached())
+        return Position();
+    int exceptionCode;
+    return Position(r->startContainer(exceptionCode), r->startOffset(exceptionCode));
+}
+
+Position endPosition(const Range &r)
+{
+    if (r.isNull() || r.isDetached())
+        return Position();
+    return Position(r.endContainer().handle(), r.endOffset());
+}
+
+Position endPosition(const RangeImpl *r)
+{
+    if (!r || r->isDetached())
+        return Position();
+    int exceptionCode;
+    return Position(r->endContainer(exceptionCode), r->endOffset(exceptionCode));
 }
 
 } // namespace DOM

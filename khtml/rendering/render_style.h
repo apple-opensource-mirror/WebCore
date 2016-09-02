@@ -193,7 +193,6 @@ enum EBorderStyle {
     BNONE, BHIDDEN, INSET, GROOVE, RIDGE, OUTSET, DOTTED, DASHED, SOLID, DOUBLE
 };
 
-
 class BorderValue
 {
 public:
@@ -236,6 +235,16 @@ public:
         _auto = false;
     }
     
+    bool operator==(const OutlineValue& o) const
+    {
+    	return width==o.width && style==o.style && color==o.color && _offset == o._offset && _auto == o._auto;
+    }
+    
+    bool operator!=(const OutlineValue& o) const
+    {
+        return !(*this == o);
+    }
+    
     int _offset;
     bool _auto;
 };
@@ -264,7 +273,7 @@ struct CollapsedBorderValue
     EBorderPrecedence precedence;    
 };
 
-class BorderData : public Shared<BorderData>
+class BorderData
 {
 public:
     BorderValue left;
@@ -283,6 +292,8 @@ public:
     }
 
 };
+
+enum EMarginCollapse { MCOLLAPSE, MSEPARATE, MDISCARD };
 
 class StyleSurroundData : public Shared<StyleSurroundData>
 {
@@ -338,6 +349,29 @@ public:
 };
 
 //------------------------------------------------
+// Dashboard region attributes. Not inherited.
+
+#if APPLE_CHANGES
+struct StyleDashboardRegion
+{
+    QString label;
+    LengthBox offset;
+    int type;
+    
+    enum {
+        None,
+        Circle,
+        Rectangle
+    };
+
+    bool operator==(const StyleDashboardRegion& o) const
+    {
+        return type == o.type && offset == o.offset && label == o.label;
+    }
+};
+#endif
+
+//------------------------------------------------
 // Random visual rendering model attributes. Not inherited.
 
 enum EOverflow {
@@ -376,7 +410,10 @@ public:
 		 colspan == o.colspan &&
 		 counter_increment == o.counter_increment &&
 		 counter_reset == o.counter_reset &&
-		 palette == o.palette && textDecoration == o.textDecoration);
+#if !APPLE_CHANGES
+		 palette == o.palette &&
+#endif
+                 textDecoration == o.textDecoration);
     }
     bool operator!=( const StyleVisualData &o ) const {
         return !(*this == o);
@@ -391,7 +428,9 @@ public:
     short counter_increment; //ok, so these are not visual mode spesific
     short counter_reset;     //can't go to inherited, since these are not inherited
 
+#if !APPLE_CHANGES
     QPalette palette;      //widget styling with IE attributes
+#endif
 };
 
 //------------------------------------------------
@@ -399,7 +438,79 @@ enum EBackgroundRepeat {
     REPEAT, REPEAT_X, REPEAT_Y, NO_REPEAT
 };
 
+struct BackgroundLayer {
+public:
+    BackgroundLayer();
+    ~BackgroundLayer();
 
+    CachedImage* backgroundImage() const { return m_image; }
+    Length backgroundXPosition() const { return m_xPosition; }
+    Length backgroundYPosition() const { return m_yPosition; }
+    bool backgroundAttachment() const { return m_bgAttachment; }
+    EBackgroundRepeat backgroundRepeat() const { return m_bgRepeat; }
+    BackgroundLayer* next() const { return m_next; }
+    BackgroundLayer* next() { return m_next; }
+
+    bool isBackgroundImageSet() const { return m_imageSet; }
+    bool isBackgroundXPositionSet() const { return m_xPosSet; }
+    bool isBackgroundYPositionSet() const { return m_yPosSet; }
+    bool isBackgroundAttachmentSet() const { return m_attachmentSet; }
+    bool isBackgroundRepeatSet() const { return m_repeatSet; }
+
+    void setBackgroundImage(CachedImage* i) { m_image = i; m_imageSet = true; }
+    void setBackgroundXPosition(const Length& l) { m_xPosition = l; m_xPosSet = true; }
+    void setBackgroundYPosition(const Length& l) { m_yPosition = l; m_yPosSet = true; }
+    void setBackgroundAttachment(bool b) { m_bgAttachment = b; m_attachmentSet = true; }
+    void setBackgroundRepeat(EBackgroundRepeat r) { m_bgRepeat = r; m_repeatSet = true; }
+    
+    void clearBackgroundImage() { m_imageSet = false; }
+    void clearBackgroundXPosition() { m_xPosSet = false; }
+    void clearBackgroundYPosition() { m_yPosSet = false; }
+    void clearBackgroundAttachment() { m_attachmentSet = false; }
+    void clearBackgroundRepeat() { m_repeatSet = false; }
+
+    void setNext(BackgroundLayer* n) { if (m_next != n) { delete m_next; m_next = n; } }
+
+    BackgroundLayer& operator=(const BackgroundLayer& o);    
+    BackgroundLayer(const BackgroundLayer& o);
+
+    bool operator==(const BackgroundLayer& o) const;
+    bool operator!=(const BackgroundLayer& o) const {
+        return !(*this == o);
+    }
+
+    bool containsImage(CachedImage* c) const { if (c == m_image) return true; if (m_next) return m_next->containsImage(c); return false; }
+    
+    bool hasImage() const {
+        if (m_image)
+            return true;
+        return m_next ? m_next->hasImage() : false;
+    }
+    bool hasFixedImage() const {
+        if (m_image && !m_bgAttachment)
+            return true;
+        return m_next ? m_next->hasFixedImage() : false;
+    }
+
+    void fillUnsetProperties();
+    void cullEmptyLayers();
+
+    CachedImage* m_image;
+
+    Length m_xPosition;
+    Length m_yPosition;
+
+    bool m_bgAttachment : 1;
+    EBackgroundRepeat m_bgRepeat : 2;
+
+    bool m_imageSet : 1;
+    bool m_attachmentSet : 1;
+    bool m_repeatSet : 1;
+    bool m_xPosSet : 1;
+    bool m_yPosSet : 1;
+
+    BackgroundLayer* m_next;
+};
 
 class StyleBackgroundData : public Shared<StyleBackgroundData>
 {
@@ -413,12 +524,9 @@ public:
 	return !(*this == o);
     }
 
-    QColor color;
-    CachedImage *image;
-
-    Length x_position;
-    Length y_position;
-    OutlineValue outline;
+    BackgroundLayer m_background;
+    QColor m_color;
+    OutlineValue m_outline;
 };
 
 //------------------------------------------------
@@ -537,6 +645,24 @@ enum EUserSelect {
     SELECT_AUTO, SELECT_NONE, SELECT_TEXT
 };
 
+// Word Break Values. Matches WinIE, rather than CSS3
+
+enum EWordWrap {
+    WBNORMAL, BREAK_WORD
+};
+
+enum ENBSPMode {
+    NBNORMAL, SPACE
+};
+
+enum EKHTMLLineBreak {
+    LBNORMAL, AFTER_WHITE_SPACE
+};
+
+enum EMatchNearestMailBlockquoteColor {
+    BCNORMAL, MATCH
+};
+
 // This struct is for rarely used non-inherited CSS3 properties.  By grouping them together,
 // we save space, and only allocate this object when someone actually uses
 // a non-inherited CSS3 property.
@@ -558,6 +684,7 @@ public:
     
 #if APPLE_CHANGES
     int lineClamp;         // An Apple extension.  Not really CSS3 but not worth making a new struct over.
+    QValueList<StyleDashboardRegion> m_dashboardRegions;
 #endif
     float opacity;         // Whether or not we're transparent.
     DataRef<StyleFlexibleBoxData> flexibleBox; // Flexible box properties 
@@ -565,6 +692,9 @@ public:
     EUserDrag userDrag : 2; // Whether or not a drag can be initiated by this element.
     EUserSelect userSelect : 2;  // Whether or not the element is selectable.
     bool textOverflow : 1; // Whether or not lines that spill out should be truncated with "..."
+    EMarginCollapse marginTopCollapse : 2;
+    EMarginCollapse marginBottomCollapse : 2;
+    EMatchNearestMailBlockquoteColor matchNearestMailBlockquoteColor : 1;    
 
 #ifndef KHTML_NO_XBL
     BindingURI* bindingURI; // The XBL binding URI list.
@@ -589,6 +719,9 @@ public:
 
     ShadowData* textShadow;  // Our text shadow information for shadowed text drawing.
     EUserModify userModify : 2; // Flag used for editing state
+    EWordWrap wordWrap : 1;    // Flag used for word wrap
+    ENBSPMode nbspMode : 1;    
+    EKHTMLLineBreak khtmlLineBreak : 1;    
 #if APPLE_CHANGES
     bool textSizeAdjust : 1;    // An Apple extension.  Not really CSS3 but not worth making a new struct over.
 #endif
@@ -772,7 +905,7 @@ protected:
                    (_box_direction == other._box_direction) &&
                    (_visuallyOrdered == other._visuallyOrdered) &&
                    (_htmlHacks == other._htmlHacks) &&
-                   (_should_correct_text_color == other._should_correct_text_color);
+                   (_force_backgrounds_to_white == other._force_backgrounds_to_white);
 	}
         
 	bool operator!=( const InheritedFlags &other ) const {
@@ -795,7 +928,7 @@ protected:
               // non CSS2 inherited
               bool _visuallyOrdered : 1;
               bool _htmlHacks :1;
-              bool _should_correct_text_color : 1;
+              bool _force_backgrounds_to_white : 1;
     } inherited_flags;
 
 // don't inherit
@@ -827,7 +960,6 @@ protected:
         EDisplay _effectiveDisplay : 5;
         EDisplay _originalDisplay : 5;
         EBackgroundRepeat _bg_repeat : 2;
-        bool _bg_attachment : 1;
         EOverflow _overflow : 4 ;
         EVerticalAlign _vertical_align : 4;
         EClear _clear : 2;
@@ -852,7 +984,7 @@ protected:
     DataRef<StyleBackgroundData> background;
     DataRef<StyleSurroundData> surround;
     DataRef<StyleCSS3NonInheritedData> css3NonInheritedData;
-    
+
 // inherited attributes
     DataRef<StyleCSS3InheritedData> css3InheritedData;
     DataRef<StyleInheritedData> inherited;
@@ -892,11 +1024,9 @@ protected:
 	inherited_flags._visuallyOrdered = false;
 	inherited_flags._htmlHacks=false;
         inherited_flags._box_direction = initialBoxDirection();
-        inherited_flags._should_correct_text_color = false;
+        inherited_flags._force_backgrounds_to_white = false;
         
 	noninherited_flags._effectiveDisplay = noninherited_flags._originalDisplay = initialDisplay();
-	noninherited_flags._bg_repeat = initialBackgroundRepeat();
-	noninherited_flags._bg_attachment = initialBackgroundAttachment();
 	noninherited_flags._overflow = initialOverflow();
 	noninherited_flags._vertical_align = initialVerticalAlign();
 	noninherited_flags._clear = initialClear();
@@ -942,6 +1072,11 @@ public:
     bool        hasMargin() const { return surround->margin.nonZero(); }
     bool        hasBorder() const { return surround->border.hasBorder(); }
     bool        hasOffset() const { return surround->offset.nonZero(); }
+
+    bool hasBackground() const { if (backgroundColor().isValid() && qAlpha(backgroundColor().rgb()) > 0)
+                                    return true;
+                                 return background->m_background.hasImage(); }
+    bool hasFixedBackgroundImage() const { return background->m_background.hasFixedImage(); }
 
     bool visuallyOrdered() const { return inherited_flags._visuallyOrdered; }
     void setVisuallyOrdered(bool b) {  inherited_flags._visuallyOrdered = b; }
@@ -998,10 +1133,10 @@ public:
     bool borderBottomIsTransparent() const { return surround->border.bottom.isTransparent(); }
     
     unsigned short outlineSize() const { return outlineWidth() + outlineOffset(); }
-    unsigned short outlineWidth() const { if (background->outline.style == BNONE || background->outline.style == BHIDDEN) return 0; return background->outline.width; }
-    EBorderStyle    outlineStyle() const {  return background->outline.style; }
-    bool outlineStyleIsAuto() const { return background->outline._auto; }
-    const QColor &  	    outlineColor() const {  return background->outline.color; }
+    unsigned short outlineWidth() const { if (background->m_outline.style == BNONE || background->m_outline.style == BHIDDEN) return 0; return background->m_outline.width; }
+    EBorderStyle    outlineStyle() const {  return background->m_outline.style; }
+    bool outlineStyleIsAuto() const { return background->m_outline._auto; }
+    const QColor &  	    outlineColor() const {  return background->m_outline.color; }
 
     EOverflow overflow() const { return  noninherited_flags._overflow; }
     EVisibility visibility() const { return inherited_flags._visibility; }
@@ -1012,6 +1147,7 @@ public:
     Length clipRight() const { return visual->clip.right; }
     Length clipTop() const { return visual->clip.top; }
     Length clipBottom() const { return visual->clip.bottom; }
+    LengthBox clip() const { return visual->clip; }
     bool hasClip() const { return visual->hasClip; }
     
     EUnicodeBidi unicodeBidi() const { return noninherited_flags._unicodeBidi; }
@@ -1040,13 +1176,14 @@ public:
 
     EWhiteSpace whiteSpace() const { return inherited_flags._white_space; }
 
-
-    const QColor & backgroundColor() const { return background->color; }
-    CachedImage *backgroundImage() const { return background->image; }
-    EBackgroundRepeat backgroundRepeat() const { return  noninherited_flags._bg_repeat; }
-    bool backgroundAttachment() const { return  noninherited_flags._bg_attachment; }
-    Length backgroundXPosition() const { return background->x_position; }
-    Length backgroundYPosition() const { return background->y_position; }
+    const QColor & backgroundColor() const { return background->m_color; }
+    CachedImage *backgroundImage() const { return background->m_background.m_image; }
+    EBackgroundRepeat backgroundRepeat() const { return background->m_background.m_bgRepeat; }
+    bool backgroundAttachment() const { return background->m_background.m_bgAttachment; }
+    Length backgroundXPosition() const { return background->m_background.m_xPosition; }
+    Length backgroundYPosition() const { return background->m_background.m_yPosition; }
+    BackgroundLayer* accessBackgroundLayers() { return &(background.access()->m_background); }
+    const BackgroundLayer* backgroundLayers() const { return &(background->m_background); }
 
     // returns true for collapsing borders, false for separate borders
     bool borderCollapse() const { return inherited_flags._border_collapse; }
@@ -1087,27 +1224,33 @@ public:
     BindingURI* bindingURIs() const { return css3NonInheritedData->bindingURI; }
 #endif
     int outlineOffset() const { 
-        if (background->outline.style == BNONE || background->outline.style == BHIDDEN) return 0; return background->outline._offset;
+        if (background->m_outline.style == BNONE || background->m_outline.style == BHIDDEN) return 0; return background->m_outline._offset;
     }
     ShadowData* textShadow() const { return css3InheritedData->textShadow; }
-    float opacity() { return css3NonInheritedData->opacity; }
-    EBoxAlignment boxAlign() { return css3NonInheritedData->flexibleBox->align; }
-    EBoxDirection boxDirection() { return inherited_flags._box_direction; }
+    float opacity() const { return css3NonInheritedData->opacity; }
+    EBoxAlignment boxAlign() const { return css3NonInheritedData->flexibleBox->align; }
+    EBoxDirection boxDirection() const { return inherited_flags._box_direction; }
     float boxFlex() { return css3NonInheritedData->flexibleBox->flex; }
-    unsigned int boxFlexGroup() { return css3NonInheritedData->flexibleBox->flex_group; }
+    unsigned int boxFlexGroup() const { return css3NonInheritedData->flexibleBox->flex_group; }
     EBoxLines boxLines() { return css3NonInheritedData->flexibleBox->lines; }
-    unsigned int boxOrdinalGroup() { return css3NonInheritedData->flexibleBox->ordinal_group; }
-    EBoxOrient boxOrient() { return css3NonInheritedData->flexibleBox->orient; }
-    EBoxAlignment boxPack() { return css3NonInheritedData->flexibleBox->pack; }
-    Length marqueeIncrement() { return css3NonInheritedData->marquee->increment; }
-    int marqueeSpeed() { return css3NonInheritedData->marquee->speed; }
-    int marqueeLoopCount() { return css3NonInheritedData->marquee->loops; }
-    EMarqueeBehavior marqueeBehavior() { return css3NonInheritedData->marquee->behavior; }
-    EMarqueeDirection marqueeDirection() { return css3NonInheritedData->marquee->direction; }
+    unsigned int boxOrdinalGroup() const { return css3NonInheritedData->flexibleBox->ordinal_group; }
+    EBoxOrient boxOrient() const { return css3NonInheritedData->flexibleBox->orient; }
+    EBoxAlignment boxPack() const { return css3NonInheritedData->flexibleBox->pack; }
+    Length marqueeIncrement() const { return css3NonInheritedData->marquee->increment; }
+    int marqueeSpeed() const { return css3NonInheritedData->marquee->speed; }
+    int marqueeLoopCount() const { return css3NonInheritedData->marquee->loops; }
+    EMarqueeBehavior marqueeBehavior() const { return css3NonInheritedData->marquee->behavior; }
+    EMarqueeDirection marqueeDirection() const { return css3NonInheritedData->marquee->direction; }
     EUserModify userModify() const { return css3InheritedData->userModify; }
     EUserDrag userDrag() const { return css3NonInheritedData->userDrag; }
     EUserSelect userSelect() const { return css3NonInheritedData->userSelect; }
     bool textOverflow() const { return css3NonInheritedData->textOverflow; }
+    EMarginCollapse marginTopCollapse() const { return css3NonInheritedData->marginTopCollapse; }
+    EMarginCollapse marginBottomCollapse() const { return css3NonInheritedData->marginBottomCollapse; }
+    EWordWrap wordWrap() const { return css3InheritedData->wordWrap; }
+    ENBSPMode nbspMode() const { return css3InheritedData->nbspMode; }
+    EKHTMLLineBreak khtmlLineBreak() const { return css3InheritedData->khtmlLineBreak; }
+    EMatchNearestMailBlockquoteColor matchNearestMailBlockquoteColor() const { return css3NonInheritedData->matchNearestMailBlockquoteColor; }
     // End CSS3 Getters
 
 #if APPLE_CHANGES
@@ -1136,12 +1279,32 @@ public:
     void setMinHeight(Length v) { SET_VAR(box,min_height,v) }
     void setMaxHeight(Length v) { SET_VAR(box,max_height,v) }
 
+#if APPLE_CHANGES
+    QValueList<StyleDashboardRegion> dashboardRegions() const { return css3NonInheritedData->m_dashboardRegions; }
+    void setDashboardRegions(QValueList<StyleDashboardRegion> regions) { SET_VAR(css3NonInheritedData,m_dashboardRegions,regions); }
+    void setDashboardRegion (int type, QString label, Length t, Length r, Length b, Length l, bool append) {
+        StyleDashboardRegion region;
+        region.label = label;
+        region.offset.top  = t;
+        region.offset.right = r;
+        region.offset.bottom = b;
+        region.offset.left = l;
+        region.type = type;
+        if (!append) {
+            css3NonInheritedData.access()->m_dashboardRegions.clear ();
+        }
+        css3NonInheritedData.access()->m_dashboardRegions.append (region);
+    }
+#endif
+
     void resetBorderTop() { SET_VAR(surround, border.top, BorderValue()) }
     void resetBorderRight() { SET_VAR(surround, border.right, BorderValue()) }
     void resetBorderBottom() { SET_VAR(surround, border.bottom, BorderValue()) }
     void resetBorderLeft() { SET_VAR(surround, border.left, BorderValue()) }
-    void resetOutline() { SET_VAR(background, outline, OutlineValue()) }
+    void resetOutline() { SET_VAR(background, m_outline, OutlineValue()) }
     
+    void setBackgroundColor(const QColor& v)    { SET_VAR(background, m_color, v) }
+
     void setBorderLeftWidth(unsigned short v)   {  SET_VAR(surround,border.left.width,v) }
     void setBorderLeftStyle(EBorderStyle v)     {  SET_VAR(surround,border.left.style,v) }
     void setBorderLeftColor(const QColor & v)   {  SET_VAR(surround,border.left.color,v) }
@@ -1154,13 +1317,13 @@ public:
     void setBorderBottomWidth(unsigned short v) {  SET_VAR(surround,border.bottom.width,v) }
     void setBorderBottomStyle(EBorderStyle v)   {  SET_VAR(surround,border.bottom.style,v) }
     void setBorderBottomColor(const QColor & v) {  SET_VAR(surround,border.bottom.color,v) }
-    void setOutlineWidth(unsigned short v) {  SET_VAR(background,outline.width,v) }
+    void setOutlineWidth(unsigned short v) {  SET_VAR(background,m_outline.width,v) }
     void setOutlineStyle(EBorderStyle v, bool isAuto = false)   
     {  
-        SET_VAR(background,outline.style,v)
-        SET_VAR(background,outline._auto, isAuto)
+        SET_VAR(background,m_outline.style,v)
+        SET_VAR(background,m_outline._auto, isAuto)
     }
-    void setOutlineColor(const QColor & v) {  SET_VAR(background,outline.color,v) }
+    void setOutlineColor(const QColor & v) {  SET_VAR(background,m_outline.color,v) }
 
     void setOverflow(EOverflow v) {  noninherited_flags._overflow = v; }
     void setVisibility(EVisibility v) { inherited_flags._visibility = v; }
@@ -1204,12 +1367,9 @@ public:
     void setWordSpacing(int v) { SET_VAR(inherited,font.wordSpacing,v) }
     void setLetterSpacing(int v) { SET_VAR(inherited,font.letterSpacing,v) }
 
-    void setBackgroundColor(const QColor & v) {  SET_VAR(background,color,v) }
-    void setBackgroundImage(CachedImage *v) {  SET_VAR(background,image,v) }
-    void setBackgroundRepeat(EBackgroundRepeat v) {  noninherited_flags._bg_repeat = v; }
-    void setBackgroundAttachment(bool scroll) {  noninherited_flags._bg_attachment = scroll; }
-    void setBackgroundXPosition(Length v) {  SET_VAR(background,x_position,v) }
-    void setBackgroundYPosition(Length v) {  SET_VAR(background,y_position,v) }
+    void clearBackgroundLayers() { background.access()->m_background = BackgroundLayer(); }
+    void inheritBackgroundLayers(const BackgroundLayer& parent) { background.access()->m_background = parent; }
+    void adjustBackgroundLayers();
 
     void setBorderCollapse(bool collapse) { inherited_flags._border_collapse = collapse; }
     void setHorizontalBorderSpacing(short v) { SET_VAR(inherited,horizontal_border_spacing,v) }
@@ -1240,8 +1400,8 @@ public:
     void setCursor( ECursor c ) { inherited_flags._cursor_style = c; }
     void setCursorImage( CachedImage *v ) { SET_VAR(inherited,cursor_image,v) }
 
-    bool shouldCorrectTextColor() const { return inherited_flags._should_correct_text_color; }
-    void setShouldCorrectTextColor(bool b=true) { inherited_flags._should_correct_text_color = b; }
+    bool forceBackgroundsToWhite() const { return inherited_flags._force_backgrounds_to_white; }
+    void setForceBackgroundsToWhite(bool b=true) { inherited_flags._force_backgrounds_to_white = b; }
 
     bool htmlHacks() const { return inherited_flags._htmlHacks; }
     void setHtmlHacks(bool b=true) { inherited_flags._htmlHacks = b; }
@@ -1268,7 +1428,7 @@ public:
     }
     void addBindingURI(DOM::DOMStringImpl* uri);
 #endif
-    void setOutlineOffset(unsigned short v) {  SET_VAR(background,outline._offset,v) }
+    void setOutlineOffset(unsigned short v) { SET_VAR(background, m_outline._offset, v) }
     void setTextShadow(ShadowData* val, bool add=false);
     void setOpacity(float f) { SET_VAR(css3NonInheritedData, opacity, f); }
     void setBoxAlign(EBoxAlignment a) { SET_VAR(css3NonInheritedData.access()->flexibleBox, align, a); }
@@ -1288,6 +1448,12 @@ public:
     void setUserDrag(EUserDrag d) { SET_VAR(css3NonInheritedData, userDrag, d); }
     void setUserSelect(EUserSelect s) { SET_VAR(css3NonInheritedData, userSelect, s); }
     void setTextOverflow(bool b) { SET_VAR(css3NonInheritedData, textOverflow, b); }
+    void setMarginTopCollapse(EMarginCollapse c) { SET_VAR(css3NonInheritedData, marginTopCollapse, c); }
+    void setMarginBottomCollapse(EMarginCollapse c) { SET_VAR(css3NonInheritedData, marginBottomCollapse, c); }
+    void setWordWrap(EWordWrap b) { SET_VAR(css3InheritedData, wordWrap, b); }
+    void setNBSPMode(ENBSPMode b) { SET_VAR(css3InheritedData, nbspMode, b); }
+    void setKHTMLLineBreak(EKHTMLLineBreak b) { SET_VAR(css3InheritedData, khtmlLineBreak, b); }
+    void setMatchNearestMailBlockquoteColor(EMatchNearestMailBlockquoteColor c)  { SET_VAR(css3NonInheritedData, matchNearestMailBlockquoteColor, c); }
     // End CSS3 Setters
    
 #if APPLE_CHANGES
@@ -1296,12 +1462,14 @@ public:
     void setTextSizeAdjust(bool b) { SET_VAR(css3InheritedData, textSizeAdjust, b); }
 #endif
 
+#if !APPLE_CHANGES
     QPalette palette() const { return visual->palette; }
     void setPaletteColor(QPalette::ColorGroup g, QColorGroup::ColorRole r, const QColor& c);
     void resetPalette() // Called when the desktop color scheme changes.
     {
         const_cast<StyleVisualData *>(visual.get())->palette = QApplication::palette();
     }
+#endif
 
     ContentData* contentData() { return content; }
     bool contentDataEquivalent(RenderStyle* otherStyle);
@@ -1310,7 +1478,12 @@ public:
 
     bool inheritedNotEqual( RenderStyle *other ) const;
 
-    enum Diff { Equal, NonVisible = Equal, Visible, Position, Layout, CbLayout };
+    // The difference between two styles.  The following values are used:
+    // (1) Equal - The two styles are identical
+    // (2) Repaint - The object just needs to be repainted.
+    // (3) RepaintLayer - The layer and its descendant layers needs to be repainted.
+    // (4) Layout - A layout is required.
+    enum Diff { Equal, Repaint, RepaintLayer, Layout };
     Diff diff( const RenderStyle *other ) const;
 
     bool isDisplayReplacedType() {
@@ -1395,11 +1568,19 @@ public:
     static EUserDrag initialUserDrag() { return DRAG_AUTO; }
     static EUserSelect initialUserSelect() { return SELECT_AUTO; }
     static bool initialTextOverflow() { return false; }
+    static EMarginCollapse initialMarginTopCollapse() { return MCOLLAPSE; }
+    static EMarginCollapse initialMarginBottomCollapse() { return MCOLLAPSE; }
+    static EWordWrap initialWordWrap() { return WBNORMAL; }
+    static ENBSPMode initialNBSPMode() { return NBNORMAL; }
+    static EKHTMLLineBreak initialKHTMLLineBreak() { return LBNORMAL; }
+    static EMatchNearestMailBlockquoteColor initialMatchNearestMailBlockquoteColor() { return BCNORMAL; }
 
 #if APPLE_CHANGES
     // Keep these at the end.
     static int initialLineClamp() { return -1; }
     static bool initialTextSizeAdjust() { return true; }
+    static const QValueList<StyleDashboardRegion>& initialDashboardRegions();
+    static const QValueList<StyleDashboardRegion>& noneDashboardRegions();
 #endif
 };
 

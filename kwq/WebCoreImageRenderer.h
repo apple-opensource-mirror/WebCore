@@ -27,7 +27,7 @@
 
 @protocol WebCoreImageRenderer <NSObject, NSCopying>
 
-- (BOOL)incrementalLoadWithBytes:(const void *)bytes length:(unsigned)length complete:(BOOL)isComplete;
+- (BOOL)incrementalLoadWithBytes:(const void *)bytes length:(unsigned)length complete:(BOOL)isComplete callback:(id)c;
 
 - (NSSize)size;
 - (void)resize:(NSSize)s;
@@ -40,4 +40,6 @@
 - (void)increaseUseCount;
 - (void)decreaseUseCount;
 - (void)flushRasterCache;
+- (CGImageRef)imageRef;
+- (void)resetAnimation;
 @end

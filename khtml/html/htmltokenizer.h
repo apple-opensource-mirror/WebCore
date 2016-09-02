@@ -124,17 +124,22 @@ public:
 class HTMLTokenizer : public Tokenizer, public CachedObjectClient
 {
 public:
-    HTMLTokenizer(DOM::DocumentPtr *, KHTMLView * = 0);
-    HTMLTokenizer(DOM::DocumentPtr *, DOM::DocumentFragmentImpl *frag);
+    HTMLTokenizer(DOM::DocumentPtr *, KHTMLView * = 0, bool includesComments=false);
+    HTMLTokenizer(DOM::DocumentPtr *, DOM::DocumentFragmentImpl *frag, bool includesComments=false);
     virtual ~HTMLTokenizer();
 
-    void begin();
-    void write(const TokenizerString &str, bool appendData);
-    void end();
-    void finish();
-    virtual void setOnHold(bool _onHold);
+    virtual void write(const TokenizerString &str, bool appendData);
+    virtual void finish();
+    virtual void setOnHold(bool onHold);
+    virtual void setForceSynchronous(bool force);
+    virtual bool isWaitingForScripts() const;
+    virtual void stopped();
+    virtual bool processingData() const;
 
 protected:
+    void begin();
+    void end();
+
     void reset();
     void addPending();
     void processToken();
@@ -169,10 +174,13 @@ protected:
     void enlargeBuffer(int len);
     void enlargeScriptBuffer(int len);
 
+    bool continueProcessing(int& processedCount, const QTime& startTime, const KWQUIEventTime& eventTime);
+    void timerEvent(QTimerEvent*);
+    void allDataProcessed();
+
     // from CachedObjectClient
     void notifyFinished(CachedObject *finishedObj);
 
-    virtual bool isWaitingForScripts();
 protected:
     // Internal buffers
     ///////////////////
@@ -322,6 +330,11 @@ protected:
     bool javascript;
     // the HTML code we will parse after the external script we are waiting for has loaded
     TokenizerString pendingSrc;
+
+    // the HTML code we will parse after this particular script has
+    // loaded, but before all pending HTML
+    TokenizerString *currentPrependingSrc;
+
     // true if we are executing a script while parsing a document. This causes the parsing of
     // the output of the script to be postponed until after the script has finished executing
     int m_executingScript;
@@ -338,6 +351,13 @@ protected:
     int scriptStartLineno;
     int tagStartLineno;
 
+    // The timer for continued processing.
+    int timerId;
+    bool allowYield;
+    bool forceSynchronous;  // disables yielding
+
+    bool includesCommentsInDOM;
+
 // This buffer can hold arbitrarily long user-defined attribute names, such as in EMBED tags.
 // So any fixed number might be too small, but rather than rewriting all usage of this buffer
 // we'll just make it large enough to handle all imaginable cases.
@@ -350,11 +370,9 @@ protected:
     KCharsets *charsets;
     KHTMLParser *parser;
 
-    KHTMLView *view;
-
-#ifndef NDEBUG
+    QGuardedPtr<KHTMLView> view;
+    
     bool inWrite;
-#endif
 };
 
 }

@@ -27,10 +27,9 @@
 
 #include "html/html_elementimpl.h"
 #include "dom/html_element.h"
+#include "html/html_miscimpl.h"
 
-#include <qvaluelist.h>
-#include <qptrlist.h>
-#include <qcstring.h>
+#include <qptrvector.h>
 #include <qmemarray.h>
 
 class KHTMLView;
@@ -38,6 +37,7 @@ class QTextCodec;
 
 namespace khtml
 {
+    class FormData;
     class RenderFormElement;
     class RenderTextArea;
     class RenderSelect;
@@ -47,17 +47,17 @@ namespace khtml
 #if APPLE_CHANGES
     class RenderSlider;
 #endif
-
-    typedef QValueList<QCString> encodingList;
 }
 
 namespace DOM {
 
-class HTMLFormElement;
 class DOMString;
+class FormDataList;
+class HTMLFormElement;
 class HTMLGenericFormElementImpl;
-class HTMLOptionElementImpl;
+class HTMLImageElementImpl;
 class HTMLImageLoader;
+class HTMLOptionElementImpl;
 class HTMLOptionsCollectionImpl;
 
 // -------------------------------------------------------------------------
@@ -75,8 +75,6 @@ public:
 
     long length() const;
 
-    QByteArray formData(bool& ok);
-
     DOMString enctype() const { return m_enctype; }
     void setEnctype( const DOMString & );
 
@@ -89,11 +87,11 @@ public:
 
     void radioClicked( HTMLGenericFormElementImpl *caller );
 
-    void registerFormElement(khtml::RenderFormElement *);
-    void removeFormElement(khtml::RenderFormElement *);
-
     void registerFormElement(HTMLGenericFormElementImpl *);
     void removeFormElement(HTMLGenericFormElementImpl *);
+    void makeFormElementDormant(HTMLGenericFormElementImpl *);
+    void registerImgElement(HTMLImageElementImpl *);
+    void removeImgElement(HTMLImageElementImpl *);
 
     bool prepareSubmit();
     void submit(bool activateSubmitButton);
@@ -114,7 +112,11 @@ public:
     friend class HTMLFormElement;
     friend class HTMLFormCollectionImpl;
 
-    QPtrList<HTMLGenericFormElementImpl> formElements;
+    HTMLCollectionImpl::CollectionInfo *collectionInfo;
+
+    QPtrVector<HTMLGenericFormElementImpl> formElements;
+    QPtrVector<HTMLGenericFormElementImpl> dormantFormElements;
+    QPtrVector<HTMLImageElementImpl> imgElements;
     DOMString m_url;
     DOMString m_target;
     DOMString m_enctype;
@@ -127,7 +129,10 @@ public:
     bool m_doingsubmit : 1;
     bool m_inreset : 1;
     bool m_malformed : 1;
+
  private:
+    bool formData(khtml::FormData &) const;
+
     QString oldIdAttr;
     QString oldNameAttr;
 };
@@ -149,6 +154,7 @@ public:
 
     virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
     virtual void attach();
+    virtual void insertedIntoDocument();
     virtual void removedFromDocument();
 
     virtual void reset() {}
@@ -179,7 +185,7 @@ public:
      * for submitting
      * return true for a successful control (see HTML4-17.13.2)
      */
-    virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool) { return false; }
+    virtual bool appendFormData(FormDataList&, bool) { return false; }
 
     virtual void defaultEventHandler(EventImpl *evt);
     virtual bool isEditable();
@@ -199,6 +205,7 @@ protected:
     bool m_disabled, m_readOnly;
 
     bool m_inited : 1;
+    bool m_dormant : 1;
 };
 
 // -------------------------------------------------------------------------
@@ -221,18 +228,18 @@ public:
 
     virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
     virtual void defaultEventHandler(EventImpl *evt);
-    virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool);
+    virtual bool appendFormData(FormDataList&, bool);
 
     virtual bool isSuccessfulSubmitButton() const;
     virtual bool isActivatedSubmit() const;
     virtual void setActivatedSubmit(bool flag);
 
-    virtual void click();
-    virtual void accessKeyAction();
+    virtual void click(bool sendMouseEvents);
+    virtual void accessKeyAction(bool sendToAnyElement);
     
 protected:
     DOMString m_value;
-    QString   m_currValue;
+    DOMString m_currValue;
     typeEnum  m_type : 2;
     bool      m_dirty : 1;
     bool      m_activeSubmit : 1;
@@ -306,7 +313,13 @@ public:
     void setType(const DOMString& t);
 
     DOMString value() const;
-    void setValue(DOMString val);
+    void setValue(const DOMString &);
+
+    DOMString valueWithDefault() const;
+
+    void setValueFromRenderer(const DOMString &);
+    bool valueMatchesRenderer() const { return m_valueMatchesRenderer; }
+    void setValueMatchesRenderer() { m_valueMatchesRenderer = true; }
 
     void blur();
     void focus();
@@ -317,8 +330,8 @@ public:
 
     void select();
     
-    virtual void click();
-    virtual void accessKeyAction();
+    virtual void click(bool sendMouseEvents);
+    virtual void accessKeyAction(bool sendToAnyElement);
 
     virtual bool mapToEntry(NodeImpl::Id attr, MappedAttributeEntry& result) const;
     virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
@@ -326,7 +339,8 @@ public:
     virtual void attach();
     virtual bool rendererIsNeeded(khtml::RenderStyle *);
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
-    virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool);
+    virtual void detach();
+    virtual bool appendFormData(FormDataList&, bool);
 
     virtual bool isSuccessfulSubmitButton() const;
     virtual bool isActivatedSubmit() const;
@@ -351,6 +365,7 @@ public:
 #endif
     
 protected:
+    bool storesValueSeparateFromAttribute() const;
 
     DOMString m_value;
     int       xPos;
@@ -371,6 +386,7 @@ protected:
     bool m_haveType : 1;
     bool m_activeSubmit : 1;
     bool m_autocomplete : 1;
+    bool m_valueMatchesRenderer : 1;
 };
 
 // -------------------------------------------------------------------------
@@ -387,10 +403,13 @@ public:
 
     virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
 
+    virtual void accessKeyAction(bool sendToAnyElement);
+
     /**
      * the form element this label is associated to.
      */
     ElementImpl *formElement();
+
  private:
     DOMString m_formElementID;
 };
@@ -464,7 +483,7 @@ public:
     virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
 
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
-    virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool);
+    virtual bool appendFormData(FormDataList&, bool);
 
     // get the actual listbox index of the optionIndexth option
     int optionToListIndex(int optionIndex) const;
@@ -485,7 +504,7 @@ public:
     virtual void defaultEventHandler(EventImpl *evt);
 #endif
 
-    virtual void accessKeyAction();
+    virtual void accessKeyAction(bool sendToAnyElement);
 
 private:
     void recalcListItems();
@@ -514,7 +533,7 @@ public:
     virtual bool isEnumeratable() const { return false; }
 
     virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
-    virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool);
+    virtual bool appendFormData(FormDataList&, bool);
 protected:
     AtomicString m_challenge;
     AtomicString m_keyType;
@@ -614,27 +633,36 @@ public:
 
     void select (  );
 
+    virtual void childrenChanged();
     virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
-    virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool);
+    virtual void detach();
+    virtual bool appendFormData(FormDataList&, bool);
     virtual void reset();
     DOMString value();
-    void setValue(DOMString _value);
+    void setValue(const DOMString &value);
     DOMString defaultValue();
-    void setDefaultValue(DOMString _defaultValue);
+    void setDefaultValue(const DOMString &value);
     void blur();
     void focus();
 
+    void invalidateValue() { m_valueIsValid = false; }
+    void updateValue();
+
+    bool valueMatchesRenderer() const { return m_valueMatchesRenderer; }
+    void setValueMatchesRenderer() { m_valueMatchesRenderer = true; }
+
     virtual bool isEditable();
     
-    virtual void accessKeyAction();
+    virtual void accessKeyAction(bool sendToAnyElement);
     
 protected:
     int m_rows;
     int m_cols;
     WrapMethod m_wrap;
     QString m_value;
-    bool m_dirtyvalue;
+    bool m_valueIsValid;
+    bool m_valueMatchesRenderer;
 };
 
 // -------------------------------------------------------------------------

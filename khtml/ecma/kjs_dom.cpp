@@ -2,7 +2,7 @@
 /*
  *  This file is part of the KDE libraries
  *  Copyright (C) 2000 Harri Porten (porten@kde.org)
- *  Copyright (C) 2003 Apple Computer, Inc.
+ *  Copyright (C) 2004 Apple Computer, Inc.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -50,6 +50,7 @@
 using namespace KJS;
 
 using DOM::DOMException;
+using DOM::DOMString;
 using DOM::NodeFilter;
 
 // -------------------------------------------------------------------------
@@ -300,7 +301,7 @@ Value DOMNode::getValueProperty(ExecState *exec, int token) const
     // Make sure our layout is up to date before we allow a query on these attributes.
     DOM::DocumentImpl* docimpl = node.handle()->getDocument();
     if (docimpl) {
-      docimpl->updateLayout();
+      docimpl->updateLayoutIgnorePendingStylesheets();
     }
 
     khtml::RenderObject *rend = node.handle()->renderer();
@@ -559,7 +560,8 @@ Value DOMNodeProtoFunc::tryCall(ExecState *exec, Object &thisObj, const List &ar
       node.normalize();
       return Undefined();
     case DOMNode::IsSupported:
-      return Boolean(node.isSupported(args[0].toString(exec).string(),args[1].toString(exec).string()));
+        return Boolean(node.isSupported(args[0].toString(exec).string(),
+            (args[1].type() != UndefinedType && args[1].type() != NullType) ? args[1].toString(exec).string() : DOMString()));
     case DOMNode::AddEventListener: {
         JSEventListener *listener = Window::retrieveActive(exec)->getJSEventListener(args[1]);
         if (listener)
@@ -648,22 +650,16 @@ Value DOMNodeList::tryGet(ExecState *exec, const Identifier &p) const
     // array index ?
     bool ok;
     long unsigned int idx = p.toULong(&ok);
-    if (ok)
+    if (ok) {
       result = getDOMNode(exec,list.item(idx));
-    else {
-      DOM::HTMLElement e;
-      unsigned long l = list.length();
-      bool found = false;
+    } else {
+      DOM::Node node = list.itemById(p.string());
 
-      for ( unsigned long i = 0; i < l; i++ )
-        if ( ( e = list.item( i ) ).id() == p.string() ) {
-          result = getDOMNode(exec, list.item( i ) );
-          found = true;
-          break;
-        }
-
-      if ( !found )
+      if (!node.isNull()) {
+        result = getDOMNode(exec, node);
+      } else {
         result = ObjectImp::get(exec, p);
+      }
     }
   }
 
@@ -1032,6 +1028,10 @@ Value DOMDocumentProtoFunc::tryCall(ExecState *exec, Object &thisObj, const List
   setAttributeNodeNS	DOMElement::SetAttributeNodeNS	DontDelete|Function 1
   getElementsByTagNameNS DOMElement::GetElementsByTagNameNS	DontDelete|Function 2
   hasAttributeNS	DOMElement::HasAttributeNS	DontDelete|Function 2
+# extension for Safari RSS
+  scrollByLines         DOMElement::ScrollByLines       DontDelete|Function 1
+  scrollByPages         DOMElement::ScrollByPages       DontDelete|Function 1
+
 @end
 */
 DEFINE_PROTOTYPE("DOMElement",DOMElementProto)
@@ -1132,6 +1132,27 @@ Value DOMElementProtoFunc::tryCall(ExecState *exec, Object &thisObj, const List 
       return getDOMNodeList(exec,element.getElementsByTagNameNS(args[0].toString(exec).string(),args[1].toString(exec).string()));
     case DOMElement::HasAttributeNS: // DOM2
       return Boolean(element.hasAttributeNS(args[0].toString(exec).string(),args[1].toString(exec).string()));
+    case DOMElement::ScrollByLines:
+    case DOMElement::ScrollByPages:
+    {
+        DOM::DocumentImpl* docimpl = node.handle()->getDocument();
+        if (docimpl) {
+            docimpl->updateLayoutIgnorePendingStylesheets();
+        }            
+        khtml::RenderObject *rend = node.handle() ? node.handle()->renderer() : 0L;
+        if (rend && rend->hasOverflowClip()) {
+            KWQScrollDirection direction = KWQScrollDown;
+            int multiplier = args[0].toInt32(exec);
+            if (multiplier < 0) {
+                direction = KWQScrollUp;
+                multiplier = -multiplier;
+            }
+            KWQScrollGranularity granularity = id == DOMElement::ScrollByLines ? KWQScrollLine : KWQScrollPage;
+            rend->layer()->scroll(direction, granularity, multiplier);
+        }
+        return Undefined();
+        
+    }
   default:
     return Undefined();
   }
@@ -1174,7 +1195,8 @@ Value DOMDOMImplementationProtoFunc::tryCall(ExecState *exec, Object &thisObj, c
 
   switch(id) {
   case DOMDOMImplementation::HasFeature:
-    return Boolean(implementation.hasFeature(args[0].toString(exec).string(),args[1].toString(exec).string()));
+    return Boolean(implementation.hasFeature(args[0].toString(exec).string(),
+        (args[1].type() != UndefinedType && args[1].type() != NullType) ? args[1].toString(exec).string() : DOMString()));
   case DOMDOMImplementation::CreateDocumentType: // DOM2
     return getDOMNode(exec,implementation.createDocumentType(args[0].toString(exec).string(),args[1].toString(exec).string(),args[2].toString(exec).string()));
   case DOMDOMImplementation::CreateDocument: // DOM2
@@ -1544,8 +1566,18 @@ Value KJS::getRuntimeObject(ExecState *exec, const DOM::Node &node)
                 return Value(runtimeImp);
             }
         }
+        else if (node.handle()->id() == ID_OBJECT) {
+            DOM::HTMLObjectElementImpl *objectElement = static_cast<DOM::HTMLObjectElementImpl *>(element.handle());
+            
+            if (objectElement->getObjectInstance()) {
+                RuntimeObjectImp *runtimeImp = new RuntimeObjectImp(objectElement->getObjectInstance(), false);
+                return Value(runtimeImp);
+            }
+        }
     }
-    return Undefined();
+    
+    // If we don't have a runtime object return the a Value that reports isNull() == true.
+    return Value();
 }
 
 Value KJS::getDOMNodeList(ExecState *exec, const DOM::NodeList &l)

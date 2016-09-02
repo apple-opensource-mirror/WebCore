@@ -3,6 +3,7 @@
  *
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -31,18 +32,17 @@
 namespace DOM {
 
 class DOMString;
-class CSSStyleDeclarationImpl;
 class HTMLFormElementImpl;
 class DocumentFragmentImpl;
 
 enum MappedAttributeEntry { eNone, eUniversal, ePersistent, eReplaced, eBlock, eHR, eUnorderedList, eListItem,
     eTable, eCell, eCaption };
 
-class CSSMappedAttributeDeclarationImpl : public CSSStyleDeclarationImpl
+class CSSMappedAttributeDeclarationImpl : public CSSMutableStyleDeclarationImpl
 {
 public:
     CSSMappedAttributeDeclarationImpl(CSSRuleImpl *parentRule)
-    : CSSStyleDeclarationImpl(parentRule), m_entryType(eNone), m_attrName(0)
+    : CSSMutableStyleDeclarationImpl(parentRule), m_entryType(eNone), m_attrName(0)
     {}
     
     virtual ~CSSMappedAttributeDeclarationImpl();
@@ -98,7 +98,7 @@ public:
     virtual void parseClassAttribute(const DOMString& classAttr);
     const AtomicStringList* getClassList() const { return &m_classList; }
     
-    bool hasMappedAttributes() const { return m_mappedAttributeCount > 0; }
+    virtual bool hasMappedAttributes() const { return m_mappedAttributeCount > 0; }
     void declRemoved() { m_mappedAttributeCount--; }
     void declAdded() { m_mappedAttributeCount++; }
     
@@ -130,6 +130,8 @@ public:
     virtual void parseHTMLAttribute(HTMLAttributeImpl* attr);
     virtual void createAttributeMap() const;
 
+    virtual NodeImpl *cloneNode(bool deep);
+
     virtual const AtomicStringList* getClassList() const;
 
     bool hasMappedAttributes() const { return namedAttrMap ? static_cast<HTMLNamedAttrMapImpl*>(namedAttrMap)->hasMappedAttributes() : false; }
@@ -149,7 +151,7 @@ public:
     DOMString outerHTML() const;
     DOMString innerText() const;
     DOMString outerText() const;
-    DocumentFragmentImpl *createContextualFragment( const DOMString &html );
+    DocumentFragmentImpl *createContextualFragment(const DOMString &html);
     bool setInnerHTML( const DOMString &html );
     bool setOuterHTML( const DOMString &html );
     bool setInnerText( const DOMString &text );
@@ -163,13 +165,15 @@ public:
     virtual void setContentEditable(HTMLAttributeImpl* attr);
     virtual void setContentEditable(const DOMString &enabled);
 
-    virtual void click();
+    virtual void click(bool sendMouseEvents);
+    virtual void accessKeyAction(bool sendToAnyElement);
     
-    CSSStyleDeclarationImpl* inlineStyleDecl() const { return m_inlineStyleDecl; }
-    virtual CSSStyleDeclarationImpl* additionalAttributeStyleDecl();
-    CSSStyleDeclarationImpl* getInlineStyleDecl();
+    CSSMutableStyleDeclarationImpl* inlineStyleDecl() const { return m_inlineStyleDecl; }
+    virtual CSSMutableStyleDeclarationImpl* additionalAttributeStyleDecl();
+    CSSMutableStyleDeclarationImpl* getInlineStyleDecl();
     void createInlineStyleDecl();
-     
+    void destroyInlineStyleDecl();
+
     virtual AttributeImpl* createAttribute(NodeImpl::Id id, DOMStringImpl* value);
 
 #if APPLE_CHANGES
@@ -183,11 +187,17 @@ public:
     static void removeMappedAttributeDecl(MappedAttributeEntry type, NodeImpl::Id attrName, const AtomicString& attrValue);
     static QPtrDict<QPtrDict<QPtrDict<CSSMappedAttributeDeclarationImpl> > >* m_mappedAttributeDecls;
 
+    void invalidateStyleAttribute();
+    virtual void updateStyleAttributeIfNeeded() const;
+
 protected:
+
     // for IMG, OBJECT and APPLET
     void addHTMLAlignment(HTMLAttributeImpl* htmlAttr);
 
-    CSSStyleDeclarationImpl* m_inlineStyleDecl;
+    CSSMutableStyleDeclarationImpl* m_inlineStyleDecl;
+    mutable bool m_isStyleAttributeValid : 1;
+    mutable bool m_synchronizingStyleAttribute : 1;
 };
 
 class HTMLGenericElementImpl : public HTMLElementImpl

@@ -3,7 +3,7 @@
  *
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  * Copyright (C) 2000 Dirk Mueller (mueller@kde.org)
- * Copyright (C) 2003 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -53,6 +53,7 @@ RenderReplaced::RenderReplaced(DOM::NodeImpl* node)
 
     m_intrinsicWidth = 200;
     m_intrinsicHeight = 150;
+    m_selectionState = SelectionNone;
 }
 
 bool RenderReplaced::shouldPaint(PaintInfo& i, int& _tx, int& _ty)
@@ -70,10 +71,19 @@ bool RenderReplaced::shouldPaint(PaintInfo& i, int& _tx, int& _ty)
     int ty = _ty + m_y;
 
     // Early exit if the element touches the edges.
+    int top = ty;
+    int bottom = ty + m_height;
+    if (m_selectionState != SelectionNone && m_inlineBoxWrapper) {
+        int selTop = _ty + m_inlineBoxWrapper->root()->selectionTop();
+        int selBottom = _ty + selTop + m_inlineBoxWrapper->root()->selectionHeight();
+        top = kMin(selTop, top);
+        bottom = kMax(selBottom, bottom);
+    }
+    
     int os = 2*maximalOutlineSize(i.phase);
     if ((tx >= i.r.x() + i.r.width() + os) || (tx + m_width <= i.r.x() - os))
         return false;
-    if ((ty >= i.r.y() + i.r.height() + os) || (ty + m_height <= i.r.y() - os))
+    if ((top >= i.r.y() + i.r.height() + os) || (bottom <= i.r.y() - os))
         return false;
 
     return true;
@@ -88,7 +98,7 @@ void RenderReplaced::calcMinMaxWidth()
 #endif
 
     int width = calcReplacedWidth() + paddingLeft() + paddingRight() + borderLeft() + borderRight();
-    if ( style()->width().isPercent() || style()->height().isPercent() ) {
+    if (style()->width().isPercent() || (style()->width().isVariable() && style()->height().isPercent())) {
         m_minWidth = 0;
         m_maxWidth = width;
     }
@@ -108,12 +118,6 @@ short RenderReplaced::baselinePosition( bool, bool ) const
     return height()+marginTop()+marginBottom();
 }
 
-bool RenderReplaced::canHaveChildren() const
-{
-    // We should not really be a RenderContainer subclass.
-    return false;
-}
-
 long RenderReplaced::caretMinOffset() const 
 { 
     return 0; 
@@ -131,11 +135,11 @@ unsigned long RenderReplaced::caretMaxRenderedOffset() const
     return 1; 
 }
 
-Position RenderReplaced::positionForCoordinates(int _x, int _y)
+VisiblePosition RenderReplaced::positionForCoordinates(int _x, int _y)
 {
     InlineBox *box = inlineBoxWrapper();
     if (!box)
-        return Position(element(), 0);
+        return VisiblePosition(element(), 0, DOWNSTREAM);
 
     RootInlineBox *root = box->root();
 
@@ -146,18 +150,67 @@ Position RenderReplaced::positionForCoordinates(int _x, int _y)
     int bottom = root->nextRootBox() ? absy + root->nextRootBox()->topOverflow() : absy + root->bottomOverflow();
 
     if (_y < top)
-        return Position(element(), caretMinOffset()); // coordinates are above
+        return VisiblePosition(element(), caretMinOffset(), DOWNSTREAM); // coordinates are above
     
     if (_y >= bottom)
-        return Position(element(), caretMaxOffset()); // coordinates are below
+        return VisiblePosition(element(), caretMaxOffset(), DOWNSTREAM); // coordinates are below
     
     if (element()) {
         if (_x <= absx + xPos() + (width() / 2))
-            return Position(element(), 0);
-        return Position(element(), 1);
+            return VisiblePosition(element(), 0, DOWNSTREAM);
+
+        return VisiblePosition(element(), 1, DOWNSTREAM);
     }
 
     return RenderBox::positionForCoordinates(_x, _y);
+}
+
+QRect RenderReplaced::selectionRect()
+{
+    if (selectionState() == SelectionNone)
+        return QRect();
+    if (!m_inlineBoxWrapper)
+        // We're a block-level replaced element.  Just return our own dimensions.
+        return absoluteBoundingBoxRect();
+
+    RenderBlock* cb =  containingBlock();
+    if (!cb)
+        return QRect();
+    
+    RootInlineBox* root = m_inlineBoxWrapper->root();
+    int selectionTop = root->selectionTop();
+    int selectionHeight = root->selectionHeight();
+    int selectionLeft = xPos();
+    int selectionRight = xPos() + width();
+    
+    int absx, absy;
+    cb->absolutePosition(absx, absy);
+
+    return QRect(selectionLeft + absx, selectionTop + absy, selectionRight - selectionLeft, selectionHeight);
+}
+
+void RenderReplaced::setSelectionState(SelectionState s)
+{
+    m_selectionState = s;
+    if (m_inlineBoxWrapper) {
+        RootInlineBox* line = m_inlineBoxWrapper->root();
+        if (line)
+            line->setHasSelectedChildren(s != SelectionNone);
+    }
+    
+    containingBlock()->setSelectionState(s);
+}
+
+
+QColor RenderReplaced::selectionColor(QPainter *p) const
+{
+    QColor color = RenderBox::selectionColor(p);
+         
+    // Force a 60% alpha so that no user-specified selection color can obscure selected images.
+    if (qAlpha(color.rgb()) > 153)
+        color = QColor(qRgba(color.red(), color.green(), color.blue(), 153));
+
+    return color;
 }
 
 // -----------------------------------------------------------------------------
@@ -194,6 +247,7 @@ void RenderWidget::detach()
         if (!documentBeingDestroyed())
             m_inlineBoxWrapper->remove();
         m_inlineBoxWrapper->detach(arena);
+        m_inlineBoxWrapper = 0;
     }
     setNode(0);
     deref(arena);
@@ -338,6 +392,13 @@ void RenderWidget::paint(PaintInfo& i, int _tx, int _ty)
     // Tell the widget to paint now.  This is the only time the widget is allowed
     // to paint itself.  That way it will composite properly with z-indexed layers.
     m_widget->paint(i.p, i.r);
+    
+    // Paint a partially transparent wash over selected widgets.
+    if (m_selectionState != SelectionNone) {
+        QBrush brush(selectionColor(i.p));
+        QRect selRect(selectionRect());
+        i.p->fillRect(selRect.x(), selRect.y(), selRect.width(), selRect.height(), brush);
+    }
     
 #else
     if (!m_widget || !m_view || i.phase != PaintActionForeground)
@@ -504,7 +565,7 @@ void RenderWidget::deref(RenderArena *arena)
 {
     if (_ref) _ref--; 
     if (!_ref)
-        arenaDelete(arena);
+        arenaDelete(arena, this);
 }
 
 #if APPLE_CHANGES
@@ -543,8 +604,10 @@ void RenderWidget::updateWidgetPositions()
 void RenderWidget::setSelectionState(SelectionState s) 
 {
     if (m_selectionState != s) {
+        RenderReplaced::setSelectionState(s);
         m_selectionState = s;
-        m_widget->setIsSelected(m_selectionState != SelectionNone);
+        if (m_widget)
+            m_widget->setIsSelected(m_selectionState != SelectionNone);
     }
 }
 

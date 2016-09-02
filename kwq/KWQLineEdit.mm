@@ -23,18 +23,20 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
  */
 
-#import "KWQButton.h"
 #import "KWQLineEdit.h"
 
+#import "KWQButton.h"
 #import "KWQExceptions.h"
+#import "KWQKHTMLPart.h"
 #import "KWQLogging.h"
 #import "KWQTextField.h"
+#import "WebCoreBridge.h"
 #import "WebCoreTextRenderer.h"
 #import "WebCoreTextRendererFactory.h"
 #import "WebCoreViewFactory.h"
 
 @interface NSSearchField (SearchFieldSecrets)
-- (void) _addStringToRecentSearches:(NSString*)string;
+- (void)_addStringToRecentSearches:(NSString *)string;
 @end
 
 QLineEdit::QLineEdit(Type type)
@@ -69,7 +71,7 @@ QLineEdit::QLineEdit(Type type)
 QLineEdit::~QLineEdit()
 {
     KWQ_BLOCK_EXCEPTIONS;
-    [m_controller invalidate];
+    [m_controller detachQLineEdit];
     KWQ_UNBLOCK_EXCEPTIONS;
 }
 
@@ -101,6 +103,29 @@ void QLineEdit::setFont(const QFont &font)
     }
 }
 
+void QLineEdit::setPalette(const QPalette &palette)
+{
+    QWidget::setPalette(palette);
+
+    NSTextField *textField = (NSTextField *)getView();
+
+    KWQ_BLOCK_EXCEPTIONS;
+
+    // Below we've added a special case that maps any completely transparent color to white.  This is a workaround for the following
+    // AppKit problems: <rdar://problem/3142730> and <rdar://problem/3036580>.  Without this special case we have black
+    // backgrounds on some text fields as described in <rdar://problem/3854383>.  Text fields will still not be able to display
+    // transparent and translucent backgrounds, which will need to be fixed in the future.  See  <rdar://problem/3865114>.
+        
+    [textField setTextColor:palette.foreground().getNSColor()];
+
+    QColor background = palette.background();
+    if (!background.isValid() || background.alpha() == 0)
+        background = Qt::white;
+    [textField setBackgroundColor:background.getNSColor()];
+
+    KWQ_UNBLOCK_EXCEPTIONS;
+}
+
 void QLineEdit::setText(const QString &s)
 {
     NSTextField *textField = (NSTextField *)getView();
@@ -109,17 +134,11 @@ void QLineEdit::setText(const QString &s)
     KWQ_UNBLOCK_EXCEPTIONS;
 }
 
-QString QLineEdit::text()
+QString QLineEdit::text() const
 {
-    NSTextField *textField = (NSTextField *)getView();
-
     KWQ_BLOCK_EXCEPTIONS;
-    NSMutableString *text = [[[textField stringValue] mutableCopy] autorelease];
-    [text replaceOccurrencesOfString:@"\r\n" withString:@"\n" options:NSLiteralSearch range:NSMakeRange(0, [text length])];
-    [text replaceOccurrencesOfString:@"\r" withString:@"\n" options:NSLiteralSearch range:NSMakeRange(0, [text length])];
-    return QString::fromNSString(text);
+    return QString::fromNSString([m_controller string]);
     KWQ_UNBLOCK_EXCEPTIONS;
-
     return QString();
 }
 
@@ -154,10 +173,16 @@ int QLineEdit::maxLength() const
 
 void QLineEdit::selectAll()
 {
-    NSTextField *textField = (NSTextField *)getView();
-    KWQ_BLOCK_EXCEPTIONS;
-    [textField selectText:nil];
-    KWQ_UNBLOCK_EXCEPTIONS;
+    if (!hasFocus()) {
+        // Do the makeFirstResponder ourselves explicitly (by calling setFocus)
+        // so WebHTMLView will know it's programmatic and not the user clicking.
+        setFocus();
+    } else {
+        KWQ_BLOCK_EXCEPTIONS;
+        NSTextField *textField = (NSTextField *)getView();
+        [textField selectText:nil];
+        KWQ_UNBLOCK_EXCEPTIONS;
+    }
 }
 
 bool QLineEdit::edited() const
@@ -170,6 +195,8 @@ void QLineEdit::setEdited(bool flag)
     [m_controller setEdited:flag];
 }
 
+static const NSSize textFieldMargins = { 8, 6 };
+
 QSize QLineEdit::sizeForCharacterWidth(int numCharacters) const
 {
     // Figure out how big a text field needs to be for a given number of characters
@@ -179,17 +206,19 @@ QSize QLineEdit::sizeForCharacterWidth(int numCharacters) const
 
     ASSERT(numCharacters > 0);
 
-    NSSize size = { 0, 0 };
+    // We empirically determined these dimensions.
+    // It would be better to get this info from AppKit somehow, but bug 3711080 shows we can't yet.
+    // Note: baselinePosition below also has the height computation.
+    NSSize size = textFieldMargins;
 
     KWQ_BLOCK_EXCEPTIONS;
 
-    NSString *value = [textField stringValue];
-    [textField setStringValue:@""];
-    size = [[textField cell] cellSize];
-    [textField setStringValue:value];
+    NSFont *font = [textField font];
+
+    size.height += [font defaultLineHeightForFont];
 
     id <WebCoreTextRenderer> renderer = [[WebCoreTextRendererFactory sharedFactory]
-        rendererWithFont:[textField font] usingPrinterFont:![NSGraphicsContext currentContextDrawingToScreen]];
+        rendererWithFont:font usingPrinterFont:![NSGraphicsContext currentContextDrawingToScreen]];
 
     WebCoreTextStyle style;
     WebCoreInitializeEmptyTextStyle(&style);
@@ -212,10 +241,11 @@ int QLineEdit::baselinePosition(int height) const
     NSTextField *textField = (NSTextField *)getView();
 
     KWQ_BLOCK_EXCEPTIONS;
-    NSRect bounds = [textField bounds];
     NSFont *font = [textField font];
-    return static_cast<int>(ceilf([[textField cell] drawingRectForBounds:bounds].origin.y - bounds.origin.y
-        + [font defaultLineHeightForFont] + [font descender]));
+    float lineHeight = [font defaultLineHeightForFont];
+    NSRect bounds = NSMakeRect(0, 0, 100, textFieldMargins.height + lineHeight); // bounds width is arbitrary, height same as what sizeForCharacterWidth returns
+    NSRect drawingRect = [[textField cell] drawingRectForBounds:bounds];
+    return static_cast<int>(ceilf(drawingRect.origin.y - bounds.origin.y + lineHeight + [font descender]));
     KWQ_UNBLOCK_EXCEPTIONS;
 
     return 0;
@@ -297,7 +327,7 @@ void QLineEdit::setMaxResults(int maxResults)
     
     NSSearchField *searchField = (NSSearchField *)getView();
     id searchCell = [searchField cell];
-    if (!maxResults) {
+    if (maxResults == -1) {
         [searchCell setSearchButtonCell:nil];
         [searchCell setSearchMenuTemplate:nil];
     }
@@ -306,7 +336,9 @@ void QLineEdit::setMaxResults(int maxResults)
         NSButtonCell* buttonCell = [searchCell searchButtonCell];
         if (!buttonCell)
             [searchCell resetSearchButtonCell];
-        if (!cellMenu)
+        if (cellMenu && !maxResults)
+	    [searchCell setSearchMenuTemplate:nil];
+        else if (!cellMenu && maxResults)
             [searchCell setSearchMenuTemplate:[[WebCoreViewFactory sharedFactory] cellMenuForSearchField]];
     }
     
@@ -315,11 +347,8 @@ void QLineEdit::setMaxResults(int maxResults)
 
 void QLineEdit::setPlaceholderString(const QString& placeholder)
 {
-    if (m_type != Search)
-        return;
-    
-    NSSearchField *searchField = (NSSearchField *)getView();
-    [[searchField cell] setPlaceholderString:placeholder.getNSString()];
+    NSTextField *textField = (NSTextField *)getView();
+    [[textField cell] setPlaceholderString:placeholder.getNSString()];
 }
 
 void QLineEdit::addSearchResult()

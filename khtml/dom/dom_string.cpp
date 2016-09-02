@@ -94,15 +94,15 @@ DOMString &DOMString::operator =(const DOMString &other)
 
 DOMString &DOMString::operator += (const DOMString &str)
 {
-    if(!impl)
-    {
-	// ### FIXME!!!
-	impl = str.impl;
-	impl->ref();
-	return *this;
-    }
     if(str.impl)
     {
+        if(!impl)
+        {
+            // ### FIXME!!!
+            impl = str.impl;
+            impl->ref();
+            return *this;
+        }
 	DOMStringImpl *i = impl->copy();
 	impl->deref();
 	impl = i;
@@ -170,6 +170,13 @@ void DOMString::truncate( unsigned int len )
 void DOMString::remove(unsigned int pos, int len)
 {
   if(impl) impl->remove(pos, len);
+}
+
+DOMString DOMString::substring(unsigned int pos, unsigned int len) const
+{
+    if (!impl) 
+        return DOMString();
+    return impl->substring(pos, len);
 }
 
 DOMString DOMString::split(unsigned int pos)
@@ -270,6 +277,13 @@ khtml::Length* DOMString::toLengthArray(int& len) const
     return impl ? impl->toLengthArray(len) : 0;
 }
 
+#ifndef NDEBUG
+const char *DOMString::ascii() const
+{
+    return impl ? impl->ascii() : "(null impl)";
+}
+#endif
+
 //-----------------------------------------------------------------------------
 
 bool DOM::operator==( const DOMString &a, const DOMString &b )
@@ -315,6 +329,5 @@ bool DOM::operator==( const DOMString &a, const char *b )
     }
     return *b == 0;
 }
-
 
 }

@@ -19,7 +19,7 @@
  * the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 02111-1307, USA.
  *
- * $Id: css_stylesheetimpl.h,v 1.9 2004/05/20 15:09:32 darin Exp $
+ * $Id: css_stylesheetimpl.h,v 1.10 2004/08/04 22:05:48 hyatt Exp $
  */
 #ifndef _CSS_css_stylesheetimpl_h_
 #define _CSS_css_stylesheetimpl_h_
@@ -72,6 +72,8 @@ public:
     MediaListImpl *media() const { return m_media; }
     void setMedia( MediaListImpl *media );
 
+    virtual bool isLoading() { return false; }
+
 protected:
     DOM::NodeImpl *m_parentNode;
     DOM::DOMString m_strHref;
@@ -107,7 +109,7 @@ public:
     
     virtual bool parseString( const DOMString &string, bool strict = true );
 
-    bool isLoading();
+    virtual bool isLoading();
 
     virtual void checkLoaded();
     khtml::DocLoader *docLoader();

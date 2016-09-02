@@ -362,7 +362,7 @@ struct KWQStringData {
     
     bool isUnicodeInternal() const { return (char *)_unicode == _internalBuffer; }
     bool isAsciiInternal() const { return _ascii == _internalBuffer; }
-    
+
     uint refCount;
     uint _length;
     mutable QChar *_unicode;
@@ -413,6 +413,7 @@ public:
     uint length() const;
 
     const QChar *unicode() const;
+    const QChar *stableUnicode();
     const char *latin1() const;
     const char *ascii() const;
     bool isAllASCII() const;
@@ -516,6 +517,9 @@ public:
     QString &prepend(const QString &);
     QString &remove(uint, uint);
     QString &replace(uint index, uint len, const QString &s);
+    QString &replace(char, const QString &);
+    QString &replace(QChar, const QString &);
+    QString &replace(const QString &, const QString &);
     QString &replace(const QRegExp &, const QString &);
     QString &replace(QChar, QChar);
 
@@ -543,7 +547,7 @@ public:
     NSString *getNSString() const;
 
     void setBufferFromCFString(CFStringRef);
-    
+
 private:
     // Used by QConstString.
     QString(KWQStringData *constData, bool /*dummy*/);

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003 Apple Computer, Inc.  All rights reserved.
+ * Copyright (C) 2004 Apple Computer, Inc.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -23,17 +23,23 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-#import "KWQButton.h"
 #import "KWQSlider.h"
 
+#import "KWQButton.h"
 #import "KWQExceptions.h"
+#import "KWQKHTMLPart.h"
+#import "KWQNSViewExtras.h"
+#import "KWQView.h"
+#import "WebCoreBridge.h"
 
-@interface KWQSlider : NSSlider
+@interface KWQSlider : NSSlider <KWQWidgetHolder>
 {
     QSlider* slider;
+    BOOL inNextValidKeyView;
 }
 
 - (id)initWithQSlider:(QSlider*)s;
+- (void)detachQSlider;
 
 @end
 
@@ -41,22 +47,145 @@
 
 - (id)initWithQSlider:(QSlider*)s
 {
+    self = [self init];
+
     slider = s;
 
-    id result = [self init];
     [self setTarget:self];
     [self setAction:@selector(slide:)];
-    [self setContinuous: YES]; // Our sliders are always continuous by default.
-    [self setMinValue: 0.0];
-    [self setMaxValue: 100.0];
-    [self setDoubleValue: 50.0];
-    return result;
+    [self setContinuous:YES]; // Our sliders are always continuous by default.
+    [self setMinValue:0.0];
+    [self setMaxValue:100.0];
+    [self setDoubleValue:50.0];
+
+    return self;
 }
 
--(IBAction)slide:(NSSlider*)sender
+- (void)detachQSlider
 {
-    slider->sliderValueChanged();
+    [self setTarget:nil];
+    slider = 0;
 }
+
+- (void)mouseDown:(NSEvent *)event
+{
+    QWidget::beforeMouseDown(self);
+    [super mouseDown:event];
+    QWidget::afterMouseDown(self);
+    if (slider) {
+        slider->sendConsumedMouseUp();
+    }
+    if (slider) {
+        slider->clicked();
+    }
+}
+
+- (IBAction)slide:(NSSlider*)sender
+{
+    if (slider) {
+        slider->sliderValueChanged();
+    }
+}
+
+- (QWidget *)widget
+{
+    return slider;
+}
+
+// FIXME: All the firstResponder and keyView code here is replicated in KWQButton and
+// other KWQ classes. We should find a way to share this code.
+- (BOOL)becomeFirstResponder
+{
+    BOOL become = [super becomeFirstResponder];
+    if (become && slider) {
+        if (!KWQKHTMLPart::currentEventIsMouseDownInWidget(slider)) {
+            [self _KWQ_scrollFrameToVisible];
+        }
+
+        if (slider) {
+            QFocusEvent event(QEvent::FocusIn);
+            const_cast<QObject *>(slider->eventFilterObject())->eventFilter(slider, &event);
+        }
+    }
+    return become;
+}
+
+- (BOOL)resignFirstResponder
+{
+    BOOL resign = [super resignFirstResponder];
+    if (resign && slider) {
+        QFocusEvent event(QEvent::FocusOut);
+        const_cast<QObject *>(slider->eventFilterObject())->eventFilter(slider, &event);
+    }
+    return resign;
+}
+
+-(NSView *)nextKeyView
+{
+    NSView *view = nil;
+    if (slider && inNextValidKeyView) {
+        // resign so we send a blur before setting focus on
+        // the next widget, otherwise the blur for this
+        // widget will remove focus from the widget after
+        // we tab to it
+        [self resignFirstResponder];
+        if (slider) {
+            view = KWQKHTMLPart::nextKeyViewForWidget(slider, KWQSelectingNext);
+        } else {
+            view = [super nextKeyView];
+        }
+    } else { 
+        view = [super nextKeyView];
+    }
+    return view;
+}
+
+-(NSView *)previousKeyView
+{
+    NSView *view = nil;
+    if (slider && inNextValidKeyView) {
+        // resign so we send a blur before setting focus on
+        // the next widget, otherwise the blur for this
+        // widget will remove focus from the widget after
+        // we tab to it
+        [self resignFirstResponder];
+        if (slider) {
+            view = KWQKHTMLPart::nextKeyViewForWidget(slider, KWQSelectingPrevious);
+        } else {
+            view = [super previousKeyView];
+        }
+    } else { 
+        view = [super previousKeyView];
+    }
+    return view;
+}
+
+- (BOOL)canBecomeKeyView
+{
+    // Simplified method from NSView; overridden to replace NSView's way of checking
+    // for full keyboard access with ours.
+    if (slider && !KWQKHTMLPart::partForWidget(slider)->tabsToAllControls()) {
+        return NO;
+    }
+    return ([self window] != nil) && ![self isHiddenOrHasHiddenAncestor] && [self acceptsFirstResponder];
+}
+
+-(NSView *)nextValidKeyView
+{
+    inNextValidKeyView = YES;
+    NSView *view = [super nextValidKeyView];
+    inNextValidKeyView = NO;
+    return view;
+}
+
+-(NSView *)previousValidKeyView
+{
+    inNextValidKeyView = YES;
+    NSView *view = [super previousValidKeyView];
+    inNextValidKeyView = NO;
+    return view;
+}
+
 @end
 
 enum {
@@ -65,7 +194,9 @@ enum {
 };
 
 QSlider::QSlider()
-:m_sliderValueChanged(this, SIGNAL(sliderValueChanged())), m_minVal(0.0), m_maxVal(100.0), m_val(50.0)
+: m_sliderValueChanged(this, SIGNAL(sliderValueChanged())), 
+  m_clicked(this, SIGNAL(clicked())),
+  m_minVal(0.0), m_maxVal(100.0), m_val(50.0)
 {
     KWQ_BLOCK_EXCEPTIONS;
     KWQSlider* slider = [[KWQSlider alloc] initWithQSlider:this];
@@ -73,6 +204,12 @@ QSlider::QSlider()
     setView(slider);
     [slider release];
     KWQ_UNBLOCK_EXCEPTIONS;
+}
+
+QSlider::~QSlider()
+{
+    KWQSlider* slider = (KWQSlider*)getView();
+    [slider detachQSlider];
 }
 
 void QSlider::setFont(const QFont &f)
@@ -89,6 +226,20 @@ void QSlider::setFont(const QFont &f)
     KWQ_UNBLOCK_EXCEPTIONS;
 }
 
+QWidget::FocusPolicy QSlider::focusPolicy() const
+{
+    KWQ_BLOCK_EXCEPTIONS;
+    
+    WebCoreBridge *bridge = KWQKHTMLPart::bridgeForWidget(this);
+    if (!bridge || ![bridge part] || ![bridge part]->tabsToAllControls()) {
+        return NoFocus;
+    }
+    
+    KWQ_UNBLOCK_EXCEPTIONS;
+    
+    return QWidget::focusPolicy();
+}
+
 QSize QSlider::sizeHint() const 
 {
     return QSize(dimensions()[dimWidth], dimensions()[dimHeight]);
@@ -100,8 +251,7 @@ void QSlider::setValue(double v)
     
     KWQSlider* slider = (KWQSlider*)getView();
     [slider setDoubleValue: val];
-    
-    sliderValueChanged(); // Emit the signal that indicates our value has changed.
+    m_val = val;
 }
 
 void QSlider::setMinValue(double v)
@@ -150,9 +300,9 @@ const int* QSlider::dimensions() const
     // We empirically determined these dimensions.
     // It would be better to get this info from AppKit somehow.
     static const int w[3][2] = {
-    { 129, 21 },
-    { 129, 15 },
-    { 129, 12 },
+        { 129, 21 },
+        { 129, 15 },
+        { 129, 12 },
     };
     NSControl * const slider = static_cast<NSControl *>(getView());
     
@@ -161,4 +311,9 @@ const int* QSlider::dimensions() const
     KWQ_UNBLOCK_EXCEPTIONS;
     
     return w[NSSmallControlSize];
+}
+
+void QSlider::clicked()
+{
+    m_clicked.call();
 }

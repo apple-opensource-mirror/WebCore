@@ -26,18 +26,23 @@
 #import "KWQWidget.h"
 
 #import "KWQExceptions.h"
+#import "KWQFoundationExtras.h"
 #import "KWQKHTMLPart.h"
 #import "KWQLogging.h"
+#import "KWQView.h"
 #import "KWQWindowWidget.h"
-#import "KWQFoundationExtras.h"
 #import "WebCoreBridge.h"
 #import "WebCoreFrameView.h"
+#import "WebCoreView.h"
 #import "khtmlview.h"
 #import "render_canvas.h"
 #import "render_replaced.h"
 #import "render_style.h"
 
 using khtml::RenderWidget;
+
+static bool deferFirstResponderChanges;
+static QWidget *deferredFirstResponder;
 
 /*
     A QWidget roughly corresponds to an NSView.  In Qt a QFrame and QMainWindow inherit
@@ -53,6 +58,8 @@ public:
     QPalette pal;
     NSView *view;
     bool visible;
+    bool mustStayInWindow;
+    bool removeFromSuperviewSoon;
 };
 
 QWidget::QWidget() : data(new KWQWidgetPrivate)
@@ -61,6 +68,8 @@ QWidget::QWidget() : data(new KWQWidgetPrivate)
     data->style = &defaultStyle;
     data->view = nil;
     data->visible = true;
+    data->mustStayInWindow = false;
+    data->removeFromSuperviewSoon = false;
 }
 
 QWidget::QWidget(NSView *view) : data(new KWQWidgetPrivate)
@@ -69,6 +78,8 @@ QWidget::QWidget(NSView *view) : data(new KWQWidgetPrivate)
     data->style = &defaultStyle;
     data->view = KWQRetain(view);
     data->visible = true;
+    data->mustStayInWindow = false;
+    data->removeFromSuperviewSoon = false;
 }
 
 QWidget::~QWidget() 
@@ -76,6 +87,9 @@ QWidget::~QWidget()
     KWQ_BLOCK_EXCEPTIONS;
     KWQRelease(data->view);
     KWQ_UNBLOCK_EXCEPTIONS;
+
+    if (deferredFirstResponder == this)
+        deferredFirstResponder = 0;
 
     delete data;
 }
@@ -189,9 +203,14 @@ int QWidget::baselinePosition(int height) const
 
 bool QWidget::hasFocus() const
 {
-    NSView *view = getView();
+    if (deferFirstResponderChanges && deferredFirstResponder) {
+        return this == deferredFirstResponder;
+    }
 
     KWQ_BLOCK_EXCEPTIONS;
+
+    NSView *view = [getView() _webcore_effectiveFirstResponder];
+
     NSView *firstResponder = [KWQKHTMLPart::bridgeForWidget(this) firstResponder];
 
     if (!firstResponder) {
@@ -212,6 +231,7 @@ bool QWidget::hasFocus() const
         // Return true when the first responder is a subview of this widget's view
         return true;
     }
+
     KWQ_UNBLOCK_EXCEPTIONS;
 
     return false;
@@ -222,26 +242,28 @@ void QWidget::setFocus()
     if (hasFocus()) {
         return;
     }
-    
-    // KHTML will call setFocus on us without first putting us in our
-    // superview and positioning us. Normally layout computes the position
-    // and the drawing process positions the widget. Do both things explicitly.
-    RenderWidget *renderWidget = dynamic_cast<RenderWidget *>(const_cast<QObject *>(eventFilterObject()));
-    int x, y;
-    if (renderWidget) {
-        if (renderWidget->canvas()->needsLayout()) {
-            renderWidget->view()->layout();
-        }
-        if (renderWidget->absolutePosition(x, y)) {
-            renderWidget->view()->addChild(this, x, y);
-        }
+
+    if (deferFirstResponderChanges) {
+        deferredFirstResponder = this;
+        return;
     }
-    
-    NSView *view = getView();
 
     KWQ_BLOCK_EXCEPTIONS;
-    if ([view acceptsFirstResponder]) {
-        [KWQKHTMLPart::bridgeForWidget(this) makeFirstResponder:view];
+    NSView *view = [getView() _webcore_effectiveFirstResponder];
+    if ([view superview] && [view acceptsFirstResponder]) {
+        WebCoreBridge *bridge = KWQKHTMLPart::bridgeForWidget(this);
+        NSResponder *oldFirstResponder = [bridge firstResponder];
+
+        [bridge makeFirstResponder:view];
+
+        // Setting focus can actually cause a style change which might
+        // remove the view from its superview while it's being made
+        // first responder. This confuses AppKit so we must restore
+        // the old first responder.
+
+        if (![view superview]) {
+            [bridge makeFirstResponder:oldFirstResponder];
+        }
     }
     KWQ_UNBLOCK_EXCEPTIONS;
 }
@@ -292,12 +314,6 @@ const QPalette& QWidget::palette() const
 void QWidget::setPalette(const QPalette &palette)
 {
     data->pal = palette;
-}
-
-void QWidget::unsetPalette()
-{
-    // Only called by RenderFormElement::layout, which I suspect will
-    // have to be rewritten.  Do nothing.
 }
 
 QStyle &QWidget::style() const
@@ -384,11 +400,6 @@ bool QWidget::event(QEvent *)
     return false;
 }
 
-bool QWidget::hasMouseTracking() const
-{
-    return true;
-}
-
 void QWidget::show()
 {
     if (!data || data->visible)
@@ -456,10 +467,7 @@ NSView *QWidget::getOuterView() const
     // If this widget's view is a WebCoreFrameView the we resize its containing view, a WebFrameView.
     // The scroll view contained by the WebFrameView will be autosized.
 
-    KWQ_BLOCK_EXCEPTIONS;
-
-    NSView * view = data->view;
-    ASSERT(view);
+    NSView *view = data->view;
 
     if ([view conformsToProtocol:@protocol(WebCoreFrameView)]) {
         view = [view superview];
@@ -467,10 +475,6 @@ NSView *QWidget::getOuterView() const
     }
 
     return view;
-
-    KWQ_UNBLOCK_EXCEPTIONS;
-
-    return nil;
 }
 
 void QWidget::lockDrawingFocus()
@@ -544,4 +548,69 @@ void QWidget::sendConsumedMouseUp()
 void QWidget::setIsSelected(bool isSelected)
 {
     [KWQKHTMLPart::bridgeForWidget(this) setIsSelected:isSelected forView:getView()];
+}
+
+void QWidget::addToSuperview(NSView *superview)
+{
+    KWQ_BLOCK_EXCEPTIONS;
+
+    ASSERT(superview);
+    NSView *subview = getOuterView();
+    ASSERT(![superview isDescendantOf:subview]);
+    if ([subview superview] != superview)
+        [superview addSubview:subview];
+    data->removeFromSuperviewSoon = false;
+
+    KWQ_UNBLOCK_EXCEPTIONS;
+}
+
+void QWidget::removeFromSuperview()
+{
+    if (data->mustStayInWindow)
+        data->removeFromSuperviewSoon = true;
+    else {
+        KWQ_BLOCK_EXCEPTIONS;
+        [getOuterView() removeFromSuperview];
+        KWQ_UNBLOCK_EXCEPTIONS;
+        data->removeFromSuperviewSoon = false;
+    }
+}
+
+void QWidget::beforeMouseDown(NSView *view)
+{
+    ASSERT([view conformsToProtocol:@protocol(KWQWidgetHolder)]);
+    QWidget *widget = [(NSView <KWQWidgetHolder> *)view widget];
+    if (widget) {
+        ASSERT(view == widget->getOuterView());
+        ASSERT(!widget->data->mustStayInWindow);
+        widget->data->mustStayInWindow = true;
+    }
+}
+
+void QWidget::afterMouseDown(NSView *view)
+{
+    ASSERT([view conformsToProtocol:@protocol(KWQWidgetHolder)]);
+    QWidget *widget = [(NSView <KWQWidgetHolder> *)view widget];
+    if (!widget) {
+        KWQ_BLOCK_EXCEPTIONS;
+        [view removeFromSuperview];
+        KWQ_UNBLOCK_EXCEPTIONS;
+    } else {
+        ASSERT(widget->data->mustStayInWindow);
+        widget->data->mustStayInWindow = false;
+        if (widget->data->removeFromSuperviewSoon)
+            widget->removeFromSuperview();
+    }
+}
+
+void QWidget::setDeferFirstResponderChanges(bool defer)
+{
+    deferFirstResponderChanges = defer;
+    if (!defer) {
+        QWidget *r = deferredFirstResponder;
+        deferredFirstResponder = 0;
+        if (r) {
+            r->setFocus();
+        }
+    }
 }

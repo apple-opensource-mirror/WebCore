@@ -29,12 +29,16 @@
 #include <qrect.h>
 #include <assert.h>
 
+#include "editing/text_affinity.h"
 #include "misc/khtmllayout.h"
 #include "misc/loader_client.h"
 #include "misc/helper.h"
 #include "rendering/render_style.h"
 #include "khtml_events.h"
 #include "xml/dom_docimpl.h"
+#include "visible_position.h"
+
+#include "KWQScrollBar.h"
 
 class QPainter;
 class QTextStream;
@@ -63,9 +67,9 @@ class RenderArena;
  */
 
 typedef enum {
-    PaintActionElementBackground = 0,
-    PaintActionChildBackground,
-    PaintActionChildBackgrounds,
+    PaintActionBlockBackground,
+    PaintActionChildBlockBackground,
+    PaintActionChildBlockBackgrounds,
     PaintActionFloat,
     PaintActionForeground,
     PaintActionOutline,
@@ -74,9 +78,17 @@ typedef enum {
 } PaintAction;
 
 typedef enum {
-    HitTestAll = 0,
-    HitTestSelfOnly = 1,
-    HitTestChildrenOnly = 2
+    HitTestAll,
+    HitTestSelf,
+    HitTestDescendants
+} HitTestFilter;
+
+typedef enum {
+    HitTestBlockBackground,
+    HitTestChildBlockBackground,
+    HitTestChildBlockBackgrounds,
+    HitTestFloat,
+    HitTestForeground
 } HitTestAction;
 
 namespace DOM {
@@ -101,6 +113,22 @@ namespace khtml {
     class InlineBox;
     class InlineFlowBox;
     class CollapsedBorderValue;
+
+#if APPLE_CHANGES
+struct DashboardRegionValue
+{
+    QString label;
+    QRect bounds;
+    QRect clip;
+    int type;
+
+    bool operator==(const DashboardRegionValue& o) const
+    {
+        return type == o.type && bounds == o.bounds && label == o.label;
+    }
+};
+#endif
+
 
 /**
  * Base Class for all rendering tree objects.
@@ -167,6 +195,8 @@ public:
     bool hasStaticY() const;
     virtual void setStaticX(int staticX) {};
     virtual void setStaticY(int staticY) {};
+    virtual int staticX() const { return 0; }
+    virtual int staticY() const { return 0; }
     
     // RenderObject tree manipulation
     //////////////////////////////////////////
@@ -188,7 +218,6 @@ private:
     void setParent(RenderObject *parent) { m_parent = parent; }
     //////////////////////////////////////////
     
-    QRect absoluteBoundingBoxRect();
     void addAbsoluteRectForLayer(QRect& result);
 
 public:
@@ -273,9 +302,9 @@ public:
     bool posChildNeedsLayout() const { return m_posChildNeedsLayout; }
     bool normalChildNeedsLayout() const { return m_normalChildNeedsLayout; }
     bool minMaxKnown() const{ return m_minMaxKnown; }
-    bool isSelectionBorder() const { return m_isSelectionBorder; }
     bool recalcMinMax() const { return m_recalcMinMax; }
-
+    bool isSelectionBorder() const;
+    
     bool hasOverflowClip() const { return m_hasOverflowClip; }
     bool hasAutoScrollbars() const { return hasOverflowClip() && 
         (style()->overflow() == OAUTO || style()->overflow() == OOVERLAY); }
@@ -332,11 +361,12 @@ public:
     void setShouldPaintBackgroundOrBorder(bool b=true) { m_paintBackground = b; }
     void setRenderText() { m_isText = true; }
     void setReplaced(bool b=true) { m_replaced = b; }
-    void setIsSelectionBorder(bool b=true) { m_isSelectionBorder = b; }
     void setHasOverflowClip(bool b = true) { m_hasOverflowClip = b; }
 
     void scheduleRelayout();
     
+    void updateBackgroundImages(RenderStyle* oldStyle);
+
     virtual InlineBox* createInlineBox(bool makePlaceHolderBox, bool isRootLineBox, bool isOnlyRun=false);
     virtual void dirtyLineBoxes(bool fullLayout, bool isRootLineBox=false);
     
@@ -347,7 +377,7 @@ public:
     virtual void setInlineBoxWrapper(InlineBox* b);
     void deleteLineBoxWrapper();
 
-    virtual InlineBox *inlineBox(long offset=0);
+    virtual InlineBox *inlineBox(long offset=0, EAffinity affinity = UPSTREAM);
     
     // for discussion of lineHeight see CSS2 spec
     virtual short lineHeight( bool firstLine, bool isRootLineBox=false ) const;
@@ -363,11 +393,13 @@ public:
      */
     struct PaintInfo {
         PaintInfo(QPainter* _p, const QRect& _r, PaintAction _phase, RenderObject *_paintingRoot)
-        : p(_p), r(_r), phase(_phase), paintingRoot(_paintingRoot) {}
+        : p(_p), r(_r), phase(_phase), paintingRoot(_paintingRoot), outlineObjects(0) {}
+        ~PaintInfo() { delete outlineObjects; }
         QPainter* p;
         QRect     r;
         PaintAction phase;
         RenderObject *paintingRoot;      // used to draw just one element and its visual kids
+        QPtrDict<RenderFlow>* outlineObjects; // used to list which outlines should be painted by a block with inline children
     };
     virtual void paint(PaintInfo& i, int tx, int ty);
     void paintBorder(QPainter *p, int _tx, int _ty, int w, int h, const RenderStyle* style, bool begin=true, bool end=true);
@@ -376,7 +408,7 @@ public:
     // RenderBox implements this.
     virtual void paintBoxDecorations(PaintInfo& i, int _tx, int _ty) {};
 
-    virtual void paintBackgroundExtended(QPainter *p, const QColor &c, CachedImage *bg, int clipy, int cliph,
+    virtual void paintBackgroundExtended(QPainter *p, const QColor& c, const BackgroundLayer* bgLayer, int clipy, int cliph,
                                          int _tx, int _ty, int w, int height,
                                          int bleft, int bright) {};
 
@@ -425,9 +457,6 @@ public:
     // repaint and do not need a relayout
     virtual void updateFromElement() {};
 
-    // The corresponding closing element has been parsed. ### remove me
-    virtual void close() { }
-
     virtual int availableHeight() const { return 0; }
 
     // Whether or not the element shrinks to its max width (rather than filling the width
@@ -437,6 +466,10 @@ public:
 #if APPLE_CHANGES
     // Called recursively to update the absolute positions of all widgets.
     virtual void updateWidgetPositions();
+    
+    QValueList<DashboardRegionValue> RenderObject::computeDashboardRegions();
+    void addDashboardRegions (QValueList<DashboardRegionValue>& regions);
+    void collectDashboardRegions (QValueList<DashboardRegionValue>& regions);
 #endif
 
     // does a query on the rendertree and finds the innernode
@@ -483,15 +516,21 @@ public:
         RepaintInfo(RenderObject* o, const QRect& r) :m_object(o), m_repaintRect(r) {}
     };
     
+    bool hitTest(NodeInfo& info, int x, int y, int tx, int ty, HitTestFilter hitTestFilter = HitTestAll);
     virtual bool nodeAtPoint(NodeInfo& info, int x, int y, int tx, int ty,
-                             HitTestAction hitTestAction = HitTestAll, bool inside=false);
+                             HitTestAction hitTestAction);
+    void setInnerNode(NodeInfo& info);
+
+    virtual VisiblePosition positionForCoordinates(int x, int y);
     
-    virtual DOM::Position positionForCoordinates(int x, int y);
+    virtual void dirtyLinesFromChangedChild(RenderObject* child, bool adding = true);
     
-    virtual void dirtyLinesFromChangedChild(RenderObject* child);
-    
-    // set the style of the object.
-    virtual void setStyle(RenderStyle *style);
+    // Set the style of the object and update the state of the object accordingly.
+    virtual void setStyle(RenderStyle* style);
+
+    // Updates only the local style ptr of the object.  Does not update the state of the object,
+    // and so only should be called when the style is known not to have changed (or from setStyle).
+    void setStyleInternal(RenderStyle* style);
 
     // returns the containing block level element for this element.
     RenderBlock *containingBlock() const;
@@ -530,6 +569,8 @@ public:
     virtual int width() const { return 0; }
     virtual int height() const { return 0; }
 
+    virtual QRect borderBox() const { return QRect(0, 0, width(), height()); }
+
     // The height of a block when you include normal flow overflow spillage out of the bottom
     // of the block (e.g., a <div style="height:25px"> that has a 100px tall image inside
     // it would have an overflow height of borderTop() + paddingTop() + 100px.
@@ -537,6 +578,9 @@ public:
     virtual int overflowWidth(bool includeInterior=true) const { return width(); }
     virtual void setOverflowHeight(int) {}
     virtual void setOverflowWidth(int) {}
+    virtual int overflowLeft(bool includeInterior=true) const { return 0; }
+    virtual int overflowTop(bool includeInterior=true) const { return 0; }
+    virtual QRect overflowRect(bool includeInterior=true) const { return borderBox(); }
 
     // IE extensions. Used to calculate offsetWidth/Height.  Overridden by inlines (render_flow) 
     // to return the remaining width on a given line (and the height of a single line). -dwh
@@ -558,6 +602,8 @@ public:
     // object has overflow:hidden/scroll/auto specified and also has overflow.
     int scrollWidth() const;
     int scrollHeight() const;
+    
+    virtual bool scroll(KWQScrollDirection direction, KWQScrollGranularity granularity, float multiplier=1.0);
 
     // The following seven functions are used to implement collapsing margins.
     // All objects know their maximal positive and negative margins.  The
@@ -566,13 +612,13 @@ public:
     // the margin of the element.  Blocks override the maxTopMargin and maxBottomMargin
     // methods.
     virtual bool isSelfCollapsingBlock() const { return false; }
-    virtual short collapsedMarginTop() const 
+    virtual int collapsedMarginTop() const 
         { return maxTopMargin(true)-maxTopMargin(false); }
-    virtual short collapsedMarginBottom() const 
+    virtual int collapsedMarginBottom() const 
         { return maxBottomMargin(true)-maxBottomMargin(false); }
     virtual bool isTopMarginQuirk() const { return false; }
     virtual bool isBottomMarginQuirk() const { return false; }
-    virtual short maxTopMargin(bool positive) const {
+    virtual int maxTopMargin(bool positive) const {
         if (positive)
             if (marginTop() > 0)
                 return marginTop();
@@ -584,7 +630,7 @@ public:
             else
                 return 0;
     }
-    virtual short maxBottomMargin(bool positive) const {
+    virtual int maxBottomMargin(bool positive) const {
         if (positive)
             if (marginBottom() > 0)
                 return marginBottom();
@@ -597,10 +643,10 @@ public:
                 return 0;
     }
 
-    virtual short marginTop() const { return 0; }
-    virtual short marginBottom() const { return 0; }
-    virtual short marginLeft() const { return 0; }
-    virtual short marginRight() const { return 0; }
+    virtual int marginTop() const { return 0; }
+    virtual int marginBottom() const { return 0; }
+    virtual int marginLeft() const { return 0; }
+    virtual int marginRight() const { return 0; }
 
     // Virtual since table cells override 
     virtual int paddingTop() const;
@@ -614,7 +660,8 @@ public:
     virtual int borderRight() const { return style()->borderRightWidth(); }
 
     virtual void absoluteRects(QValueList<QRect>& rects, int _tx, int _ty);
-
+    QRect absoluteBoundingBoxRect();
+    
     // the rect that will be painted if this object is passed as the paintingRoot
     QRect paintingRootRect(QRect& topLevelRect);
 
@@ -682,6 +729,7 @@ public:
     virtual bool containsFloats() { return false; }
     virtual bool containsFloat(RenderObject* o) { return false; }
     virtual bool hasOverhangingFloats() { return false; }
+    virtual QRect floatRect() const { return borderBox(); }
 
     bool avoidsFloats() const;
     bool usesLineWidth() const;
@@ -693,30 +741,68 @@ public:
     int maximalOutlineSize(PaintAction p) const;
 
     enum SelectionState {
-        SelectionNone,
-        SelectionStart,
-        SelectionInside,
-        SelectionEnd,
-        SelectionBoth
+        SelectionNone, // The object is not selected.
+        SelectionStart, // The object either contains the start of a selection run or is the start of a run
+        SelectionInside, // The object is fully encompassed by a selection run
+        SelectionEnd, // The object either contains the end of a selection run or is the end of a run
+        SelectionBoth // The object contains an entire run or is the sole selected object in that run
     };
 
-    virtual SelectionState selectionState() const { return SelectionNone;}
-    virtual void setSelectionState(SelectionState) {}
-    bool shouldSelect() const;
+    // The current selection state for an object.  For blocks, the state refers to the state of the leaf
+    // descendants (as described above in the SelectionState enum declaration).
+    virtual SelectionState selectionState() const { return SelectionNone; }
+    
+    // Sets the selection state for an object.
+    virtual void setSelectionState(SelectionState s) { if (parent()) parent()->setSelectionState(s); }
 
-    DOM::NodeImpl* draggableNode(bool dhtmlOK, bool uaOK, bool& dhtmlWillDrag) const;
+    // A single rectangle that encompasses all of the selected objects within this object.  Used to determine the tightest
+    // possible bounding box for the selection.
+    virtual QRect selectionRect() { return QRect(); }
+    
+    // Whether or not an object can be part of the leaf elements of the selection.
+    virtual bool canBeSelectionLeaf() const { return false; }
+
+    // Whether or not a block has selected children.
+    virtual bool hasSelectedChildren() const { return false; }
+
+    // Whether or not a selection can be attempted on this object.
+    bool canSelect() const;
+
+    // Whether or not a selection can be attempted on this object.  Should only be called right before actually beginning a selection,
+    // since it fires the selectstart DOM event.
+    bool shouldSelect() const;
+    
+    // Obtains the selection background color that should be used when painting a selection.
+    virtual QColor selectionColor(QPainter *p) const;
+    
+    // Whether or not a given block needs to paint selection gaps.
+    virtual bool shouldPaintSelectionGaps() const { return false; }
+
+    // This struct is used when the selection changes to cache the old and new state of the selection for each RenderObject.
+    struct SelectionInfo {
+        RenderObject* m_object;
+        QRect m_rect;
+        RenderObject::SelectionState m_state;
+
+        RenderObject* object() const { return m_object; }
+        QRect rect() const { return m_rect; }
+        SelectionState state() const { return m_state; }
+        
+        SelectionInfo() { m_object = 0; m_state = SelectionNone; }
+        SelectionInfo(RenderObject* o) :m_object(o), m_rect(o->selectionRect()), m_state(o->selectionState()) {}
+    };
+
+    DOM::NodeImpl* draggableNode(bool dhtmlOK, bool uaOK, int x, int y, bool& dhtmlWillDrag) const;
 
     /**
      * Returns the content coordinates of the caret within this render object.
      * @param offset zero-based offset determining position within the render object.
      * @param override @p true if input overrides existing characters,
      * @p false if it inserts them. The width of the caret depends on this one.
-     * @param _x returns the left coordinate
-     * @param _y returns the top coordinate
-     * @param width returns the caret's width
-     * @param height returns the caret's height
+     * @param extraWidthToEndOfLine optional out arg to give extra width to end of line -
+     * useful for character range rect computations
      */
-    virtual void caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height);
+    virtual QRect caretRect(int offset, EAffinity affinity = UPSTREAM, int *extraWidthToEndOfLine = 0);
 
     virtual int lowestPosition(bool includeOverflowInterior=true, bool includeSelf=true) const { return 0; }
     virtual int rightmostPosition(bool includeOverflowInterior=true, bool includeSelf=true) const { return 0; }
@@ -751,10 +837,23 @@ public:
     virtual long caretMaxOffset() const;
     virtual unsigned long caretMaxRenderedOffset() const;
 
+    virtual long previousOffset (long current) const;
+    virtual long nextOffset (long current) const;
+
     virtual void setPixmap(const QPixmap&, const QRect&, CachedImage *);
 
-protected:
     virtual void selectionStartEnd(int& spos, int& epos);
+
+    RenderObject* paintingRootForChildren(PaintInfo &i) const {
+        // if we're the painting root, kids draw normally, and see root of 0
+        return (!i.paintingRoot || i.paintingRoot == this) ? 0 : i.paintingRoot;
+    }
+
+    bool shouldPaintWithinRoot(PaintInfo &i) const {
+        return !i.paintingRoot || i.paintingRoot == this;
+    }
+    
+protected:
 
     virtual void printBoxDecorations(QPainter* /*p*/, int /*_x*/, int /*_y*/,
                                      int /*_w*/, int /*_h*/, int /*_tx*/, int /*_ty*/) {}
@@ -768,15 +867,7 @@ protected:
 
     virtual void removeLeftoverAnonymousBoxes();
     
-    void arenaDelete(RenderArena *arena);
-
-    RenderObject *paintingRootForChildren(PaintInfo &i) const {
-        // if we're the painting root, kids draw normally, and see root of 0
-        return (!i.paintingRoot || i.paintingRoot == this) ? 0 : i.paintingRoot;
-    }
-    bool shouldPaintWithinRoot(PaintInfo &i) const {
-        return !i.paintingRoot || i.paintingRoot == this;
-    }
+    void arenaDelete(RenderArena *arena, void *objectBase);
 
 private:
     RenderStyle* m_style;
@@ -807,11 +898,8 @@ private:
     bool m_replaced                  : 1;
     bool m_mouseInside               : 1;
     bool m_isDragging                : 1;
-    bool m_isSelectionBorder         : 1;
-
+    
     bool m_hasOverflowClip           : 1;
-
-    void arenaDelete(RenderArena *arena, void *objectBase);
 
     // note: do not add unnecessary bitflags, we have 32 bit already!
     friend class RenderListItem;

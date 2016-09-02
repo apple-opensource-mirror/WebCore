@@ -109,7 +109,6 @@ public:
 
     const QPalette& palette() const;
     virtual void setPalette(const QPalette &);
-    void unsetPalette();
     
     QStyle &style() const;
     void setStyle(QStyle *);
@@ -123,7 +122,6 @@ public:
     QCursor cursor();
     void unsetCursor();
     bool event(QEvent *);
-    bool hasMouseTracking() const;
 
     void show();
     void hide();
@@ -156,6 +154,14 @@ public:
     void sendConsumedMouseUp();
     
     void setIsSelected(bool isSelected);
+
+    static void beforeMouseDown(NSView *);
+    static void afterMouseDown(NSView *);
+
+    void addToSuperview(NSView *superview);
+    void removeFromSuperview();
+
+    static void setDeferFirstResponderChanges(bool);
 
 private:
     KWQWidgetPrivate *data;

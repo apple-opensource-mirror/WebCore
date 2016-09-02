@@ -166,6 +166,12 @@ HTMLCollection HTMLDocument::embeds() const
     return HTMLCollection(impl, HTMLCollectionImpl::DOC_EMBEDS);
 }
 
+HTMLCollection HTMLDocument::objects() const
+{
+    if(!impl) return HTMLCollection();
+    return HTMLCollection(impl, HTMLCollectionImpl::DOC_OBJECTS);
+}
+
 HTMLCollection HTMLDocument::links() const
 {
     if(!impl) return HTMLCollection();
@@ -188,6 +194,12 @@ HTMLCollection HTMLDocument::all() const
 {
     if(!impl) return HTMLCollection();
     return HTMLCollection(impl, HTMLCollectionImpl::DOC_ALL);
+}
+
+HTMLCollection HTMLDocument::nameableItems() const
+{
+    if(!impl) return HTMLCollection();
+    return HTMLCollection(impl, HTMLCollectionImpl::DOC_NAMEABLE_ITEMS);
 }
 
 DOMString HTMLDocument::cookie() const

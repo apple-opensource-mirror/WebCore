@@ -195,7 +195,7 @@ void CSSImportRuleImpl::init()
       // loaded (even if our subresources haven't), so if we have stylesheet after
       // checking the cache, then we've clearly loaded. -dwh
       if (!m_styleSheet)
-      m_loading = true;
+          m_loading = true;
     }
 }
 
@@ -337,7 +337,7 @@ bool CSSStyleRuleImpl::parseString( const DOMString &/*string*/, bool )
     return false;
 }
 
-void CSSStyleRuleImpl::setDeclaration( CSSStyleDeclarationImpl *style)
+void CSSStyleRuleImpl::setDeclaration( CSSMutableStyleDeclarationImpl *style)
 {
     if ( m_style != style ) {
         if(m_style) m_style->deref();

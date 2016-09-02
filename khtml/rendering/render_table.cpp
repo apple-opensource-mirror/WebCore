@@ -237,11 +237,12 @@ void RenderTable::layout()
     
     //kdDebug( 6040 ) << renderName() << "(Table)"<< this << " ::layout0() width=" << width() << ", needsLayout=" << needsLayout() << endl;
     
-    m_height = 0;
+    m_height = m_overflowHeight = 0;
     initMaxMarginValues();
     
     //int oldWidth = m_width;
     calcWidth();
+    m_overflowWidth = m_width;
 
     // the optimisation below doesn't work since the internal table
     // layout could have changed.  we need to add a flag to the table
@@ -286,42 +287,14 @@ void RenderTable::layout()
     int newHeight = m_height;
     m_height = oldHeight;
 
-    // html tables with percent height are relative to view
     Length h = style()->height();
-    int th = -(bpTop + bpBottom); // Tables size as though CSS height includes border/padding.
+    int th = 0;
     if (isPositioned())
         th = newHeight; // FIXME: Leave this alone for now but investigate later.
     else if (h.isFixed())
-        th += h.value;
+        th = h.value - (bpTop + bpBottom);  // Tables size as though CSS height includes border/padding.
     else if (h.isPercent())
-    {
-        RenderObject* c = containingBlock();
-        for ( ; 
-	     !c->isCanvas() && !c->isBody() && !c->isTableCell() && !c->isPositioned() && !c->isFloating(); 
-             c = c->containingBlock()) {
-            Length ch = c->style()->height();
-            if (ch.isFixed()) {
-                th += h.width(ch.value);
-                break;
-            }
-        }
-
-        if (c->isTableCell()) {
-            RenderTableCell* cell = static_cast<RenderTableCell*>(c);
-            int cellHeight = cell->getCellPercentageHeight();
-            if (cellHeight)
-                th += h.width(cellHeight);
-        }
-        else  {
-            Length ch = c->style()->height();
-            if (ch.isFixed())
-                th += h.width(ch.value);
-            else
-                // FIXME: Investigate this.  Seems wrong to always expand to fill the viewRect.
-                // We need to substract out the margins of this block. -dwh
-                th += h.width(viewRect().height() - c->marginBottom() - c->marginTop());
-        }
-    }
+        th = calcPercentageHeight(h);
     th = kMax(0, th);
 
     // layout rows
@@ -375,6 +348,9 @@ void RenderTable::layout()
     if (checkForRepaint)
         repaintAfterLayoutIfNeeded(oldBounds, oldFullBounds);
     
+    m_overflowHeight = kMax(m_overflowHeight, m_height);
+    m_overflowWidth = kMax(m_overflowWidth, m_width);
+
     setNeedsLayout(false);
 }
 
@@ -394,9 +370,6 @@ void RenderTable::setCellWidths()
 
 void RenderTable::paint(PaintInfo& i, int _tx, int _ty)
 {
-    if (needsLayout())
-        return;
-        
     _tx += xPos();
     _ty += yPos();
 
@@ -405,33 +378,32 @@ void RenderTable::paint(PaintInfo& i, int _tx, int _ty)
 #ifdef TABLE_PRINT
     kdDebug( 6040 ) << "RenderTable::paint() w/h = (" << width() << "/" << height() << ")" << endl;
 #endif
-    if (!isRelPositioned() && !isPositioned()) {
-        int os = 2*maximalOutlineSize(paintAction);
-        if ((_ty >= i.r.y() + i.r.height() + os) || (_ty + height() <= i.r.y() - os)) return;
-        if ((_tx >= i.r.x() + i.r.width() + os) || (_tx + width() <= i.r.x() - os)) return;
-    }
+    
+    int os = 2*maximalOutlineSize(paintAction);
+    if ((_ty >= i.r.y() + i.r.height() + os) || (_ty + height() <= i.r.y() - os)) return;
+    if ((_tx >= i.r.x() + i.r.width() + os) || (_tx + width() <= i.r.x() - os)) return;
 
 #ifdef TABLE_PRINT
     kdDebug( 6040 ) << "RenderTable::paint(2) " << _tx << "/" << _ty << " (" << _y << "/" << _h << ")" << endl;
 #endif
 
-    if ((paintAction == PaintActionElementBackground || paintAction == PaintActionChildBackground)
+    if ((paintAction == PaintActionBlockBackground || paintAction == PaintActionChildBlockBackground)
         && shouldPaintBackgroundOrBorder() && style()->visibility() == VISIBLE)
         paintBoxDecorations(i, _tx, _ty);
 
     // We're done.  We don't bother painting any children.
-    if (paintAction == PaintActionElementBackground)
+    if (paintAction == PaintActionBlockBackground)
         return;
     // We don't paint our own background, but we do let the kids paint their backgrounds.
-    if (paintAction == PaintActionChildBackgrounds)
-        paintAction = PaintActionChildBackground;
+    if (paintAction == PaintActionChildBlockBackgrounds)
+        paintAction = PaintActionChildBlockBackground;
     PaintInfo paintInfo(i.p, i.r, paintAction, paintingRootForChildren(i));
     
     for (RenderObject *child = firstChild(); child; child = child->nextSibling())
         if (child->isTableSection() || child == tCaption)
 	    child->paint(paintInfo, _tx, _ty);
 
-    if (collapseBorders() && paintAction == PaintActionChildBackground && style()->visibility() == VISIBLE) {
+    if (collapseBorders() && paintAction == PaintActionChildBlockBackground && style()->visibility() == VISIBLE) {
         // Collect all the unique border styles that we want to paint in a sorted list.  Once we
         // have all the styles sorted, we then do individual passes, painting each style of border
         // from lowest precedence to highest precedence.
@@ -456,9 +428,16 @@ void RenderTable::paint(PaintInfo& i, int _tx, int _ty)
 void RenderTable::paintBoxDecorations(PaintInfo& i, int _tx, int _ty)
 {
     int w = width();
-    int h = height() + borderTopExtra() + borderBottomExtra();
-    _ty -= borderTopExtra();
+    int h = height();
     
+    // Account for the caption.
+    if (tCaption) {
+        int captionHeight = (tCaption->height() + tCaption->marginBottom() +  tCaption->marginTop());
+        h -= captionHeight;
+        if (tCaption->style()->captionSide() != CAPBOTTOM)
+            _ty += captionHeight;
+    }
+
     int my = kMax(_ty, i.r.y());
     int mh;
     if (_ty < i.r.y())
@@ -466,7 +445,7 @@ void RenderTable::paintBoxDecorations(PaintInfo& i, int _tx, int _ty)
     else
         mh = kMin(i.r.height(), h);
     
-    paintBackground(i.p, style()->backgroundColor(), style()->backgroundImage(), my, mh, _tx, _ty, w, h);
+    paintBackground(i.p, style()->backgroundColor(), style()->backgroundLayers(), my, mh, _tx, _ty, w, h);
     
     if (style()->hasBorder() && !collapseBorders())
         paintBorder(i.p, _tx, _ty, w, h, style());
@@ -494,30 +473,6 @@ void RenderTable::calcMinMaxWidth()
 #endif
 }
 
-void RenderTable::close()
-{
-//    kdDebug( 6040 ) << "RenderTable::close()" << endl;
-    setNeedsLayoutAndMinMaxRecalc();
-}
-
-int RenderTable::borderTopExtra()
-{
-    if (tCaption && tCaption->style()->captionSide()!=CAPBOTTOM)
-        return -(tCaption->height() + tCaption->marginBottom() +  tCaption->marginTop());
-    else
-        return 0;
-
-}
-
-int RenderTable::borderBottomExtra()
-{
-    if (tCaption && tCaption->style()->captionSide()==CAPBOTTOM)
-        return -(tCaption->height() + tCaption->marginBottom() +  tCaption->marginTop());
-    else
-        return 0;
-}
-
-
 void RenderTable::splitColumn( int pos, int firstSpan )
 {
     // we need to add a new columnStruct
@@ -535,7 +490,7 @@ void RenderTable::splitColumn( int pos, int firstSpan )
     while ( child ) {
 	if ( child->isTableSection() ) {
 	    RenderTableSection *section = static_cast<RenderTableSection *>(child);
-	    int size = section->grid.size();
+	    int size = section->numRows();
 	    int row = 0;
 	    if ( section->cCol > pos )
 		section->cCol++;
@@ -569,7 +524,7 @@ void RenderTable::appendColumn( int span )
     while ( child ) {
 	if ( child->isTableSection() ) {
 	    RenderTableSection *section = static_cast<RenderTableSection *>(child);
-	    int size = section->grid.size();
+	    int size = section->numRows();
 	    int row = 0;
 	    while ( row < size ) {
 		section->grid[row].row->resize( newSize );
@@ -845,10 +800,11 @@ void RenderTable::dump(QTextStream *stream, QString ind) const
 // --------------------------------------------------------------------------
 
 RenderTableSection::RenderTableSection(DOM::NodeImpl* node)
-    : RenderBox(node)
+    : RenderContainer(node)
 {
     // init RenderObject attributes
     setInline(false);   // our object is not Inline
+    gridRows = 0;
     cCol = 0;
     cRow = -1;
     needCellRecalc = false;
@@ -866,7 +822,7 @@ void RenderTableSection::detach()
     if (table())
         table()->setNeedSectionRecalc();
 
-    RenderBox::detach();
+    RenderContainer::detach();
 }
 
 void RenderTableSection::setStyle(RenderStyle* _style)
@@ -877,7 +833,7 @@ void RenderTableSection::setStyle(RenderStyle* _style)
     else if (_style->display() != TABLE_FOOTER_GROUP && _style->display() != TABLE_HEADER_GROUP)
         _style->setDisplay(TABLE_ROW_GROUP);
 
-    RenderBox::setStyle(_style);
+    RenderContainer::setStyle(_style);
 }
 
 void RenderTableSection::addChild(RenderObject *child, RenderObject *beforeChild)
@@ -940,15 +896,18 @@ void RenderTableSection::addChild(RenderObject *child, RenderObject *beforeChild
     RenderContainer::addChild(child,beforeChild);
 }
 
-void RenderTableSection::ensureRows( int numRows )
+void RenderTableSection::ensureRows(int numRows)
 {
-    int nRows = grid.size();
-    int nCols = table()->numEffCols();
-    if ( numRows > nRows ) {
-	grid.resize( numRows );
-	for ( int r = nRows; r < numRows; r++ ) {
-	    grid[r].row = new Row( nCols );
-	    grid[r].row->fill( 0 );
+    int nRows = gridRows;
+    if (numRows > nRows) {
+        if (numRows > static_cast<int>(grid.size()))
+            grid.resize(numRows*2+1);
+
+        gridRows = numRows;
+        int nCols = table()->numEffCols();
+	for (int r = nRows; r < numRows; r++ ) {
+	    grid[r].row = new Row(nCols);
+	    grid[r].row->fill(0);
 	    grid[r].baseLine = 0;
 	    grid[r].height = Length();
 	}
@@ -1068,7 +1027,7 @@ void RenderTableSection::setCellWidths()
 #endif
     QMemArray<int> &columnPos = table()->columnPos;
 
-    int rows = grid.size();
+    int rows = gridRows;
     for ( int i = 0; i < rows; i++ ) {
 	Row &row = *grid[i].row;
 	int cols = row.size();
@@ -1102,7 +1061,7 @@ void RenderTableSection::calcRowHeight()
     int indx;
     RenderTableCell *cell;
 
-    int totalRows = grid.size();
+    int totalRows = gridRows;
     int spacing = table()->vBorderSpacing();
 
     rowPos.resize( totalRows + 1 );
@@ -1122,7 +1081,7 @@ void RenderTableSection::calcRowHeight()
 
 	Row *row = grid[r].row;
 	int totalCols = row->size();
-	int totalRows = grid.size();
+	int totalRows = gridRows;
 
 	for ( int c = 0; c < totalCols; c++ ) {
 	    cell = cellAt(r, c);
@@ -1134,8 +1093,8 @@ void RenderTableSection::calcRowHeight()
 	    if ( ( indx = r - cell->rowSpan() + 1 ) < 0 )
 		indx = 0;
 
-            if (cell->getCellPercentageHeight()) {
-                cell->setCellPercentageHeight(0);
+            if (cell->overrideSize() != -1) {
+                cell->setOverrideSize(-1);
                 cell->setChildNeedsLayout(true, false);
                 cell->layoutIfNeeded();
             }
@@ -1189,7 +1148,7 @@ int RenderTableSection::layoutRows( int toAdd )
 {
     int rHeight;
     int rindx;
-    int totalRows = grid.size();
+    int totalRows = gridRows;
     int hspacing = table()->hBorderSpacing();
     int vspacing = table()->vBorderSpacing();
     
@@ -1244,7 +1203,7 @@ int RenderTableSection::layoutRows( int toAdd )
                 rowPos[r+1] += add;
 	    }
 	}
-        if (dh>0) {
+        if (dh>0 && rowPos[totalRows]) {
 	    // if some left overs, distribute equally.
             int tot=rowPos[totalRows];
             int add=0;
@@ -1279,27 +1238,39 @@ int RenderTableSection::layoutRows( int toAdd )
             rHeight = rowPos[r+1] - rowPos[rindx] - vspacing;
             
             // Force percent height children to lay themselves out again.
-            // This will cause, e.g., textareas to grow to
-            // fill the area.  FIXME: <div>s and blocks still don't
-            // work right.  We'll need to have an efficient way of
-            // invalidating all percent height objects in a render subtree.
-            // For now, we just handle immediate children. -dwh
+            // This will cause these children to grow to fill the cell.
+            // FIXME: There is still more work to do here to fully match WinIE (should
+            // it become necessary to do so).  In quirks mode, WinIE behaves like we
+            // do, but it will clip the cells that spill out of the table section.  In
+            // strict mode, Mozilla and WinIE both regrow the table to accommodate the
+            // new height of the cell (thus letting the percentages cause growth one
+            // time only).  We may also not be handling row-spanning cells correctly.
+            //
+            // Note also the oddity where replaced elements always flex, and yet blocks/tables do
+            // not necessarily flex.  WinIE is crazy and inconsistent, and we can't hope to
+            // match the behavior perfectly, but we'll continue to refine it as we discover new
+            // bugs. :)
             bool cellChildrenFlex = false;
+            bool flexAllChildren = cell->style()->height().isFixed() || 
+                (!table()->style()->height().isVariable() && rHeight != cell->height());
             RenderObject* o = cell->firstChild();
             while (o) {
-                if (!o->isText() && o->style()->height().isPercent()) {
-                    o->setNeedsLayout(true, false);
-                    cell->setChildNeedsLayout(true, false);
-                    cellChildrenFlex = true;
+                if (!o->isText() && o->style()->height().isPercent() && (o->isReplaced() || o->scrollsOverflow() || flexAllChildren)) {
+                    // Tables with no sections do not flex.
+                    if (!o->isTable() || static_cast<RenderTable*>(o)->hasSections()) {
+                        o->setNeedsLayout(true, false);
+                        cell->setChildNeedsLayout(true, false);
+                        cellChildrenFlex = true;
+                    }
                 }
                 o = o->nextSibling();
             }
             if (cellChildrenFlex) {
-                cell->setCellPercentageHeight(kMax(0, 
-                                                   rHeight - cell->borderTop() - cell->paddingTop() - 
-                                                   cell->borderBottom() - cell->paddingBottom()));
+                cell->setOverrideSize(kMax(0, 
+                                           rHeight - cell->borderTop() - cell->paddingTop() - 
+                                                     cell->borderBottom() - cell->paddingBottom()));
                 cell->layoutIfNeeded();
-           
+
                 // Alignment within a cell is based off the calculated
                 // height, which becomes irrelevant once the cell has
                 // been resized based off its percentage. -dwh
@@ -1370,7 +1341,7 @@ int RenderTableSection::layoutRows( int toAdd )
 
 void RenderTableSection::paint(PaintInfo& i, int tx, int ty)
 {
-    unsigned int totalRows = grid.size();
+    unsigned int totalRows = gridRows;
     unsigned int totalCols = table()->columns.size();
 
     tx += m_x;
@@ -1437,7 +1408,7 @@ void RenderTableSection::recalcCells()
     cCol = 0;
     cRow = -1;
     clearGrid();
-    grid.resize( 0 );
+    gridRows = 0;
 
     RenderObject *row = firstChild();
     while ( row ) {
@@ -1458,7 +1429,7 @@ void RenderTableSection::recalcCells()
 
 void RenderTableSection::clearGrid()
 {
-    int rows = grid.size();
+    int rows = gridRows;
     while ( rows-- ) {
 	delete grid[rows].row;
     }
@@ -1608,6 +1579,7 @@ RenderTableCell::RenderTableCell(DOM::NodeImpl* _node)
 {
   _col = -1;
   _row = -1;
+  cSpan = rSpan = 1;
   updateFromElement();
   setShouldPaintBackgroundOrBorder(true);
   _topExtra = 0;
@@ -1625,24 +1597,16 @@ void RenderTableCell::detach()
 
 void RenderTableCell::updateFromElement()
 {
-  DOM::NodeImpl *node = element();
-  if ( node && (node->id() == ID_TD || node->id() == ID_TH) ) {
-      DOM::HTMLTableCellElementImpl *tc = static_cast<DOM::HTMLTableCellElementImpl *>(node);
-      cSpan = tc->colSpan();
-      rSpan = tc->rowSpan();
-  } else {
-      cSpan = rSpan = 1;
-  }
-}
-
-int RenderTableCell::getCellPercentageHeight() const
-{
-    return m_percentageHeight;
-}
-
-void RenderTableCell::setCellPercentageHeight(int h)
-{
-    m_percentageHeight = h;
+    int oldRSpan = rSpan;
+    int oldCSpan = cSpan;
+    DOM::NodeImpl* node = element();
+    if (node && (node->id() == ID_TD || node->id() == ID_TH)) {
+        DOM::HTMLTableCellElementImpl *tc = static_cast<DOM::HTMLTableCellElementImpl *>(node);
+        cSpan = tc->colSpan();
+        rSpan = tc->rowSpan();
+    }
+    if ((oldRSpan != rSpan || oldCSpan != cSpan) && style() && parent())
+        setNeedsLayoutAndMinMaxRecalc();
 }
     
 void RenderTableCell::calcMinMaxWidth()
@@ -1679,16 +1643,6 @@ void RenderTableCell::layout()
     layoutBlock(m_widthChanged);
     m_widthChanged = false;
 }
-
-void RenderTableCell::close()
-{
-    RenderBlock::close();
-
-#ifdef DEBUG_LAYOUT
-    kdDebug( 6040 ) << renderName() << "(RenderTableCell)::close() total height =" << m_height << endl;
-#endif
-}
-
 
 void RenderTableCell::computeAbsoluteRepaintRect(QRect& r, bool f)
 {
@@ -1845,7 +1799,7 @@ CollapsedBorderValue RenderTableCell::collapsedRightBorder() const
     // (2) The next cell's left border.
     if (!inLastColumn) {
         RenderTableCell* nextCell = tableElt->cellRight(this);
-        if (nextCell) {
+        if (nextCell && nextCell->style()) {
             result = compareBorders(result, CollapsedBorderValue(&nextCell->style()->borderLeft(), BCELL));
             if (!result.exists()) return result;
         }
@@ -1974,7 +1928,7 @@ CollapsedBorderValue RenderTableCell::collapsedBottomBorder() const
     
     // Now check row groups.
     RenderObject* currSection = parent()->parent();
-    if (row()+rowSpan() >= static_cast<RenderTableSection*>(currSection)->numRows()) {
+    if (row() + rowSpan() >= static_cast<RenderTableSection*>(currSection)->numRows()) {
         // (5) Our row group's bottom border.
         result = compareBorders(result, CollapsedBorderValue(&currSection->style()->borderBottom(), BROWGROUP));
         if (!result.exists()) return result;
@@ -2263,22 +2217,24 @@ void RenderTableCell::paintBoxDecorations(PaintInfo& i, int _tx, int _ty)
 	}
     }
 
+    // FIXME: This code is just plain wrong.  Rows and columns should paint their backgrounds
+    // independent from the cell.
     // ### get offsets right in case the bgimage is inherited.
-    CachedImage *bg = style()->backgroundImage();
-    if ( !bg && parent() )
-        bg = parent()->style()->backgroundImage();
-    if ( !bg && parent() && parent()->parent() )
-        bg = parent()->parent()->style()->backgroundImage();
-    if ( !bg ) {
+    const BackgroundLayer* bgLayer = style()->backgroundLayers();
+    if (!bgLayer->hasImage() && parent())
+        bgLayer = parent()->style()->backgroundLayers();
+    if (!bgLayer->hasImage() && parent() && parent()->parent())
+        bgLayer = parent()->parent()->style()->backgroundLayers();
+    if (!bgLayer->hasImage()) {
 	// see if we have a col or colgroup for this
-	RenderTableCol *col = table()->colElement( _col );
-	if ( col ) {
-	    bg = col->style()->backgroundImage();
-	    if ( !bg ) {
+	RenderTableCol* col = table()->colElement(_col);
+	if (col) {
+	    bgLayer = col->style()->backgroundLayers();
+	    if (!bgLayer->hasImage()) {
 		// try column group
 		RenderStyle *style = col->parent()->style();
-		if ( style->display() == TABLE_COLUMN_GROUP )
-		    bg = style->backgroundImage();
+		if (style->display() == TABLE_COLUMN_GROUP)
+		    bgLayer = style->backgroundLayers();
 	    }
 	}
     }
@@ -2287,8 +2243,8 @@ void RenderTableCell::paintBoxDecorations(PaintInfo& i, int _tx, int _ty)
     int end = kMin(i.r.y() + i.r.height(), _ty + h);
     int mh = end - my;
 
-    if ( bg || c.isValid() )
-	paintBackground(i.p, c, bg, my, mh, _tx, _ty, w, h);
+    if (bgLayer->hasImage() || c.isValid())
+	paintBackground(i.p, c, bgLayer, my, mh, _tx, _ty, w, h);
 
     if (style()->hasBorder() && !tableElt->collapseBorders())
         paintBorder(i.p, _tx, _ty, w, h, style());
@@ -2322,12 +2278,16 @@ RenderTableCol::RenderTableCol(DOM::NodeImpl* node)
 
 void RenderTableCol::updateFromElement()
 {
-  DOM::NodeImpl *node = element();
-  if ( node && (node->id() == ID_COL || node->id() == ID_COLGROUP) ) {
-      DOM::HTMLTableColElementImpl *tc = static_cast<DOM::HTMLTableColElementImpl *>(node);
-      _span = tc->span();
-  } else
-      _span = ! ( style() && style()->display() == TABLE_COLUMN_GROUP );
+    int oldSpan = _span;
+    DOM::NodeImpl *node = element();
+    if (node && (node->id() == ID_COL || node->id() == ID_COLGROUP)) {
+        DOM::HTMLTableColElementImpl *tc = static_cast<DOM::HTMLTableColElementImpl *>(node);
+        _span = tc->span();
+    } 
+    else
+      _span = !(style() && style()->display() == TABLE_COLUMN_GROUP);
+    if (_span != oldSpan && style() && parent())
+        setNeedsLayoutAndMinMaxRecalc();
 }
 
 bool RenderTableCol::canHaveChildren() const

@@ -14,4 +14,4 @@ layer at (0,0) size 800x600
 selection is CARET:
 start:      position 0 of child 3 {DIV} of child 2 {BODY} of child 1 {HTML} of root {}
 upstream:   position 0 of child 3 {DIV} of child 2 {BODY} of child 1 {HTML} of root {}
-downstream: position 0 of child 3 {DIV} of child 2 {BODY} of child 1 {HTML} of root {}
+downstream: position 1 of child 3 {DIV} of child 2 {BODY} of child 1 {HTML} of root {}

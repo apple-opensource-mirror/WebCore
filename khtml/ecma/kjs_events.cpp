@@ -36,34 +36,28 @@ using namespace KJS;
 
 using DOM::KeyboardEvent;
 using DOM::EventImpl;
+using DOM::NodeImpl;
 
 // -------------------------------------------------------------------------
 
-JSEventListener::JSEventListener(Object _listener, const Object &_win, bool _html)
+JSAbstractEventListener::JSAbstractEventListener(bool _html)
+  : html(_html)
 {
-    listener = _listener;
-    //fprintf(stderr,"JSEventListener::JSEventListener this=%p listener=%p\n",this,listener.imp());
-    html = _html;
-    win = _win;
-    if (_listener.imp()) {
-      static_cast<Window*>(win.imp())->jsEventListeners.insert(_listener.imp(), this);
-    }
 }
 
-JSEventListener::~JSEventListener()
+JSAbstractEventListener::~JSAbstractEventListener()
 {
-    if (listener.imp()) {
-      static_cast<Window*>(win.imp())->jsEventListeners.remove(listener.imp());
-    }
-    //fprintf(stderr,"JSEventListener::~JSEventListener this=%p listener=%p\n",this,listener.imp());
 }
 
-void JSEventListener::handleEvent(DOM::Event &evt, bool isWindowEvent)
+void JSAbstractEventListener::handleEvent(DOM::Event &evt, bool isWindowEvent)
 {
 #ifdef KJS_DEBUGGER
   if (KJSDebugWin::instance() && KJSDebugWin::instance()->inSession())
     return;
 #endif
+  Object listener = listenerObj();
+  Object win = windowObj();
+
   KHTMLPart *part = static_cast<Window*>(win.imp())->part();
   KJSProxy *proxy = 0;
   if (part)
@@ -78,9 +72,12 @@ void JSEventListener::handleEvent(DOM::Event &evt, bool isWindowEvent)
     List args;
     args.append(getDOMEvent(exec,evt));
 
-    // Add the event's target element to the scope
-    // (and the document, and the form - see KJS::HTMLElement::eventHandlerScope)
-    ScopeChain oldScope = listener.scope();
+    Window *window = static_cast<Window*>(win.imp());
+    // Set the event we're handling in the Window object
+    window->setCurrentEvent( &evt );
+    // ... and in the interpreter
+    interpreter->setCurrentEvent( &evt );
+
     Object thisObj;
     if (isWindowEvent) {
         thisObj = win;
@@ -88,26 +85,11 @@ void JSEventListener::handleEvent(DOM::Event &evt, bool isWindowEvent)
         KJS::Interpreter::lock();
         thisObj = Object::dynamicCast(getDOMNode(exec,evt.currentTarget()));
         KJS::Interpreter::unlock();
-        if ( !thisObj.isNull() ) {
-            ScopeChain scope = oldScope;
-            KJS::Interpreter::lock();
-            static_cast<DOMNode*>(thisObj.imp())->pushEventHandlerScope(exec, scope);
-            KJS::Interpreter::unlock();
-            listener.setScope( scope );
-        }
     }
-
-    Window *window = static_cast<Window*>(win.imp());
-    // Set the event we're handling in the Window object
-    window->setCurrentEvent( &evt );
-    // ... and in the interpreter
-    interpreter->setCurrentEvent( &evt );
 
     KJS::Interpreter::lock();
     Value retval = listener.call(exec, thisObj, args);
     KJS::Interpreter::unlock();
-
-    listener.setScope( oldScope );
 
     window->setCurrentEvent( 0 );
     interpreter->setCurrentEvent( 0 );
@@ -140,7 +122,7 @@ void JSEventListener::handleEvent(DOM::Event &evt, bool isWindowEvent)
   }
 }
 
-DOM::DOMString JSEventListener::eventListenerType()
+DOM::DOMString JSAbstractEventListener::eventListenerType()
 {
     if (html)
 	return "_khtml_HTMLEventListener";
@@ -148,17 +130,89 @@ DOM::DOMString JSEventListener::eventListenerType()
 	return "_khtml_JSEventListener";
 }
 
+// -------------------------------------------------------------------------
+
+JSUnprotectedEventListener::JSUnprotectedEventListener(Object _listener, const Object &_win, bool _html)
+  : JSAbstractEventListener(_html)
+  , listener(_listener)
+  , win(_win)
+{
+    if (_listener.imp()) {
+      static_cast<Window*>(win.imp())->jsUnprotectedEventListeners.insert(_listener.imp(), this);
+    }
+}
+
+JSUnprotectedEventListener::~JSUnprotectedEventListener()
+{
+    if (listener.imp()) {
+      static_cast<Window*>(win.imp())->jsUnprotectedEventListeners.remove(listener.imp());
+    }
+}
+
+Object JSUnprotectedEventListener::listenerObj() const
+{ 
+    return listener; 
+}
+
+Object JSUnprotectedEventListener::windowObj() const
+{
+    return win;
+}
+
+void JSUnprotectedEventListener::mark()
+{
+  ObjectImp *listenerImp = listener.imp();
+  if (listenerImp && !listenerImp->marked())
+    listenerImp->mark();
+}
+
+// -------------------------------------------------------------------------
+
+JSEventListener::JSEventListener(Object _listener, const Object &_win, bool _html)
+  : JSAbstractEventListener(_html)
+  , listener(_listener)
+  , win(_win)
+{
+    //fprintf(stderr,"JSEventListener::JSEventListener this=%p listener=%p\n",this,listener.imp());
+    if (_listener.imp()) {
+      static_cast<Window*>(win.imp())->jsEventListeners.insert(_listener.imp(), this);
+    }
+}
+
+JSEventListener::~JSEventListener()
+{
+    if (listener.imp()) {
+      static_cast<Window*>(win.imp())->jsEventListeners.remove(listener.imp());
+    }
+    //fprintf(stderr,"JSEventListener::~JSEventListener this=%p listener=%p\n",this,listener.imp());
+}
 
 Object JSEventListener::listenerObj() const
 { 
-  return listener; 
+    return listener; 
 }
 
-JSLazyEventListener::JSLazyEventListener(QString _code, const Object &_win, bool _html)
-  : JSEventListener(Object(), _win, _html),
+Object JSEventListener::windowObj() const
+{
+    return win;
+}
+
+// -------------------------------------------------------------------------
+
+JSLazyEventListener::JSLazyEventListener(QString _code, const Object &_win, NodeImpl *_originalNode, int lineno)
+  : JSEventListener(Object(), _win, true),
     code(_code),
     parsed(false)
 {
+    lineNumber = lineno;
+
+    // We don't retain the original node, because we assume it
+    // will stay alive as long as this handler object is around
+    // and we need to avoid a reference cycle. If JS transfers
+    // this handler to another node, parseCode will be called and
+    // then originalNode is no longer needed.
+    
+    originalNode = _originalNode;
 }
 
 void JSLazyEventListener::handleEvent(DOM::Event &evt, bool isWindowEvent)
@@ -188,26 +242,40 @@ void JSLazyEventListener::parseCode() const
       KJS::ScriptInterpreter *interpreter = static_cast<KJS::ScriptInterpreter *>(proxy->interpreter());
       ExecState *exec = interpreter->globalExec();
 
-
       KJS::Interpreter::lock();
-
       //KJS::Constructor constr(KJS::Global::current().get("Function").imp());
       KJS::Object constr = interpreter->builtinFunction();
       KJS::List args;
 
       static ProtectedValue eventString = KJS::String("event");
-
+      UString sourceURL(part->m_url.url());
       args.append(eventString);
       args.append(KJS::String(code));
-      listener = constr.construct(exec, args); // ### is globalExec ok ?
+      listener = constr.construct(exec, args, sourceURL, lineNumber); // ### is globalExec ok ?
 
       KJS::Interpreter::unlock();
-      
-      if ( exec->hadException() ) {
+
+      if (exec->hadException()) {
 	exec->clearException();
 
 	// failed to parse, so let's just make this listener a no-op
 	listener = Object();
+      } else if (originalNode) {
+        // Add the event's home element to the scope
+        // (and the document, and the form - see KJS::HTMLElement::eventHandlerScope)
+        ScopeChain scope = listener.scope();
+        
+        KJS::Interpreter::lock();
+        Object thisObj = Object::dynamicCast(getDOMNode(exec, originalNode));
+        KJS::Interpreter::unlock();
+        
+        if (!thisObj.isNull()) {
+          KJS::Interpreter::lock();
+          static_cast<DOMNode*>(thisObj.imp())->pushEventHandlerScope(exec, scope);
+          KJS::Interpreter::unlock();
+          
+          listener.setScope(scope);
+        }
       }
     }
 
@@ -940,8 +1008,6 @@ static Value stringOrUndefined(const DOM::DOMString &str)
     }
 }
 
-// FIXME lookups of dropEffect and effectAllowed should fail if !clipboard->isForDragging
-
 Value Clipboard::tryGet(ExecState *exec, const Identifier &propertyName) const
 {
     return DOMObjectLookupGetValue<Clipboard,DOMObject>(exec, propertyName, &ClipboardTable, this);
@@ -951,8 +1017,10 @@ Value Clipboard::getValueProperty(ExecState *exec, int token) const
 {
     switch (token) {
         case DropEffect:
+            assert(clipboard->isForDragging() || clipboard->dropEffect().isNull());
             return stringOrUndefined(clipboard->dropEffect());
         case EffectAllowed:
+            assert(clipboard->isForDragging() || clipboard->effectAllowed().isNull());
             return stringOrUndefined(clipboard->effectAllowed());
         case Types:
         {
@@ -982,10 +1050,14 @@ void Clipboard::putValue(ExecState *exec, int token, const Value& value, int /*a
 {
     switch (token) {
         case DropEffect:
-            clipboard->setDropEffect(value.toString(exec).string());
+            // can never set this when not for dragging, thus getting always returns NULL string
+            if (clipboard->isForDragging())
+                clipboard->setDropEffect(value.toString(exec).string());
             break;
         case EffectAllowed:
-            clipboard->setEffectAllowed(value.toString(exec).string());
+            // can never set this when not for dragging, thus getting always returns NULL string
+            if (clipboard->isForDragging())
+                clipboard->setEffectAllowed(value.toString(exec).string());
             break;
         default:
             kdWarning() << "Clipboard::putValue unhandled token " << token << endl;
@@ -1040,6 +1112,10 @@ Value ClipboardProtoFunc::tryCall(ExecState *exec, Object &thisObj, const List &
             }
         case Clipboard::SetDragImage:
         {
+            if (!cb->clipboard->isForDragging()) {
+                return Undefined();
+            }
+
             if (args.size() != 3) {
                 Object err = Error::create(exec, SyntaxError,"setDragImage: Invalid number of arguments");
                 exec->setException(err);

@@ -20,13 +20,16 @@
  *
  */
 #include "render_br.h"
-#include "xml/dom_position.h"
+
+#include "dom_position.h"
+#include "render_block.h"
+#include "render_line.h"
 
 using namespace khtml;
 using DOM::Position;
 
 RenderBR::RenderBR(DOM::NodeImpl* node)
-    : RenderText(node, new DOM::DOMStringImpl(QChar('\n'))), m_x(0), m_y(0), m_height(0),
+    : RenderText(node, new DOM::DOMStringImpl(QChar('\n'))),
       m_lineHeight(-1)
 {
 }
@@ -35,33 +38,27 @@ RenderBR::~RenderBR()
 {
 }
 
-void RenderBR::setPos(int xPos, int yPos)
-{
-    m_x = xPos;
-    m_y = yPos;
-}
-
 InlineBox* RenderBR::createInlineBox(bool makePlaceholder, bool isRootLineBox, bool isOnlyRun)
 {
-    // We only make a box for a <br> if we are on a line by ourself or in strict mode
-    // (Note the use of strict mode.  In "almost strict" mode, we don't make a box for <br>.)
-    if (isOnlyRun || document()->inStrictMode())
-        return RenderText::createInlineBox(makePlaceholder, isRootLineBox, isOnlyRun);
-    return 0;
+    // We only treat a box as text for a <br> if we are on a line by ourself or in strict mode
+    // (Note the use of strict mode.  In "almost strict" mode, we don't treat the box for <br> as text.)
+    InlineTextBox* box = static_cast<InlineTextBox*>(RenderText::createInlineBox(makePlaceholder, isRootLineBox, isOnlyRun));
+    box->setIsText(isOnlyRun || document()->inStrictMode());
+    return box;
 }
 
-void RenderBR::position(InlineBox* box, int from, int len, bool reverse)
+short RenderBR::baselinePosition( bool firstLine, bool isRootLineBox) const
 {
-    InlineTextBox *s = static_cast<InlineTextBox*>(box);
-    
-    // We want the box to be destroyed, but get the position of it first.
-    m_x = s->xPos();
-    m_y = s->yPos();
-    m_height = s->height();
+    if (firstTextBox() && !firstTextBox()->isText())
+        return 0;
+    return RenderText::baselinePosition(firstLine, isRootLineBox);
 }
 
 short RenderBR::lineHeight(bool firstLine, bool isRootLineBox) const
 {
+    if (firstTextBox() && !firstTextBox()->isText())
+        return 0;
+
     if (firstLine) {
         RenderStyle* s = style(firstLine);
         Length lh = s->lineHeight();
@@ -104,26 +101,28 @@ unsigned long RenderBR::caretMaxRenderedOffset() const
     return 1;
 }
 
-Position RenderBR::positionForCoordinates(int _x, int _y)
+VisiblePosition RenderBR::positionForCoordinates(int _x, int _y)
 {
-    return Position(element(), 0);
+    return VisiblePosition(element(), 0, DOWNSTREAM);
 }
 
-void RenderBR::caretPos(int offset, bool override, int &_x, int &_y, int &_w, int &_h)
+QRect RenderBR::caretRect(int offset, EAffinity affinity, int *extraWidthToEndOfLine)
 {
     // EDIT FIXME: This does not work yet. Some other changes are need before
     // an accurate position can be determined.
-    _h = lineHeight(false);
-    _x = xPos();
-    _y = yPos();
 
     int absx, absy;
     absolutePosition(absx,absy);
-    _x += absx;
-    _y += absy;
+
+   if (extraWidthToEndOfLine)
+        *extraWidthToEndOfLine = containingBlockWidth() - xPos();
+ 
+    // FIXME: an older version of this code wasn't setting width at
+    // all, using the default of 1...
+    return QRect(xPos() + absx, yPos() + absy, 1, lineHeight(false));
 }
 
-InlineBox *RenderBR::inlineBox(long offset)
+InlineBox *RenderBR::inlineBox(long offset, EAffinity affinity)
 {
     return firstTextBox();
 }

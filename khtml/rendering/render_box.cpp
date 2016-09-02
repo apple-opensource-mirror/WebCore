@@ -37,6 +37,8 @@
 #include "misc/htmlhashes.h"
 #include "xml/dom_nodeimpl.h"
 #include "xml/dom_docimpl.h"
+#include "html/html_elementimpl.h"
+
 #include "render_line.h"
 
 #include <khtmlview.h>
@@ -50,7 +52,7 @@ using namespace khtml;
 #define TABLECELLMARGIN -0x4000
 
 RenderBox::RenderBox(DOM::NodeImpl* node)
-    : RenderContainer(node)
+    : RenderObject(node)
 {
     m_minWidth = -1;
     m_maxWidth = -1;
@@ -105,6 +107,8 @@ void RenderBox::setStyle(RenderStyle *_style)
         if (!m_layer) {
             m_layer = new (renderArena()) RenderLayer(this);
             m_layer->insertOnlyThisLayer();
+            if (containingBlock())
+                m_layer->updateLayerPositions();
         }
     }
     else if (m_layer && !isRoot() && !isCanvas()) {
@@ -133,6 +137,10 @@ void RenderBox::detach()
     RenderLayer* layer = m_layer;
     RenderArena* arena = renderArena();
     
+    // This must be done before we detach the RenderObject.
+    if (layer)
+        layer->clearClipRect();
+        
     if (m_inlineBoxWrapper) {
         if (!documentBeingDestroyed())
             m_inlineBoxWrapper->remove();
@@ -140,7 +148,7 @@ void RenderBox::detach()
         m_inlineBoxWrapper = 0;
     }
 
-    RenderContainer::detach();
+    RenderObject::detach();
     
     if (layer)
         layer->detach(arena);
@@ -197,6 +205,34 @@ int RenderBox::height() const
     return m_height;
 }
 
+// Hit Testing
+bool RenderBox::nodeAtPoint(NodeInfo& info, int _x, int _y, int _tx, int _ty,
+                            HitTestAction hitTestAction)
+{
+    // Check kids first.
+    _tx += m_x;
+    _ty += m_y;
+    for (RenderObject* child = lastChild(); child; child = child->previousSibling()) {
+        // FIXME: We have to skip over inline flows, since they can show up inside table rows at the moment (a demoted inline <form> for example).  If we ever implement a
+        // table-specific hit-test method (which we should do for performance reasons anyway), then we can remove this check.
+        if (!child->layer() && !child->isInlineFlow() && child->nodeAtPoint(info, _x, _y, _tx, _ty, hitTestAction)) {
+            setInnerNode(info);
+            return true;
+        }
+    }
+    
+    // Check our bounds next.  For this purpose always assume that we can only be hit in the
+    // foreground phase (which is true for replaced elements like images).
+    if (hitTestAction != HitTestForeground)
+        return false;
+    
+    QRect boundsRect(_tx, _ty, m_width, m_height);
+    if (boundsRect.contains(_x, _y)) {
+        setInnerNode(info);
+        return true;
+    }
+    return false;
+}
 
 // --------------------- painting stuff -------------------------------
 
@@ -213,49 +249,21 @@ void RenderBox::paint(PaintInfo& i, int _tx, int _ty)
 void RenderBox::paintRootBoxDecorations(PaintInfo& i, int _tx, int _ty)
 {
     //kdDebug( 6040 ) << renderName() << "::paintBoxDecorations()" << _tx << "/" << _ty << endl;
-    QColor c = style()->backgroundColor();
-    CachedImage *bg = style()->backgroundImage();
-
-    bool canBeTransparent = true;
-    if (!c.isValid() && !bg) {
+    const BackgroundLayer* bgLayer = style()->backgroundLayers();
+    QColor bgColor = style()->backgroundColor();
+    if (document()->isHTMLDocument() && !style()->hasBackground()) {
         // Locate the <body> element using the DOM.  This is easier than trying
         // to crawl around a render tree with potential :before/:after content and
         // anonymous blocks created by inline <body> tags etc.  We can locate the <body>
         // render object very easily via the DOM.
-        RenderObject* bodyObject = 0;
-        for (DOM::NodeImpl* elt = element()->firstChild(); elt; elt = elt->nextSibling()) {
-            if (elt->id() == ID_BODY) {
-                bodyObject = elt->renderer();
-                break;
-            }
-            else if (elt->id() == ID_FRAMESET) {
-                canBeTransparent = false; // Can't scroll a frameset document anyway.
-                break;
-            }
-        }
-
+        HTMLElementImpl* body = document()->body();
+        RenderObject* bodyObject = (body && body->id() == ID_BODY) ? body->renderer() : 0;
         if (bodyObject) {
-            c = bodyObject->style()->backgroundColor();
-            bg = bodyObject->style()->backgroundImage();
+            bgLayer = bodyObject->style()->backgroundLayers();
+            bgColor = bodyObject->style()->backgroundColor();
         }
     }
 
-    // Only fill with a base color (e.g., white) if we're the root document, since iframes/frames with
-    // no background in the child document should show the parent's background.
-    if ((!c.isValid() || qAlpha(c.rgb()) == 0) && canvas()->view()) {
-        bool isTransparent;
-        DOM::NodeImpl* elt = element()->getDocument()->ownerElement();
-        if (elt)
-            isTransparent = canBeTransparent && elt->id() != ID_FRAME; // Frames are never transparent.
-        else
-            isTransparent = canvas()->view()->isTransparent();
-
-        if (isTransparent)
-            canvas()->view()->useSlowRepaints(); // The parent must show behind the child.
-        else
-            c = canvas()->view()->palette().active().color(QColorGroup::Base);
-    }
-    
     int w = width();
     int h = height();
 
@@ -284,7 +292,7 @@ void RenderBox::paintRootBoxDecorations(PaintInfo& i, int _tx, int _ty)
     // I just love these little inconsistencies .. :-( (Dirk)
     int my = kMax(by, i.r.y());
 
-    paintBackground(i.p, c, bg, my, i.r.height(), bx, by, bw, bh);
+    paintBackgrounds(i.p, bgColor, bgLayer, my, i.r.height(), bx, by, bw, bh);
 
     if (style()->hasBorder() && style()->display() != INLINE)
         paintBorder( i.p, _tx, _ty, w, h, style() );
@@ -313,54 +321,95 @@ void RenderBox::paintBoxDecorations(PaintInfo& i, int _tx, int _ty)
     // The <body> only paints its background if the root element has defined a background
     // independent of the body.  Go through the DOM to get to the root element's render object,
     // since the root could be inline and wrapped in an anonymous block.
-    if (!isBody()
-        || element()->getDocument()->documentElement()->renderer()->style()->backgroundColor().isValid()
-        || element()->getDocument()->documentElement()->renderer()->style()->backgroundImage())
-        paintBackground(i.p, style()->backgroundColor(), style()->backgroundImage(), my, mh, _tx, _ty, w, h);
+    if (!isBody() || !document()->isHTMLDocument() || document()->documentElement()->renderer()->style()->hasBackground())
+        paintBackgrounds(i.p, style()->backgroundColor(), style()->backgroundLayers(), my, mh, _tx, _ty, w, h);
    
     if (style()->hasBorder())
         paintBorder(i.p, _tx, _ty, w, h, style());
 }
 
-void RenderBox::paintBackground(QPainter *p, const QColor &c, CachedImage *bg, int clipy, int cliph, int _tx, int _ty, int w, int height)
+void RenderBox::paintBackgrounds(QPainter *p, const QColor& c, const BackgroundLayer* bgLayer, int clipy, int cliph, int _tx, int _ty, int w, int height)
 {
-    paintBackgroundExtended(p, c, bg, clipy, cliph, _tx, _ty, w, height,
+    if (!bgLayer) return;
+    paintBackgrounds(p, c, bgLayer->next(), clipy, cliph, _tx, _ty, w, height);
+    paintBackground(p, c, bgLayer, clipy, cliph, _tx, _ty, w, height);
+}
+
+void RenderBox::paintBackground(QPainter *p, const QColor& c, const BackgroundLayer* bgLayer, int clipy, int cliph, int _tx, int _ty, int w, int height)
+{
+    paintBackgroundExtended(p, c, bgLayer, clipy, cliph, _tx, _ty, w, height,
                             borderLeft(), borderRight());
 }
 
-void RenderBox::paintBackgroundExtended(QPainter *p, const QColor &c, CachedImage *bg, int clipy, int cliph,
+void RenderBox::paintBackgroundExtended(QPainter *p, const QColor& c, const BackgroundLayer* bgLayer, int clipy, int cliph,
                                         int _tx, int _ty, int w, int h,
                                         int bleft, int bright)
 {
-    if (c.isValid() && qAlpha(c.rgb()) > 0) {
+    CachedImage* bg = bgLayer->backgroundImage();
+    bool shouldPaintBackgroundImage = bg && bg->pixmap_size() == bg->valid_rect().size() && !bg->isTransparent() && !bg->isErrorImage();
+    QColor bgColor = c;
+    
+    // When this style flag is set, change existing background colors and images to a solid white background.
+    // If there's no bg color or image, leave it untouched to avoid affecting transparency.
+    // We don't try to avoid loading the background images, because this style flag is only set
+    // when printing, and at that point we've already loaded the background images anyway. (To avoid
+    // loading the background images we'd have to do this check when applying styles rather than
+    // while rendering.)
+    if (style()->forceBackgroundsToWhite()) {
+        // Note that we can't reuse this variable below because the bgColor might be changed
+        bool shouldPaintBackgroundColor = !bgLayer->next() && bgColor.isValid() && qAlpha(bgColor.rgb()) > 0;
+        if (shouldPaintBackgroundImage || shouldPaintBackgroundColor) {
+            bgColor = Qt::white;
+            shouldPaintBackgroundImage = false;
+        }
+    }
+
+    // Only fill with a base color (e.g., white) if we're the root document, since iframes/frames with
+    // no background in the child document should show the parent's background.
+    if (!bgLayer->next() && isRoot() && !(bgColor.isValid() && qAlpha(bgColor.rgb()) > 0) && canvas()->view()) {
+        bool isTransparent;
+        DOM::NodeImpl* elt = document()->ownerElement();
+        if (elt) {
+            if (elt->id() == ID_FRAME)
+                isTransparent = false;
+            else {
+                // Locate the <body> element using the DOM.  This is easier than trying
+                // to crawl around a render tree with potential :before/:after content and
+                // anonymous blocks created by inline <body> tags etc.  We can locate the <body>
+                // render object very easily via the DOM.
+                HTMLElementImpl* body = document()->body();
+                isTransparent = !body || body->id() != ID_FRAMESET; // Can't scroll a frameset document anyway.
+            }
+        } else
+            isTransparent = canvas()->view()->isTransparent();
+        
+        if (isTransparent)
+            canvas()->view()->useSlowRepaints(); // The parent must show behind the child.
+        else
+            bgColor = canvas()->view()->palette().active().color(QColorGroup::Base);
+    }
+
+    // Paint the color first underneath all images.
+    if (!bgLayer->next() && bgColor.isValid() && qAlpha(bgColor.rgb()) > 0) {
         // If we have an alpha and we are painting the root element, go ahead and blend with our default
         // background color (typically white).
-        if (qAlpha(c.rgb()) < 0xFF && isRoot() && !canvas()->view()->isTransparent())
+        if (qAlpha(bgColor.rgb()) < 0xFF && isRoot() && !canvas()->view()->isTransparent())
             p->fillRect(_tx, clipy, w, cliph, canvas()->view()->palette().active().color(QColorGroup::Base));
-        p->fillRect(_tx, clipy, w, cliph, c);
+        p->fillRect(_tx, clipy, w, cliph, bgColor);
     }
     
     // no progressive loading of the background image
-    if(bg && bg->pixmap_size() == bg->valid_rect().size() && !bg->isTransparent() && !bg->isErrorImage()) {
-        //kdDebug( 6040 ) << "painting bgimage at " << _tx << "/" << _ty << endl;
-        // ### might need to add some correct offsets
-        // ### use paddingX/Y
-
-        // for propagation of <body> up to <html>
-        RenderStyle* sptr = style();
-        if ((isRoot() && element() && element()->id() == ID_HTML) && firstChild() && !style()->backgroundImage())
-            sptr = firstChild()->style();
-
+    if (shouldPaintBackgroundImage) {
         int sx = 0;
         int sy = 0;
-	    int cw,ch;
+        int cw,ch;
         int cx,cy;
         int vpab = bleft + bright;
         int hpab = borderTop() + borderBottom();
         
         // CSS2 chapter 14.2.1
 
-        if (sptr->backgroundAttachment())
+        if (bgLayer->backgroundAttachment())
         {
             //scroll
             int pw = w - vpab;
@@ -368,10 +417,10 @@ void RenderBox::paintBackgroundExtended(QPainter *p, const QColor &c, CachedImag
             
             int pixw = bg->pixmap_size().width();
             int pixh = bg->pixmap_size().height();
-            EBackgroundRepeat bgr = sptr->backgroundRepeat();
+            EBackgroundRepeat bgr = bgLayer->backgroundRepeat();
             if( (bgr == NO_REPEAT || bgr == REPEAT_Y) && w > pixw ) {
                 cw = pixw;
-                int xPosition = sptr->backgroundXPosition().minWidth(pw-pixw);
+                int xPosition = bgLayer->backgroundXPosition().minWidth(pw-pixw);
                 if (xPosition >= 0)
                     cx = _tx + xPosition;
                 else {
@@ -390,14 +439,14 @@ void RenderBox::paintBackgroundExtended(QPainter *p, const QColor &c, CachedImag
                 if (pixw == 0)
                     sx = 0;
                 else {
-                    sx =  pixw - ((sptr->backgroundXPosition().minWidth(pw-pixw)) % pixw );
+                    sx =  pixw - ((bgLayer->backgroundXPosition().minWidth(pw-pixw)) % pixw );
                     sx -= bleft % pixw;
                 }
             }
 
             if( (bgr == NO_REPEAT || bgr == REPEAT_X) && h > pixh ) {
                 ch = pixh;
-                int yPosition = sptr->backgroundYPosition().minWidth(ph-pixh);
+                int yPosition = bgLayer->backgroundYPosition().minWidth(ph-pixh);
                 if (yPosition >= 0)
                     cy = _ty + yPosition;
                 else {
@@ -417,7 +466,7 @@ void RenderBox::paintBackgroundExtended(QPainter *p, const QColor &c, CachedImag
                 if(pixh == 0){
                     sy = 0;
                 }else{
-                    sy = pixh - ((sptr->backgroundYPosition().minWidth(ph-pixh)) % pixh );
+                    sy = pixh - ((bgLayer->backgroundYPosition().minWidth(ph-pixh)) % pixh );
                     sy -= borderTop() % pixh;
                 }
             }
@@ -431,30 +480,30 @@ void RenderBox::paintBackgroundExtended(QPainter *p, const QColor &c, CachedImag
 
             int pixw = bg->pixmap_size().width();
             int pixh = bg->pixmap_size().height();
-            EBackgroundRepeat bgr = sptr->backgroundRepeat();
+            EBackgroundRepeat bgr = bgLayer->backgroundRepeat();
             if( (bgr == NO_REPEAT || bgr == REPEAT_Y) && pw > pixw ) {
                 cw = pixw;
-                cx = vr.x() + sptr->backgroundXPosition().minWidth(pw-pixw);
+                cx = vr.x() + bgLayer->backgroundXPosition().minWidth(pw-pixw);
             } else {
                 cw = pw;
                 cx = vr.x();
                 if(pixw == 0){
                     sx = 0;
                 }else{
-                    sx =  pixw - ((sptr->backgroundXPosition().minWidth(pw-pixw)) % pixw );
+                    sx =  pixw - ((bgLayer->backgroundXPosition().minWidth(pw-pixw)) % pixw );
                 }
             }
 
             if( (bgr == NO_REPEAT || bgr == REPEAT_X) && ph > pixh ) {
                 ch = pixh;
-                cy = vr.y() + sptr->backgroundYPosition().minWidth(ph-pixh);
+                cy = vr.y() + bgLayer->backgroundYPosition().minWidth(ph-pixh);
             } else {
                 ch = ph;
                 cy = vr.y();
                 if(pixh == 0){
                     sy = 0;
                 }else{
-                    sy = pixh - ((sptr->backgroundYPosition().minWidth(ph-pixh)) % pixh );
+                    sy = pixh - ((bgLayer->backgroundYPosition().minWidth(ph-pixh)) % pixh );
                 }
             }
 
@@ -586,8 +635,7 @@ void RenderBox::position(InlineBox* box, int from, int len, bool reverse)
 {
     if (isPositioned()) {
         // Cache the x position only if we were an INLINE type originally.
-        bool wasInline = style()->originalDisplay() == INLINE ||
-                         style()->originalDisplay() == INLINE_TABLE;
+        bool wasInline = style()->isOriginalDisplayInlineType();
         if (wasInline && hasStaticX()) {
             // The value is cached in the xPos of the box.  We only need this value if
             // our object was inline originally, since otherwise it would have ended up underneath
@@ -624,6 +672,7 @@ void RenderBox::deleteLineBoxWrapper()
 {
     if (m_inlineBoxWrapper)
         m_inlineBoxWrapper->detach(renderArena());
+    m_inlineBoxWrapper = 0;
 }
 
 void RenderBox::setInlineBoxWrapper(InlineBox* b)
@@ -995,19 +1044,37 @@ int RenderBox::calcHeightUsing(const Length& h)
 int RenderBox::calcPercentageHeight(const Length& height)
 {
     int result = -1;
+    bool includeBorderPadding = isTable();
     RenderBlock* cb = containingBlock();
+    if (style()->htmlHacks()) {
+        // In quirks mode, blocks with auto height are skipped, and we keep looking for an enclosing
+        // block that may have a specified height and then use it.  In strict mode, this violates the
+        // specification, which states that percentage heights just revert to auto if the containing
+        // block has an auto height.
+        for ( ; !cb->isCanvas() && !cb->isBody() && !cb->isTableCell() && !cb->isPositioned() &&
+                cb->style()->height().isVariable(); cb = cb->containingBlock());
+    }
+
     // Table cells violate what the CSS spec says to do with heights.  Basically we
     // don't care if the cell specified a height or not.  We just always make ourselves
     // be a percentage of the cell's current content height.
     if (cb->isTableCell()) {
-        result = static_cast<RenderTableCell*>(cb)->getCellPercentageHeight();
-        if (result == 0)
+        result = cb->overrideSize();
+        if (result == -1) {
+            // Normally we would let the cell size intrinsically, but scrolling overflow has to be
+            // treated differently, since WinIE lets scrolled overflow regions shrink as needed.
+            // While we can't get all cases right, we can at least detect when the cell has a specified
+            // height or when the table has a specified height.  In these cases we want to initially have
+            // no size and allow the flexing of the table or the cell to its specified height to cause us
+            // to grow to fill the space.  This could end up being wrong in some cases, but it is
+            // preferable to the alternative (sizing intrinsically and making the row end up too big).
+            RenderTableCell* cell = static_cast<RenderTableCell*>(cb);
+            if (scrollsOverflow() && 
+                (!cell->style()->height().isVariable() || !cell->table()->style()->height().isVariable()))
+                return 0;
             return -1;
-        // It is necessary to use the border-box to match WinIE's broken
-        // box model.  This is essential for sizing inside
-        // table cells using percentage heights.
-        result -= (borderTop() + paddingTop() + borderBottom() + paddingBottom());
-        result = kMax(0, result);
+        }
+        includeBorderPadding = true;
     }
 
     // Otherwise we only use our percentage height if our containing block had a specified
@@ -1025,8 +1092,16 @@ int RenderBox::calcPercentageHeight(const Length& height)
         result = cb->contentHeight();
         cb->setHeight(oldHeight);
     }
-    if (result != -1)
+    if (result != -1) {
         result = height.width(result);
+        if (includeBorderPadding) {
+            // It is necessary to use the border-box to match WinIE's broken
+            // box model.  This is essential for sizing inside
+            // table cells using percentage heights.
+            result -= (borderTop() + paddingTop() + borderBottom() + paddingBottom());
+            result = kMax(0, result);
+        }
+    }
     return result;
 }
 
@@ -1123,8 +1198,7 @@ int RenderBox::availableHeightUsing(const Length& h) const
     // artificially.  We're going to rely on this cell getting expanded to some new
     // height, and then when we lay out again we'll use the calculation below.
     if (isTableCell() && (h.isVariable() || h.isPercent())) {
-        const RenderTableCell* tableCell = static_cast<const RenderTableCell*>(this);
-        return tableCell->getCellPercentageHeight() - (borderLeft()+borderRight()+paddingLeft()+paddingRight());
+        return overrideSize() - (borderLeft()+borderRight()+paddingLeft()+paddingRight());
     }
     
     if (h.isPercent())
@@ -1332,10 +1406,8 @@ void RenderBox::calcAbsoluteVertical()
 
     // We don't use containingBlock(), since we may be positioned by an enclosing relpositioned inline.
     RenderObject* cb = container();
-    Length hl = cb->style()->height();
-    if (hl.isFixed())
-        ch = hl.value + cb->paddingTop() + cb->paddingBottom();
-    else if (cb->isRoot())
+    if (cb->isRoot()) // Even in strict mode (where we don't grow the root to fill the viewport) other browsers
+                      // position as though the root fills the viewport.
         ch = cb->availableHeight();
     else
         ch = cb->height() - cb->borderTop() - cb->borderBottom();
@@ -1467,48 +1539,63 @@ void RenderBox::calcAbsoluteVertical()
 
 }
 
-void RenderBox::caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height)
+QRect RenderBox::caretRect(int offset, EAffinity affinity, int *extraWidthToEndOfLine)
 {
-    _x = -1;
-    
+    // FIXME: Is it OK to check only first child instead of picking
+    // right child based on offset? Is it OK to pass the same offset
+    // along to the child instead of offset 0 or whatever?
+
     // propagate it downwards to its children, someone will feel responsible
     RenderObject *child = firstChild();
-    if (child) 
-        child->caretPos(offset, override, _x, _y, width, height);
+    if (child) {
+        QRect result = child->caretRect(offset, affinity, extraWidthToEndOfLine);
+        // FIXME: in-band signalling!
+        if (result.isEmpty())
+            return result;
+    }
     
+    int _x, _y, height;
+
     // if not, use the extents of this box 
     // offset 0 means left, offset 1 means right
-    if (_x == -1) {
-        _x = xPos() + (offset == 0 ? 0 : m_width);
-        InlineBox *box = inlineBoxWrapper();
-        if (box) {
-            height = box->root()->bottomOverflow() - box->root()->topOverflow();
-            _y = box->root()->topOverflow();
-        }
-        else {
-            _y = yPos();
-            height = m_height;
-        }
-        width = override && offset == 0 ? m_width : 1;
-        // If height of box is smaller than font height, use the latter one,
-        // otherwise the caret might become invisible.
-        // FIXME: ignoring :first-line, missing good reason to take care of
-        int fontHeight = style()->fontMetrics().height();
-        if (fontHeight > height)
-            height = fontHeight;
-        
-        int absx, absy;
-        RenderObject *cb = containingBlock();
-        if (cb && cb != this && cb->absolutePosition(absx,absy)) {
-            _x += absx;
-            _y += absy;
-        } 
-        else {
-            // we don't know our absolute position, and there is no point returning
-            // just a relative one
-            _x = _y = -1;
-        }
+    _x = xPos() + (offset == 0 ? 0 : m_width);
+    InlineBox *box = inlineBoxWrapper();
+    if (box) {
+        height = box->root()->bottomOverflow() - box->root()->topOverflow();
+        _y = box->root()->topOverflow();
     }
+    else {
+        _y = yPos();
+        height = m_height;
+    }
+    // If height of box is smaller than font height, use the latter one,
+    // otherwise the caret might become invisible.
+    // 
+    // Also, if the box is not a replaced element, always use the font height.
+    // This prevents the "big caret" bug described in:
+    // <rdar://problem/3777804> Deleting all content in a document can result in giant tall-as-window insertion point
+    //
+    // FIXME: ignoring :first-line, missing good reason to take care of
+    int fontHeight = style()->fontMetrics().height();
+    if (fontHeight > height || !isReplaced())
+        height = fontHeight;
+    
+    int absx, absy;
+    RenderObject *cb = containingBlock();
+    if (cb && cb != this && cb->absolutePosition(absx,absy)) {
+        _x += absx;
+        _y += absy;
+    } 
+    else {
+        // we don't know our absolute position, and there is no point returning
+        // just a relative one
+        return QRect();
+    }
+
+    if (extraWidthToEndOfLine)
+        *extraWidthToEndOfLine = m_width - _x;
+
+    return QRect(_x, _y, 1, height);
 }
 
 int RenderBox::lowestPosition(bool includeOverflowInterior, bool includeSelf) const

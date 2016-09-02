@@ -166,12 +166,12 @@ public:
     void resetScrollBars();
 #endif
 
+     void clear();
+
 signals:
         void cleared();
     
 protected:
-        void clear();
-    
 #if APPLE_CHANGES
 public:
         void clearPart();
@@ -215,11 +215,20 @@ public:
     bool isTransparent() const;
     void setTransparent(bool isTransparent);
     
+    void scheduleRelayout();
+    void unscheduleRelayout();
+    bool haveDelayedLayoutScheduled();
+    bool layoutPending();
+
 #if APPLE_CHANGES
     QWidget *topLevelWidget() const;
     QPoint mapToGlobal(const QPoint &) const;
+    // maps "viewport" (actually Cocoa window coords) to screen coords
+    QPoint viewportToGlobal(const QPoint &) const;
     void adjustViewSize();
     void initScrollBars();
+    
+    void updateDashboardRegions();
 #endif
 
     void ref() { ++_refCount; }
@@ -233,10 +242,6 @@ private:
 
     void resetCursor();
     void invalidateClick();
-
-    void scheduleRelayout();
-    void unscheduleRelayout();
-    bool haveDelayedLayoutScheduled();
 
     /**
      * Paints the HTML document to a QPainter.
@@ -284,6 +289,10 @@ private:
     bool dispatchDragEvent(int eventId, DOM::NodeImpl *dragTarget, const QPoint &loc, DOM::ClipboardImpl *clipboard);
 
     void applyBodyScrollQuirk(khtml::RenderObject* o, ScrollBarMode& hMode, ScrollBarMode& vMode);
+
+#if APPLE_CHANGES
+    virtual bool isKHTMLView() const;
+#endif
 
     // ------------------------------------- member variables ------------------------------------
  private:

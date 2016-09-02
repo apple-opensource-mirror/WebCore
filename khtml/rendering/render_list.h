@@ -56,6 +56,8 @@ public:
 
     virtual void calcWidth();
 
+    virtual InlineBox* createInlineBox(bool, bool, bool);
+
     virtual short lineHeight(bool b, bool isRootLineBox=false) const;
     virtual short baselinePosition(bool b, bool isRootLineBox=false) const;
     
@@ -75,8 +77,16 @@ protected:
 
     QString m_item;
     CachedImage *m_listImage;
+    QPixmap m_listPixmap;
     long m_value;
     RenderListItem* m_listItem;
+};
+
+class ListMarkerBox : public InlineBox
+{
+public:
+    ListMarkerBox(RenderObject* obj) :InlineBox(obj) {}
+    virtual bool isText() const { return !static_cast<RenderListMarker*>(object())->listImage(); }
 };
 
 class RenderListItem : public RenderBlock
@@ -117,7 +127,6 @@ protected:
     long int predefVal;
     RenderListMarker *m_marker;
     bool _notInList;
-    bool _markerInstalledInParent;
 };
 
 }; //namespace

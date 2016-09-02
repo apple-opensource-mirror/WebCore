@@ -55,6 +55,9 @@ HTMLAnchorElementImpl::~HTMLAnchorElementImpl()
 
 bool HTMLAnchorElementImpl::isFocusable() const
 {
+    if (isContentEditable())
+        return HTMLElementImpl::isFocusable();
+
     // FIXME: Even if we are not visible, we might have a child that is visible.
     // Dave wants to fix that some day with a "has visible content" flag or the like.
     if (!(m_hasAnchor && m_render && m_render->style()->visibility() == VISIBLE))
@@ -136,7 +139,7 @@ void HTMLAnchorElementImpl::defaultEventHandler(EventImpl *evt)
             if (k->qKeyEvent()) {
                 k->qKeyEvent()->accept();
                 evt->setDefaultHandled();
-                click();
+                click(false);
                 return;
             }
         }
@@ -229,9 +232,11 @@ void HTMLAnchorElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
     }
 }
 
-void HTMLAnchorElementImpl::accessKeyAction()
+void HTMLAnchorElementImpl::accessKeyAction(bool sendToAnyElement)
 {
-    click();
+    // send the mouse button events iff the
+    // caller specified sendToAnyElement
+    click(sendToAnyElement);
 }
 
 bool HTMLAnchorElementImpl::isURLAttribute(AttributeImpl *attr) const

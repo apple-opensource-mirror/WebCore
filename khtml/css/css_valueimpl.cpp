@@ -2,7 +2,7 @@
  * This file is part of the DOM implementation for KDE.
  *
  * (C) 1999-2003 Lars Knoll (knoll@kde.org)
- * Copyright (C) 2002 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -34,6 +34,7 @@
 
 #include "xml/dom_stringimpl.h"
 #include "xml/dom_docimpl.h"
+#include "html/html_elementimpl.h"
 
 #include "misc/loader.h"
 
@@ -51,52 +52,113 @@ extern DOM::DOMString getPropertyName(unsigned short id);
 using khtml::FontDef;
 using khtml::CSSStyleSelector;
 
-using namespace DOM;
+namespace DOM {
+
+#if 0
+
+// Too risky to quote all legal identifiers right now.
+// Post-Tiger we should use this function or something like it.
+
+// Return true if this string qualifies as an identifier (from the point of view of CSS syntax).
+static bool isLegalIdentifier(const DOMString &string)
+{
+    int len = string.length();
+    if (len == 0) {
+        return false;
+    }
+    QChar *p = string.unicode();
+    int i = 0;
+    if (p[0] == '-') {
+        ++i;
+    }
+    if (i == len) {
+        return false;
+    }
+    ushort code = p[i].unicode();
+    if (!(code >= 0x80 || code == '_' || isalpha(code))) {
+        return false;
+    }
+    ++i;
+    while (i != len) {
+        code = p[i].unicode();
+        if (!(code >= 0x80 || code == '-' || code == '_' || isalnum(code))) {
+            return false;
+        }
+        ++i;
+    }
+    return true;
+}
+
+#endif
+
+// Quotes the string if it needs quoting.
+// We use single quotes for now beause markup.cpp uses double quotes.
+static DOMString quoteStringIfNeeded(const DOMString &string)
+{
+    // For now, just do this for strings that start with "#" to fix Korean font names that start with "#".
+    // Post-Tiger, we should isLegalIdentifier instead after working out all the ancillary issues.
+    if (string[0] != '#') {
+        return string;
+    }
+
+    // FIXME: Also need to transform control characters into \ sequences.
+    QString s = string.string();
+    s.replace('\\', "\\\\");
+    s.replace('\'', "\\'");
+    return '\'' + s + '\'';
+}
 
 CSSStyleDeclarationImpl::CSSStyleDeclarationImpl(CSSRuleImpl *parent)
     : StyleBaseImpl(parent)
 {
-    m_lstValues = 0;
-    m_node = 0;
 }
 
-CSSStyleDeclarationImpl::CSSStyleDeclarationImpl(CSSRuleImpl *parent, QPtrList<CSSProperty> *lstValues)
-    : StyleBaseImpl(parent)
+bool CSSStyleDeclarationImpl::isStyleDeclaration()
 {
-    m_lstValues = lstValues;
-    m_node = 0;
+    return true;
 }
 
-CSSStyleDeclarationImpl&  CSSStyleDeclarationImpl::operator= (const CSSStyleDeclarationImpl& o)
+CSSMutableStyleDeclarationImpl::CSSMutableStyleDeclarationImpl()
+    : m_node(0)
+{
+}
+
+CSSMutableStyleDeclarationImpl::CSSMutableStyleDeclarationImpl(CSSRuleImpl *parent)
+    : CSSStyleDeclarationImpl(parent), m_node(0)
+{
+}
+
+CSSMutableStyleDeclarationImpl::CSSMutableStyleDeclarationImpl(CSSRuleImpl *parent, const QValueList<CSSProperty> &values)
+    : CSSStyleDeclarationImpl(parent), m_values(values), m_node(0)
+{
+    // FIXME: This allows duplicate properties.
+}
+
+CSSMutableStyleDeclarationImpl::CSSMutableStyleDeclarationImpl(CSSRuleImpl *parent, const CSSProperty * const *properties, int numProperties)
+    : CSSStyleDeclarationImpl(parent), m_node(0)
+{
+    for (int i = 0; i < numProperties; ++i)
+        m_values.append(*properties[i]);
+    // FIXME: This allows duplicate properties.
+}
+
+CSSMutableStyleDeclarationImpl& CSSMutableStyleDeclarationImpl::operator=(const CSSMutableStyleDeclarationImpl& o)
 {
     // don't attach it to the same node, just leave the current m_node value
-    delete m_lstValues;
-    m_lstValues = 0;
-    if (o.m_lstValues) {
-        m_lstValues = new QPtrList<CSSProperty>;
-        m_lstValues->setAutoDelete( true );
-
-        QPtrListIterator<CSSProperty> lstValuesIt(*o.m_lstValues);
-        for (lstValuesIt.toFirst(); lstValuesIt.current(); ++lstValuesIt)
-            m_lstValues->append(new CSSProperty(*lstValuesIt.current()));
-    }
-
+    m_values = o.m_values;
     return *this;
 }
 
-CSSStyleDeclarationImpl::~CSSStyleDeclarationImpl()
+CSSMutableStyleDeclarationImpl::~CSSMutableStyleDeclarationImpl()
 {
-    delete m_lstValues;
     // we don't use refcounting for m_node, to avoid cyclic references (see ElementImpl)
 }
 
-DOMString CSSStyleDeclarationImpl::getPropertyValue( int propertyID ) const
+DOMString CSSMutableStyleDeclarationImpl::getPropertyValue( int propertyID ) const
 {
-    if(!m_lstValues) return DOMString();
-
     CSSValueImpl* value = getPropertyCSSValue( propertyID );
-    if ( value )
-        return value->cssText();
+    if (value)
+        return CSSValue(value).cssText();
 
     // Shorthand and 4-values properties
     switch ( propertyID ) {
@@ -191,7 +253,7 @@ DOMString CSSStyleDeclarationImpl::getPropertyValue( int propertyID ) const
     return DOMString();
 }
 
-DOMString CSSStyleDeclarationImpl::get4Values( const int* properties ) const
+DOMString CSSMutableStyleDeclarationImpl::get4Values( const int* properties ) const
 {
     DOMString res;
     for ( int i = 0 ; i < 4 ; ++i ) {
@@ -199,62 +261,78 @@ DOMString CSSStyleDeclarationImpl::get4Values( const int* properties ) const
         if ( !value ) { // apparently all 4 properties must be specified.
             return DOMString();
         }
+        value->ref();
         if ( i > 0 )
             res += " ";
         res += value->cssText();
+        value->deref();
     }
     return res;
 }
 
-DOMString CSSStyleDeclarationImpl::getShortHandValue( const int* properties, int number ) const
+DOMString CSSMutableStyleDeclarationImpl::getShortHandValue( const int* properties, int number ) const
 {
     DOMString res;
     for ( int i = 0 ; i < number ; ++i ) {
         CSSValueImpl* value = getPropertyCSSValue( properties[i] );
         if ( value ) { // TODO provide default value if !value
+            value->ref();
             if ( !res.isNull() )
                 res += " ";
             res += value->cssText();
+            value->deref();
         }
     }
     return res;
 }
 
- CSSValueImpl *CSSStyleDeclarationImpl::getPropertyCSSValue( int propertyID ) const
+ CSSValueImpl *CSSMutableStyleDeclarationImpl::getPropertyCSSValue( int propertyID ) const
 {
-    if(!m_lstValues) return 0;
-
-    QPtrListIterator<CSSProperty> lstValuesIt(*m_lstValues);
-    CSSProperty *current;
-    for ( lstValuesIt.toLast(); (current = lstValuesIt.current()); --lstValuesIt )
-        if (current->m_id == propertyID)
-            return current->value();
+    QValueListConstIterator<CSSProperty> end;
+    for (QValueListConstIterator<CSSProperty> it = m_values.fromLast(); it != end; --it)
+        if (propertyID == (*it).m_id)
+            return (*it).value();
     return 0;
 }
 
-DOMString CSSStyleDeclarationImpl::removeProperty(int propertyID, bool notifyChanged)
+DOMString CSSMutableStyleDeclarationImpl::removeProperty(int propertyID, bool notifyChanged, int &exceptionCode)
 {
-    if(!m_lstValues) return DOMString();
+    if (m_node && !m_node->getDocument())
+        return ""; // FIXME: This (not well-understood) situation happens on albertsons.com.  We don't really know how they managed to run a script on a node
+                   // with no document pointer, but this sidesteps the crash.
+
+    exceptionCode = 0;
+
     DOMString value;
 
-    QPtrListIterator<CSSProperty> lstValuesIt(*m_lstValues);
-     CSSProperty *current;
-     for ( lstValuesIt.toLast(); (current = lstValuesIt.current()); --lstValuesIt )
-         if (current->m_id == propertyID) {
-             value = current->value()->cssText();
-             m_lstValues->removeRef(current);
-             if (notifyChanged)
-                 setChanged();
-	     break;
+    QValueListIterator<CSSProperty> end;
+    for (QValueListIterator<CSSProperty> it = m_values.fromLast(); it != end; --it)
+        if (propertyID == (*it).m_id) {
+            value = (*it).value()->cssText();
+            m_values.remove(it);
+            if (notifyChanged)
+                setChanged();
+            break;
         }
 
     return value;
 }
 
-void CSSStyleDeclarationImpl::setChanged()
+void CSSMutableStyleDeclarationImpl::clear()
+{
+    m_values.clear();
+    setChanged();
+}
+
+void CSSMutableStyleDeclarationImpl::setChanged()
 {
     if (m_node) {
         m_node->setChanged();
+        // FIXME: Ideally, this should be factored better and there
+        // should be a subclass of CSSMutableStyleDeclarationImpl just
+        // for inline style declarations that handles this
+        if (m_node->isHTMLElement() && this == static_cast<HTMLElementImpl *>(m_node)->inlineStyleDecl())
+            static_cast<HTMLElementImpl *>(m_node)->invalidateStyleAttribute();
         return;
     }
 
@@ -266,86 +344,89 @@ void CSSStyleDeclarationImpl::setChanged()
         }
 }
 
-bool CSSStyleDeclarationImpl::getPropertyPriority( int propertyID ) const
+bool CSSMutableStyleDeclarationImpl::getPropertyPriority(int propertyID) const
 {
-    if ( m_lstValues) {
-	QPtrListIterator<CSSProperty> lstValuesIt(*m_lstValues);
-	CSSProperty *current;
-	for ( lstValuesIt.toFirst(); (current = lstValuesIt.current()); ++lstValuesIt ) {
-	    if( propertyID == current->m_id )
-		return current->m_bImportant;
-	}
-    }
+    QValueListConstIterator<CSSProperty> end;
+    for (QValueListConstIterator<CSSProperty> it = m_values.begin(); it != end; ++it)
+        if (propertyID == (*it).m_id)
+            return (*it).m_bImportant;
     return false;
 }
 
-bool CSSStyleDeclarationImpl::setProperty(int id, const DOMString &value, bool important, bool notifyChanged)
+void CSSMutableStyleDeclarationImpl::setProperty(int propertyID, const DOMString &value, bool important, int &exceptionCode)
 {
-    if(!m_lstValues) {
-	m_lstValues = new QPtrList<CSSProperty>;
-	m_lstValues->setAutoDelete(true);
-    }
-    removeProperty(id);
+    setProperty(propertyID, value, important, true, exceptionCode);
+}
 
-    CSSParser parser( strictParsing );
-    bool success = parser.parseValue(this, id, value, important);
-    if(!success)
-	kdDebug( 6080 ) << "CSSStyleDeclarationImpl::setProperty invalid property: [" << getPropertyName(id).string()
+DOMString CSSMutableStyleDeclarationImpl::removeProperty(int propertyID, int &exceptionCode)
+{
+    return removeProperty(propertyID, true, exceptionCode);
+}
+
+bool CSSMutableStyleDeclarationImpl::setProperty(int propertyID, const DOMString &value, bool important, bool notifyChanged, int &exceptionCode)
+{
+    if (m_node && !m_node->getDocument())
+        return false; // FIXME: This (not well-understood) situation happens on albertsons.com.  We don't really know how they managed to run a script on a node
+                      // with no document pointer, but this sidesteps the crash.
+    exceptionCode = 0;
+
+    removeProperty(propertyID);
+
+    CSSParser parser(strictParsing);
+    bool success = parser.parseValue(this, propertyID, value, important);
+    if (!success) {
+#if !APPLE_CHANGES
+	kdDebug( 6080 ) << "CSSMutableStyleDeclarationImpl::setProperty invalid property: [" << getPropertyName(id).string()
 			<< "] value: [" << value.string() << "]"<< endl;
-    else if (notifyChanged)
+#endif
+        exceptionCode = CSSException::SYNTAX_ERR + CSSException::_EXCEPTION_OFFSET;
+    } else if (notifyChanged)
         setChanged();
     return success;
 }
 
-void CSSStyleDeclarationImpl::setProperty(int id, int value, bool important, bool notifyChanged)
+bool CSSMutableStyleDeclarationImpl::setProperty(int propertyID, int value, bool important, bool notifyChanged)
 {
-    if(!m_lstValues) {
-	m_lstValues = new QPtrList<CSSProperty>;
-	m_lstValues->setAutoDelete(true);
-    }
-    removeProperty(id);
-
-    CSSValueImpl * cssValue = new CSSPrimitiveValueImpl(value);
-    setParsedValue(id, cssValue, important, m_lstValues);
+    removeProperty(propertyID);
+    m_values.append(CSSProperty(propertyID, new CSSPrimitiveValueImpl(value), important));
     if (notifyChanged)
         setChanged();
+    return true;
 }
 
-void CSSStyleDeclarationImpl::setStringProperty(int propertyId, const DOMString &value, CSSPrimitiveValue::UnitTypes type, bool important)
+void CSSMutableStyleDeclarationImpl::setStringProperty(int propertyId, const DOMString &value, CSSPrimitiveValue::UnitTypes type, bool important)
 {
-    if (!m_lstValues) {
-	m_lstValues = new QPtrList<CSSProperty>;
-	m_lstValues->setAutoDelete(true);
-    }
     removeProperty(propertyId);
-    setParsedValue(propertyId, new CSSPrimitiveValueImpl(value, type), important, m_lstValues);
+    m_values.append(CSSProperty(propertyId, new CSSPrimitiveValueImpl(value, type), important));
     setChanged();
 }
 
-void CSSStyleDeclarationImpl::setImageProperty(int propertyId, const DOMString &URL, bool important)
+void CSSMutableStyleDeclarationImpl::setImageProperty(int propertyId, const DOMString &URL, bool important)
 {
-    if (!m_lstValues) {
-	m_lstValues = new QPtrList<CSSProperty>;
-	m_lstValues->setAutoDelete(true);
-    }
     removeProperty(propertyId);
-    setParsedValue(propertyId, new CSSImageValueImpl(URL, this), important, m_lstValues);
+    m_values.append(CSSProperty(propertyId, new CSSImageValueImpl(URL, this), important));
     setChanged();
 }
 
-void CSSStyleDeclarationImpl::setProperty ( const DOMString &propertyString)
+void CSSMutableStyleDeclarationImpl::parseDeclaration(const DOMString &styleDeclaration)
 {
-    if(!m_lstValues) {
-	m_lstValues = new QPtrList<CSSProperty>;
-	m_lstValues->setAutoDelete( true );
-    }
-
+    m_values.clear();
     CSSParser parser(strictParsing);
-    parser.parseDeclaration(this, propertyString);
+    parser.parseDeclaration(this, styleDeclaration);
     setChanged();
 }
 
-void CSSStyleDeclarationImpl::setLengthProperty(int id, const DOM::DOMString &value, bool important, bool _multiLength )
+void CSSMutableStyleDeclarationImpl::addParsedProperties(const CSSProperty * const *properties, int numProperties)
+{
+    for (int i = 0; i < numProperties; ++i) {
+        removeProperty(properties[i]->id(), false);
+        m_values.append(*properties[i]);
+    }
+    // FIXME: This probably should have a call to setChanged() if something changed. We may also wish to add
+    // a notifyChanged argument to this function to follow the model of other functions in this class.
+}
+
+void CSSMutableStyleDeclarationImpl::setLengthProperty(int id, const DOM::DOMString &value, bool important, bool _multiLength )
 {
     bool parseMode = strictParsing;
     strictParsing = false;
@@ -355,12 +436,12 @@ void CSSStyleDeclarationImpl::setLengthProperty(int id, const DOM::DOMString &va
     multiLength = false;
 }
 
-unsigned long CSSStyleDeclarationImpl::length() const
+unsigned long CSSMutableStyleDeclarationImpl::length() const
 {
-    return m_lstValues ? m_lstValues->count() : 0;
+    return m_values.count();
 }
 
-DOMString CSSStyleDeclarationImpl::item( unsigned long /*index*/ )
+DOMString CSSMutableStyleDeclarationImpl::item( unsigned long /*index*/ ) const
 {
     // ###
     //return m_lstValues->at(index);
@@ -373,50 +454,162 @@ CSSRuleImpl *CSSStyleDeclarationImpl::parentRule() const
 	static_cast<CSSRuleImpl *>(m_parent) : 0;
 }
 
-DOM::DOMString CSSStyleDeclarationImpl::cssText() const
+DOM::DOMString CSSMutableStyleDeclarationImpl::cssText() const
 {
-    DOMString result;
+    DOMString result = "";
     
-    if ( m_lstValues) {
-	QPtrListIterator<CSSProperty> lstValuesIt(*m_lstValues);
-	CSSProperty *current;
-	for ( lstValuesIt.toFirst(); (current = lstValuesIt.current()); ++lstValuesIt )
-	    result += current->cssText();
-    }
+    QValueListConstIterator<CSSProperty> end;
+    for (QValueListConstIterator<CSSProperty> it = m_values.begin(); it != end; ++it)
+        result += (*it).cssText();
 
     return result;
 }
 
-void CSSStyleDeclarationImpl::setCssText(const DOM::DOMString& text)
+void CSSMutableStyleDeclarationImpl::setCssText(const DOM::DOMString& text, int &exceptionCode)
 {
-    if (m_lstValues)
-        m_lstValues->clear();
-    else {
-	m_lstValues = new QPtrList<CSSProperty>;
-	m_lstValues->setAutoDelete(true);
-    }
-
+    exceptionCode = 0;
+    m_values.clear();
     CSSParser parser(strictParsing);
     parser.parseDeclaration(this, text);
+    // FIXME: Detect syntax errors and set exceptionCode.
     setChanged();
 }
 
-bool CSSStyleDeclarationImpl::parseString( const DOMString &/*string*/, bool )
+void CSSMutableStyleDeclarationImpl::merge(CSSMutableStyleDeclarationImpl *other, bool argOverridesOnConflict)
 {
-    return false;
-    // ###
+    QValueListConstIterator<CSSProperty> end;
+    for (QValueListConstIterator<CSSProperty> it = other->valuesIterator(); it != end; ++it) {
+        const CSSProperty &property = *it;
+        CSSValueImpl *value = getPropertyCSSValue(property.id());
+        if (value) {
+            value->ref();
+            value->deref();
+            if (!argOverridesOnConflict)
+                continue;
+            removeProperty(property.id());
+        }
+        m_values.append(property);
+    }
+    // FIXME: This probably should have a call to setChanged() if something changed. We may also wish to add
+    // a notifyChanged argument to this function to follow the model of other functions in this class.
+}
+
+void CSSStyleDeclarationImpl::diff(CSSMutableStyleDeclarationImpl *style) const
+{
+    if (!style)
+        return;
+
+    QValueList<int> properties;
+    QValueListConstIterator<CSSProperty> end;
+    for (QValueListConstIterator<CSSProperty> it(style->valuesIterator()); it != end; ++it) {
+        const CSSProperty &property = *it;
+        CSSValueImpl *value = getPropertyCSSValue(property.id());
+        if (value) {
+            value->ref();
+            if (value->cssText() == property.value()->cssText()) {
+                properties.append(property.id());
+            }
+            value->deref();
+        }
+    }
+    
+    for (QValueListIterator<int> it(properties.begin()); it != properties.end(); ++it)
+        style->removeProperty(*it);
+}
+
+// This is the list of properties we want to copy in the copyInheritableProperties() function.
+// It is the intersection of the list of inherited CSS properties and the
+// properties for which we have a computed implementation in this file.
+const int inheritableProperties[] = {
+    CSS_PROP_BORDER_COLLAPSE,
+    CSS_PROP_BORDER_SPACING,
+    CSS_PROP_COLOR,
+    CSS_PROP_FONT_FAMILY,
+    CSS_PROP_FONT_SIZE,
+    CSS_PROP_FONT_STYLE,
+    CSS_PROP_FONT_VARIANT,
+    CSS_PROP_FONT_WEIGHT,
+    CSS_PROP_LETTER_SPACING,
+    CSS_PROP_LINE_HEIGHT,
+    CSS_PROP_TEXT_ALIGN,
+    CSS_PROP__KHTML_TEXT_DECORATIONS_IN_EFFECT,
+    CSS_PROP_TEXT_INDENT,
+    CSS_PROP__APPLE_TEXT_SIZE_ADJUST,
+    CSS_PROP_TEXT_TRANSFORM,
+    CSS_PROP_ORPHANS,
+    CSS_PROP_WHITE_SPACE,
+    CSS_PROP_WIDOWS,
+    CSS_PROP_WORD_SPACING,
+};
+
+const unsigned numInheritableProperties = sizeof(inheritableProperties) / sizeof(inheritableProperties[0]);
+
+// This is the list of properties we want to copy in the copyBlockProperties() function.
+// It is the list of CSS properties that apply to specially to block-level elements.
+static const int blockProperties[] = {
+    CSS_PROP_ORPHANS,
+    CSS_PROP_OVERFLOW, // This can be also be applied to replaced elements
+    CSS_PROP_PAGE_BREAK_AFTER,
+    CSS_PROP_PAGE_BREAK_BEFORE,
+    CSS_PROP_PAGE_BREAK_INSIDE,
+    CSS_PROP_TEXT_ALIGN,
+    CSS_PROP_TEXT_INDENT,
+    CSS_PROP_WIDOWS
+};
+
+const unsigned numBlockProperties = sizeof(blockProperties) / sizeof(blockProperties[0]);
+
+CSSMutableStyleDeclarationImpl *CSSMutableStyleDeclarationImpl::copyBlockProperties() const
+{
+    return copyPropertiesInSet(blockProperties, numBlockProperties);
+}
+
+void CSSMutableStyleDeclarationImpl::removeBlockProperties()
+{
+    removePropertiesInSet(blockProperties, numBlockProperties);
+}
+
+void CSSMutableStyleDeclarationImpl::removeInheritableProperties()
+{
+    removePropertiesInSet(inheritableProperties, numInheritableProperties);
+}
+
+CSSMutableStyleDeclarationImpl *CSSStyleDeclarationImpl::copyPropertiesInSet(const int *set, unsigned length) const
+{
+    QValueList<CSSProperty> list;
+    for (unsigned i = 0; i < length; i++) {
+        CSSValueImpl *value = getPropertyCSSValue(set[i]);
+        if (value)
+            list.append(CSSProperty(set[i], value, false));
+    }
+    return new CSSMutableStyleDeclarationImpl(0, list);
+}
+
+void CSSMutableStyleDeclarationImpl::removePropertiesInSet(const int *set, unsigned length)
+{
+    bool changed = false;
+    for (unsigned i = 0; i < length; i++) {
+        CSSValueImpl *value = getPropertyCSSValue(set[i]);
+        if (value) {
+            m_values.remove(CSSProperty(set[i], value, false));
+            changed = true;
+        }
+    }
+    if (changed)
+        setChanged();
+}
+
+CSSMutableStyleDeclarationImpl *CSSMutableStyleDeclarationImpl::makeMutable()
+{
+    return this;
+}
+
+CSSMutableStyleDeclarationImpl *CSSMutableStyleDeclarationImpl::copy() const
+{
+    return new CSSMutableStyleDeclarationImpl(0, m_values);
 }
 
 // --------------------------------------------------------------------------------------
-
-CSSValueImpl::CSSValueImpl()
-    : StyleBaseImpl()
-{
-}
-
-CSSValueImpl::~CSSValueImpl()
-{
-}
 
 unsigned short CSSInheritedValueImpl::cssValueType() const
 {
@@ -441,7 +634,6 @@ DOM::DOMString CSSInitialValueImpl::cssText() const
 // ----------------------------------------------------------------------------------------
 
 CSSValueListImpl::CSSValueListImpl()
-    : CSSValueImpl()
 {
 }
 
@@ -470,6 +662,9 @@ DOM::DOMString CSSValueListImpl::cssText() const
     DOMString result = "";
 
     for (QPtrListIterator<CSSValueImpl> iterator(m_values); iterator.current(); ++iterator) {
+	if (result.length() != 0) {
+	    result += ", ";
+	}
 	result += iterator.current()->cssText();
     }
     
@@ -520,6 +715,14 @@ CSSPrimitiveValueImpl::CSSPrimitiveValueImpl( RectImpl *r)
     m_type = CSSPrimitiveValue::CSS_RECT;
 }
 
+CSSPrimitiveValueImpl::CSSPrimitiveValueImpl( DashboardRegionImpl *r)
+{
+    m_value.region = r;
+    if (m_value.region)
+	m_value.region->ref();
+    m_type = CSSPrimitiveValue::CSS_DASHBOARD_REGION;
+}
+
 CSSPrimitiveValueImpl::CSSPrimitiveValueImpl(QRgb color)
 {
     m_value.rgbcolor = color;
@@ -537,13 +740,18 @@ void CSSPrimitiveValueImpl::cleanup()
     case CSSPrimitiveValue::CSS_STRING:
     case CSSPrimitiveValue::CSS_URI:
     case CSSPrimitiveValue::CSS_ATTR:
-	if(m_value.string) m_value.string->deref();
+        if(m_value.string) m_value.string->deref();
         break;
     case CSSPrimitiveValue::CSS_COUNTER:
-	m_value.counter->deref();
+        m_value.counter->deref();
         break;
     case CSSPrimitiveValue::CSS_RECT:
-	m_value.rect->deref();
+        m_value.rect->deref();
+        break;
+    case CSSPrimitiveValue::CSS_DASHBOARD_REGION:
+        if (m_value.region)
+            m_value.region->deref();
+        break;
     default:
         break;
     }
@@ -669,6 +877,23 @@ void CSSPrimitiveValueImpl::setStringValue( unsigned short stringType, const DOM
     // ### parse ident
 }
 
+DOMString CSSPrimitiveValueImpl::getStringValue() const
+{
+    switch (m_type) {
+        case CSSPrimitiveValue::CSS_STRING:
+        case CSSPrimitiveValue::CSS_ATTR:
+        case CSSPrimitiveValue::CSS_URI:
+            return m_value.string;
+        case CSSPrimitiveValue::CSS_IDENT:
+            return getValueName(m_value.ident);
+        default:
+            // FIXME: The CSS 2.1 spec says you should throw an exception here.
+            break;
+    }
+    
+    return DOMString();
+}
+
 unsigned short CSSPrimitiveValueImpl::cssValueType() const
 {
     return CSSValue::CSS_PRIMITIVE_VALUE;
@@ -696,7 +921,7 @@ DOM::DOMString CSSPrimitiveValueImpl::cssText() const
 	    // ###
 	    break;
 	case CSSPrimitiveValue::CSS_NUMBER:
-	    text = DOMString(QString::number( (int)m_value.num ));
+	    text = DOMString(QString::number( m_value.num ));
 	    break;
 	case CSSPrimitiveValue::CSS_PERCENTAGE:
 	    text = DOMString(QString::number( m_value.num ) + "%");
@@ -750,7 +975,7 @@ DOM::DOMString CSSPrimitiveValueImpl::cssText() const
 	    // ###
 	    break;
 	case CSSPrimitiveValue::CSS_STRING:
-	    text = DOMString(m_value.string);
+	    text = quoteStringIfNeeded(m_value.string);
 	    break;
 	case CSSPrimitiveValue::CSS_URI:
             text  = "url(";
@@ -768,30 +993,51 @@ DOM::DOMString CSSPrimitiveValueImpl::cssText() const
 	    break;
         case CSSPrimitiveValue::CSS_RECT: {
 	    RectImpl* rectVal = getRectValue();
-        text = "rect(";
-        text += rectVal->top()->cssText() + " ";
-        text += rectVal->right()->cssText() + " ";
-        text += rectVal->bottom()->cssText() + " ";
-        text += rectVal->left()->cssText() + ")";
+            text = "rect(";
+            text += rectVal->top()->cssText() + " ";
+            text += rectVal->right()->cssText() + " ";
+            text += rectVal->bottom()->cssText() + " ";
+            text += rectVal->left()->cssText() + ")";
 	    break;
         }
-	case CSSPrimitiveValue::CSS_RGBCOLOR:
-    {
-        QColor color(m_value.rgbcolor);
-        if (qAlpha(m_value.rgbcolor))
-            text = "rgba(";
-        else
-            text = "rgb(";
-        text += QString::number(color.red()) + ", ";
-        text += QString::number(color.green()) + ", ";
-        text += QString::number(color.blue());
-        if (qAlpha(m_value.rgbcolor))
-            text += ", " + QString::number((float)qAlpha(m_value.rgbcolor) / 0xFF);
-	    text += ")";
-	    break;
-	}
-    default:
-	    break;
+	case CSSPrimitiveValue::CSS_RGBCOLOR: {
+            QColor color(m_value.rgbcolor);
+            if (qAlpha(m_value.rgbcolor) < 0xFF)
+                text = "rgba(";
+            else
+                text = "rgb(";
+            text += QString::number(color.red()) + ", ";
+            text += QString::number(color.green()) + ", ";
+            text += QString::number(color.blue());
+            if (qAlpha(m_value.rgbcolor) < 0xFF)
+                text += ", " + QString::number((float)qAlpha(m_value.rgbcolor) / 0xFF);
+            text += ")";
+            break;
+        }
+#if APPLE_CHANGES        
+        case CSSPrimitiveValue::CSS_DASHBOARD_REGION: {
+            DashboardRegionImpl *region = getDashboardRegionValue();
+            while (region) {
+                text = "dashboard-region(";
+                text += region->m_label;
+                if (region->m_isCircle){
+                    text += " circle ";
+                }
+                else if (region->m_isRectangle){
+                    text += " rectangle ";
+                }
+                else
+                    break;
+                text += region->top()->cssText() + " ";
+                text += region->right()->cssText() + " ";
+                text += region->bottom()->cssText() + " ";
+                text += region->left()->cssText();
+                text += ")";
+                region = region->m_next;
+            }
+            break;
+        }
+#endif
     }
     return text;
 }
@@ -926,7 +1172,7 @@ FontFamilyValueImpl::FontFamilyValueImpl( const QString &string)
 
 DOM::DOMString FontFamilyValueImpl::cssText() const
 {
-    return parsedFontName;
+    return quoteStringIfNeeded(parsedFontName);
 }
 
 FontValueImpl::FontValueImpl()
@@ -1064,4 +1310,11 @@ DOMString FlexGroupTransitionValueImpl::cssText() const
 DOMString CSSProperty::cssText() const
 {
     return getPropertyName(m_id) + DOMString(": ") + m_value->cssText() + (m_bImportant ? DOMString(" !important") : DOMString()) + DOMString("; ");
+}
+
+bool operator==(const CSSProperty &a, const CSSProperty &b)
+{
+    return a.m_id == b.m_id && a.m_bImportant == b.m_bImportant && a.m_value == b.m_value;
+}
+
 }

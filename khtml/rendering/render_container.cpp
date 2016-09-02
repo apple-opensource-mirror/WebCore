@@ -45,7 +45,7 @@ using DOM::Position;
 using namespace khtml;
 
 RenderContainer::RenderContainer(DOM::NodeImpl* node)
-    : RenderObject(node)
+    : RenderBox(node)
 {
     m_first = 0;
     m_last = 0;
@@ -61,17 +61,14 @@ void RenderContainer::detach()
     if (continuation())
         continuation()->detach();
     
-    RenderObject* next;
-    for(RenderObject* n = m_first; n; n = next ) {
-        n->removeFromObjectLists();
-        n->setParent(0);
-        next = n->nextSibling();
-        n->detach();
+    while (m_first) {
+        if (m_first->isListMarker())
+            m_first->remove();
+        else
+            m_first->detach();
     }
-    m_first = 0;
-    m_last = 0;
 
-    RenderObject::detach();
+    RenderBox::detach();
 }
 
 bool RenderContainer::canHaveChildren() const
@@ -181,14 +178,8 @@ RenderObject* RenderContainer::removeChildNode(RenderObject* oldChild)
         // or end of the selection is deleted and then accessed when the user next selects
         // something.
     
-        if (oldChild->isSelectionBorder()) {
-            RenderObject *root = oldChild;
-            while (root && root->parent())
-                root = root->parent();
-            if (root->isCanvas()) {
-                static_cast<RenderCanvas*>(root)->clearSelection();
-            }
-        }
+        if (oldChild->isSelectionBorder())
+            canvas()->clearSelection();
     }
     
     // remove the child
@@ -207,9 +198,8 @@ RenderObject* RenderContainer::removeChildNode(RenderObject* oldChild)
     oldChild->setParent(0);
 
 #if APPLE_CHANGES
-    KWQAccObjectCache* cache = document()->getExistingAccObjectCache();
-    if (cache)
-        cache->childrenChanged(this);
+    if (KWQAccObjectCache::accessibilityEnabled())
+        document()->getAccObjectCache()->childrenChanged(this);
 #endif
     
     return oldChild;
@@ -327,7 +317,6 @@ void RenderContainer::updatePseudoChild(RenderStyle::PseudoId type, RenderObject
         // Add the pseudo after we've installed all our content, so that addChild will be able to find the text
         // inside the inline for e.g., first-letter styling.
         addChild(pseudoContainer, insertBefore);
-        pseudoContainer->close();
     }
 }
 
@@ -364,9 +353,8 @@ void RenderContainer::appendChildNode(RenderObject* newChild)
         dirtyLinesFromChangedChild(newChild);
     
 #if APPLE_CHANGES
-    KWQAccObjectCache* cache = document()->getExistingAccObjectCache();
-    if (cache)
-        cache->childrenChanged(this);
+    if (KWQAccObjectCache::accessibilityEnabled())
+        document()->getAccObjectCache()->childrenChanged(this);
 #endif
 }
 
@@ -405,12 +393,10 @@ void RenderContainer::insertChildNode(RenderObject* child, RenderObject* beforeC
         dirtyLinesFromChangedChild(child);
     
 #if APPLE_CHANGES
-    KWQAccObjectCache* cache = document()->getExistingAccObjectCache();
-    if (cache)
-        cache->childrenChanged(this);
+    if (KWQAccObjectCache::accessibilityEnabled())
+        document()->getAccObjectCache()->childrenChanged(this);
 #endif    
 }
-
 
 void RenderContainer::layout()
 {
@@ -475,16 +461,19 @@ void RenderContainer::removeLeftoverAnonymousBoxes()
 	parent()->removeLeftoverAnonymousBoxes();
 }
 
-Position RenderContainer::positionForCoordinates(int _x, int _y)
+VisiblePosition RenderContainer::positionForCoordinates(int _x, int _y)
 {
     // no children...return this render object's element, if there is one, and offset 0
     if (!firstChild())
-        return Position(element(), 0);
+        return VisiblePosition(element(), 0, DOWNSTREAM);
 
     // look for the geometrically-closest child and pass off to that child
     int min = INT_MAX;
-    RenderObject *closestRenderer = firstChild();
+    RenderObject *closestRenderer = 0;
     for (RenderObject *renderer = firstChild(); renderer; renderer = renderer->nextSibling()) {
+        if (!renderer->firstChild() && !renderer->isInline() && !renderer->isBlockFlow())
+            continue;
+
         int absx, absy;
         renderer->absolutePosition(absx, absy);
         
@@ -499,8 +488,11 @@ Position RenderContainer::positionForCoordinates(int _x, int _y)
         cmp = abs(_x - left);   if (cmp < min) { closestRenderer = renderer; min = cmp; }
         cmp = abs(_x - right);  if (cmp < min) { closestRenderer = renderer; min = cmp; }
     }
-
-    return closestRenderer->positionForCoordinates(_x, _y);
+    
+    if (closestRenderer)
+        return closestRenderer->positionForCoordinates(_x, _y);
+    
+    return VisiblePosition(element(), 0, DOWNSTREAM);
 }
     
 #undef DEBUG_LAYOUT

@@ -59,6 +59,7 @@ HTMLAppletElementImpl::HTMLAppletElementImpl(DocumentPtr *doc)
   : HTMLElementImpl(doc)
 {
     appletInstance = 0;
+    m_allParamsAvailable = false;
 }
 
 HTMLAppletElementImpl::~HTMLAppletElementImpl()
@@ -203,19 +204,34 @@ KJS::Bindings::Instance *HTMLAppletElementImpl::getAppletInstance() const
         r->createWidgetIfNecessary();
         if (r->widget()){
             // Call into the part (and over the bridge) to pull the Bindings::Instance
-            // from the guts of the Java VM.
+            // from the guts of the plugin.
             void *_view = r->widget()->getView();
             appletInstance = KWQ(part)->getAppletInstanceForView((NSView *)_view);
         }
     }
     return appletInstance;
 }
+
+void HTMLAppletElementImpl::closeRenderer()
+{
+    // The parser just reached </applet>, so all the params are available now.
+    m_allParamsAvailable = true;
+    if( m_render )
+        m_render->setNeedsLayout(true); // This will cause it to create its widget & the Java applet
+    
+    HTMLElementImpl::closeRenderer();
+}
+
+bool HTMLAppletElementImpl::allParamsAvailable()
+{
+    return m_allParamsAvailable;
+}
 #endif
 
 // -------------------------------------------------------------------------
 
 HTMLEmbedElementImpl::HTMLEmbedElementImpl(DocumentPtr *doc)
-    : HTMLElementImpl(doc)
+    : HTMLElementImpl(doc), embedInstance(0)
 {}
 
 HTMLEmbedElementImpl::~HTMLEmbedElementImpl()
@@ -244,6 +260,9 @@ KJS::Bindings::Instance *HTMLEmbedElementImpl::getEmbedInstance() const
             // from the guts of the Java VM.
             void *_view = r->widget()->getView();
             embedInstance = KWQ(part)->getEmbedInstanceForView((NSView *)_view);
+            // Applet may specified with <embed> tag.
+            if (!embedInstance)
+                embedInstance = KWQ(part)->getAppletInstanceForView((NSView *)_view);
         }
     }
     return embedInstance;
@@ -362,7 +381,11 @@ bool HTMLEmbedElementImpl::isURLAttribute(AttributeImpl *attr) const
 // -------------------------------------------------------------------------
 
 HTMLObjectElementImpl::HTMLObjectElementImpl(DocumentPtr *doc) 
+#if APPLE_CHANGES
+: HTMLElementImpl(doc), m_imageLoader(0), objectInstance(0)
+#else
 : HTMLElementImpl(doc), m_imageLoader(0)
+#endif
 {
     needWidgetUpdate = false;
 }
@@ -376,6 +399,32 @@ NodeImpl::Id HTMLObjectElementImpl::id() const
 {
     return ID_OBJECT;
 }
+
+#if APPLE_CHANGES
+KJS::Bindings::Instance *HTMLObjectElementImpl::getObjectInstance() const
+{
+    KHTMLPart* part = getDocument()->part();
+    if (!part)
+        return 0;
+
+    if (objectInstance)
+        return objectInstance;
+    
+    RenderPartObject *r = static_cast<RenderPartObject*>(m_render);
+    if (r) {
+        if (r->widget()){
+            // Call into the part (and over the bridge) to pull the Bindings::Instance
+            // from the guts of the plugin.
+            void *_view = r->widget()->getView();
+            objectInstance = KWQ(part)->getObjectInstanceForView((NSView *)_view);
+            // Applet may specified with <object> tag.
+            if (!objectInstance)
+                objectInstance = KWQ(part)->getAppletInstanceForView((NSView *)_view);
+        }
+    }
+    return objectInstance;
+}
+#endif
 
 HTMLFormElementImpl *HTMLObjectElementImpl::form() const
 {
@@ -407,7 +456,8 @@ void HTMLObjectElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
       pos = serviceType.find( ";" );
       if ( pos!=-1 )
           serviceType = serviceType.left( pos );
-      needWidgetUpdate = true;
+      if (m_render)
+          needWidgetUpdate = true;
       if (!canRenderImageType(serviceType) && m_imageLoader) {
           delete m_imageLoader;
           m_imageLoader = 0;
@@ -415,7 +465,8 @@ void HTMLObjectElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
       break;
     case ATTR_DATA:
       url = khtml::parseURL(  val ).string();
-      needWidgetUpdate = true;
+      if (m_render)
+          needWidgetUpdate = true;
       if (m_render && canRenderImageType(serviceType)) {
           if (!m_imageLoader)
               m_imageLoader = new HTMLImageLoader(this);
@@ -430,15 +481,16 @@ void HTMLObjectElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
       break;
     case ATTR_CLASSID:
       classId = val;
-      needWidgetUpdate = true;
+      if (m_render)
+          needWidgetUpdate = true;
       break;
     case ATTR_ONLOAD: // ### support load/unload on object elements
         setHTMLEventListener(EventImpl::LOAD_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     case ATTR_ONUNLOAD:
         setHTMLEventListener(EventImpl::UNLOAD_EVENT,
-	    getDocument()->createHTMLEventListener(attr->value().string()));
+	    getDocument()->createHTMLEventListener(attr->value().string(), this));
         break;
     default:
       HTMLElementImpl::parseHTMLAttribute( attr );
@@ -496,17 +548,18 @@ void HTMLObjectElementImpl::attach()
                 imageObj->setImage(m_imageLoader->image());
             }
         } else {
-            // If we are already cleared, then it means that we were attach()-ed previously
-            // with no renderer. We will actually need to do an update in order to ensure
-            // that the plugin shows up.  This fix is necessary to work with async
-            // render tree construction caused by stylesheet loads. -dwh
-            needWidgetUpdate = false;
+            if (needWidgetUpdate) {
+                // Set needWidgetUpdate to false before calling updateWidget because updateWidget may cause
+                // this method or recalcStyle (which also calls updateWidget) to be called.
+                needWidgetUpdate = false;
+                static_cast<RenderPartObject*>(m_render)->updateWidget();
+                dispatchHTMLEvent(EventImpl::LOAD_EVENT,false,false);
+            } else {
+                needWidgetUpdate = true;
+                setChanged();
+            }
         }
     }
-
-    // ### do this when we are actually finished loading instead
-    if (m_render)
-        dispatchHTMLEvent(EventImpl::LOAD_EVENT,false,false);
 }
 
 void HTMLObjectElementImpl::detach()
@@ -519,14 +572,24 @@ void HTMLObjectElementImpl::detach()
   HTMLElementImpl::detach();
 }
 
-void HTMLObjectElementImpl::recalcStyle( StyleChange ch )
+void HTMLObjectElementImpl::recalcStyle(StyleChange ch)
 {
-    if (needWidgetUpdate) {
-        if(m_render && std::strcmp( m_render->renderName(),  "RenderPartObject" ) == 0 )
-            static_cast<RenderPartObject*>(m_render)->updateWidget();
+    if (needWidgetUpdate && m_render && !canRenderImageType(serviceType)) {
+        // Set needWidgetUpdate to false before calling updateWidget because updateWidget may cause
+        // this method or attach (which also calls updateWidget) to be called.
         needWidgetUpdate = false;
+        static_cast<RenderPartObject*>(m_render)->updateWidget();
+        dispatchHTMLEvent(EventImpl::LOAD_EVENT,false,false);
     }
-    HTMLElementImpl::recalcStyle( ch );
+    HTMLElementImpl::recalcStyle(ch);
+}
+
+void HTMLObjectElementImpl::childrenChanged()
+{
+    if (inDocument()) {
+        needWidgetUpdate = true;
+        setChanged();
+    }
 }
 
 bool HTMLObjectElementImpl::isURLAttribute(AttributeImpl *attr) const

@@ -70,6 +70,8 @@ public:
     virtual long caretMinOffset() const;
     virtual long caretMaxOffset() const;
     virtual unsigned long caretMaxRenderedOffset() const;
+
+    virtual bool rendererIsNeeded(khtml::RenderStyle *);
     
 #ifndef NDEBUG
     virtual void dump(QTextStream *stream, QString ind = "") const;
@@ -141,6 +143,10 @@ public:
 
 #if APPLE_CHANGES
     static Text createInstance(TextImpl *impl);
+#endif
+
+#ifndef NDEBUG
+    virtual void formatForDebugger(char *buffer, unsigned length) const;
 #endif
 
 protected:

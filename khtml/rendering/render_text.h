@@ -32,12 +32,14 @@
 
 #include <qptrvector.h>
 #include <assert.h>
+#include "KWQKHTMLPart.h"
 
 class QPainter;
 class QFontMetrics;
 
 namespace DOM {
     class Position;
+    class DocumentMarker;
 };
 
 // Define a constant for soft hyphen's unicode value.
@@ -60,6 +62,7 @@ public:
         m_start = 0;
         m_len = 0;
         m_reversed = false;
+        m_treatAsText = true;
         m_toAdd = 0;
         m_truncation = cNoTruncation;
     }
@@ -75,9 +78,20 @@ public:
 
     void detach(RenderArena* arena);
     
+    QRect selectionRect(int absx, int absy, int startPos, int endPos);
+    bool isSelected(int startPos, int endPos) const;
+    void selectionStartEnd(int& sPos, int& ePos);
+    
+    virtual void paint(RenderObject::PaintInfo& i, int tx, int ty);
+    virtual bool nodeAtPoint(RenderObject::NodeInfo& i, int x, int y, int tx, int ty);
+
+    RenderText* textObject();
+    
     virtual void deleteLine(RenderArena* arena);
     virtual void extractLine();
     virtual void attachLine();
+
+    virtual RenderObject::SelectionState selectionState();
 
     virtual void clearTruncation() { m_truncation = cNoTruncation; }
     virtual int placeEllipsisBox(bool ltr, int blockEdge, int ellipsisWidth, bool& foundBox);
@@ -97,11 +111,15 @@ public:
     void setSpaceAdd(int add) { m_width -= m_toAdd; m_toAdd = add; m_width += m_toAdd; }
     int spaceAdd() { return m_toAdd; }
 
-    virtual bool isInlineTextBox() { return true; }
+    virtual bool isInlineTextBox() { return true; }    
+    virtual bool isText() const { return m_treatAsText; }
+    void setIsText(bool b) { m_treatAsText = b; }
     
-    void paintDecoration( QPainter *pt, int _tx, int _ty, int decoration);
-    void paintSelection(const Font *f, RenderText *text, QPainter *p, RenderStyle* style, int tx, int ty, int startPos, int endPos, bool extendSelection);
-
+    void paintDecoration(QPainter* p, int _tx, int _ty, int decoration);
+    void paintSelection(QPainter* p, int tx, int ty, RenderStyle* style, const Font* font);
+    void paintMarkedTextBackground(QPainter* p, int tx, int ty, RenderStyle* style, const Font* font, int startPos, int endPos);
+    void paintMarker(QPainter* p, int _tx, int _ty, DOM::DocumentMarker marker);
+    void paintMarkedTextUnderline(QPainter *pt, int _tx, int _ty, KWQKHTMLPart::MarkedTextUnderline underline);
     virtual long caretMinOffset() const;
     virtual long caretMaxOffset() const;
     virtual unsigned long caretMaxRenderedOffset() const;
@@ -113,8 +131,7 @@ public:
      * of a view, would the @ref _y -coordinate be inside the vertical range
      * of this object's representation?
      */
-    bool checkVerticalPoint(int _y, int _ty, int _h)
-    { if((_ty + m_y > _y + _h) || (_ty + m_y + m_baseline + height() < _y)) return false; return true; }
+    bool checkVerticalPoint(int _y, int _ty, int _h);
 
     int m_start;
     unsigned short m_len;
@@ -123,7 +140,9 @@ public:
                       // denote no truncation (the whole run paints) and full truncation (nothing paints at all).
 
     bool m_reversed : 1;
+    bool m_treatAsText : 1; // Whether or not to treat a <br> as text for the purposes of line height.
     int m_toAdd : 14; // for justified text
+
 private:
     friend class RenderText;
 };
@@ -142,8 +161,6 @@ public:
     virtual const char *renderName() const { return "RenderText"; }
 
     virtual void setStyle(RenderStyle *style);
-    
-    virtual void paint(PaintInfo& i, int tx, int ty);
 
     void extractTextBox(InlineTextBox* textBox);
     void attachTextBox(InlineTextBox* textBox);
@@ -157,14 +174,15 @@ public:
     virtual InlineBox* createInlineBox(bool,bool, bool isOnlyRun = false);
     virtual void dirtyLineBoxes(bool fullLayout, bool isRootInlineBox = false);
     
-    virtual void layout() {assert(false);}
+    virtual void paint(PaintInfo& i, int tx, int ty) { assert(false); }
+    virtual void layout() { assert(false); }
 
     virtual bool nodeAtPoint(NodeInfo& info, int x, int y, int tx, int ty,
-                             HitTestAction hitTestAction = HitTestAll, bool inside=false);
+                             HitTestAction hitTestAction) { assert(false); return false; }
 
     virtual void absoluteRects(QValueList<QRect>& rects, int _tx, int _ty);
 
-    virtual DOM::Position positionForCoordinates(int _x, int _y);
+    virtual VisiblePosition positionForCoordinates(int x, int y);
 
     unsigned int length() const { return str->l; }
     QChar *text() const { return str->s; }
@@ -205,13 +223,15 @@ public:
     void setText(DOM::DOMStringImpl *text, bool force=false);
     void setTextWithOffset(DOM::DOMStringImpl *text, uint offset, uint len, bool force=false);
 
+    virtual bool canBeSelectionLeaf() const { return true; }
     virtual SelectionState selectionState() const {return m_selectionState;}
-    virtual void setSelectionState(SelectionState s) {m_selectionState = s; }
-    virtual void caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height);
+    virtual void setSelectionState(SelectionState s);
+    virtual QRect selectionRect();
+    virtual QRect caretRect(int offset, EAffinity affinity, int *extraWidthToEndOfLine = 0);
     void posOfChar(int ch, int &x, int &y);
 
-    virtual short marginLeft() const { return style()->marginLeft().minWidth(0); }
-    virtual short marginRight() const { return style()->marginRight().minWidth(0); }
+    virtual int marginLeft() const { return style()->marginLeft().minWidth(0); }
+    virtual int marginRight() const { return style()->marginRight().minWidth(0); }
 
     virtual QRect getAbsoluteRepaintRect();
 
@@ -224,7 +244,7 @@ public:
     InlineTextBox* firstTextBox() const { return m_firstTextBox; }
     InlineTextBox* lastTextBox() const { return m_lastTextBox; }
     
-    virtual InlineBox *inlineBox(long offset);
+    virtual InlineBox *inlineBox(long offset, EAffinity affinity = UPSTREAM);
 
 #if APPLE_CHANGES
     int widthFromCache(const Font *, int start, int len) const;
@@ -236,11 +256,14 @@ public:
     virtual long caretMinOffset() const;
     virtual long caretMaxOffset() const;
     virtual unsigned long caretMaxRenderedOffset() const;
+
+    virtual long previousOffset (long current) const;
+    virtual long nextOffset (long current) const;
     
 #if APPLE_CHANGES
 public:
 #endif
-    InlineTextBox * findNextInlineTextBox( int offset, int &pos );
+    InlineTextBox * findNextInlineTextBox( int offset, int &pos ) const;
 
 protected: // members
     DOM::DOMStringImpl *str;

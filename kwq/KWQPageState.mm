@@ -50,13 +50,20 @@ using KJS::SavedBuiltins;
     doc->ref();
     document = doc;
     document->setInPageCache(YES);
+    parseMode = document->parseMode();
     document->view()->ref();
+    mousePressNode = static_cast<KWQKHTMLPart *>(document->part())->mousePressNode();
+    if (mousePressNode) {
+        mousePressNode->ref();
+    }
     URL = new KURL(u);
     windowProperties = wp;
     locationProperties = lp;
     interpreterBuiltins = ib;
     return self;
 }
+
+- (DOM::DocumentImpl::ParseMode)parseMode { return parseMode; }
 
 - (void)setPausedActions: (QMap<int, KJS::ScheduledAction*> *)pa
 {
@@ -85,6 +92,7 @@ using KJS::SavedBuiltins;
 - (void)clear
 {
     document = 0;
+    mousePressNode = 0;
 
     delete URL;
     URL = 0;
@@ -101,11 +109,14 @@ using KJS::SavedBuiltins;
 {
     // Should only ever invalidate once.
     ASSERT(document);
+    ASSERT(document->view());
     ASSERT(!document->inPageCache());
 
-    document->view()->deref();
-    document->deref();
-
+    if (document && document->view()) {
+        document->view()->deref();
+        document->deref();
+    }
+    
     [self clear];
 }
 
@@ -125,6 +136,10 @@ using KJS::SavedBuiltins;
             document->detach();
         }
         document->deref();
+        
+        if (mousePressNode) {
+            mousePressNode->deref();
+        }
         
         if (view) {
             view->clearPart();
@@ -171,6 +186,11 @@ using KJS::SavedBuiltins;
 - (DocumentImpl *)document
 {
     return document;
+}
+
+- (DOM::NodeImpl *)mousePressNode
+{
+    return mousePressNode;
 }
 
 - (KURL *)URL

@@ -79,12 +79,80 @@ if (isInherit) \
 #define HANDLE_INHERIT_AND_INITIAL(prop, Prop) \
 HANDLE_INHERIT(prop, Prop) \
 else if (isInitial) \
-    style->set##Prop(RenderStyle::initial##Prop());
+{\
+    style->set##Prop(RenderStyle::initial##Prop());\
+    return;\
+}
 
 #define HANDLE_INHERIT_AND_INITIAL_WITH_VALUE(prop, Prop, Value) \
 HANDLE_INHERIT(prop, Prop) \
 else if (isInitial) \
-    style->set##Prop(RenderStyle::initial##Value());
+{\
+    style->set##Prop(RenderStyle::initial##Value());\
+    return;\
+}
+
+#define HANDLE_BACKGROUND_INHERIT_AND_INITIAL(prop, Prop) \
+if (isInherit) { \
+    BackgroundLayer* currChild = style->accessBackgroundLayers(); \
+    BackgroundLayer* prevChild = 0; \
+    const BackgroundLayer* currParent = parentStyle->backgroundLayers(); \
+    while (currParent && currParent->is##Prop##Set()) { \
+        if (!currChild) { \
+            /* Need to make a new layer.*/ \
+            currChild = new BackgroundLayer(); \
+            prevChild->setNext(currChild); \
+        } \
+        currChild->set##Prop(currParent->prop()); \
+        prevChild = currChild; \
+        currChild = prevChild->next(); \
+        currParent = currParent->next(); \
+    } \
+    \
+    while (currChild) { \
+        /* Reset any remaining layers to not have the property set. */ \
+        currChild->clear##Prop(); \
+        currChild = currChild->next(); \
+    } \
+    return; \
+} \
+if (isInitial) { \
+    BackgroundLayer* currChild = style->accessBackgroundLayers(); \
+    currChild->set##Prop(RenderStyle::initial##Prop()); \
+    for (currChild = currChild->next(); currChild; currChild = currChild->next()) \
+        currChild->clear##Prop(); \
+    return; \
+}
+
+#define HANDLE_BACKGROUND_VALUE(prop, Prop, value) { \
+HANDLE_BACKGROUND_INHERIT_AND_INITIAL(prop, Prop) \
+if (!value->isPrimitiveValue() && !value->isValueList()) \
+    return; \
+BackgroundLayer* currChild = style->accessBackgroundLayers(); \
+BackgroundLayer* prevChild = 0; \
+if (value->isPrimitiveValue()) { \
+    map##Prop(currChild, value); \
+    currChild = currChild->next(); \
+} \
+else { \
+    /* Walk each value and put it into a layer, creating new layers as needed. */ \
+    CSSValueListImpl* valueList = static_cast<CSSValueListImpl*>(value); \
+    for (unsigned int i = 0; i < valueList->length(); i++) { \
+        if (!currChild) { \
+            /* Need to make a new layer to hold this value */ \
+            currChild = new BackgroundLayer(); \
+            prevChild->setNext(currChild); \
+        } \
+        map##Prop(currChild, valueList->item(i)); \
+        prevChild = currChild; \
+        currChild = currChild->next(); \
+    } \
+} \
+while (currChild) { \
+    /* Reset all remaining layers to not have the property set. */ \
+    currChild->clear##Prop(); \
+    currChild = currChild->next(); \
+} }
 
 #define HANDLE_INHERIT_COND(propID, prop, Prop) \
 if (id == propID) \
@@ -120,7 +188,7 @@ static CSSStyleSelector::Encodedurl *encodedurl = 0;
 static PseudoState pseudoState;
 
 CSSStyleSelector::CSSStyleSelector( DocumentImpl* doc, QString userStyleSheet, StyleSheetListImpl *styleSheets,
-                                    const KURL &url, bool _strictParsing )
+                                    bool _strictParsing )
 {
     init();
 
@@ -135,9 +203,9 @@ CSSStyleSelector::CSSStyleSelector( DocumentImpl* doc, QString userStyleSheet, S
     paintDeviceMetrics = doc->paintDeviceMetrics();
 
     // FIXME: This sucks! The user sheet is reparsed every time!
-    if ( !userStyleSheet.isEmpty() ) {
+    if (!userStyleSheet.isEmpty()) {
         m_userSheet = new DOM::CSSStyleSheetImpl(doc);
-        m_userSheet->parseString( DOMString( userStyleSheet ) );
+        m_userSheet->parseString(DOMString(userStyleSheet), strictParsing);
 
         m_userStyle = new CSSRuleSet();
         m_userStyle->addRulesFromSheet( m_userSheet, m_medium );
@@ -153,22 +221,6 @@ CSSStyleSelector::CSSStyleSelector( DocumentImpl* doc, QString userStyleSheet, S
 
     //kdDebug( 6080 ) << "number of style sheets in document " << authorStyleSheets.count() << endl;
     //kdDebug( 6080 ) << "CSSStyleSelector: author style has " << authorStyle->count() << " elements"<< endl;
-
-    KURL u = url;
-
-    u.setQuery( QString::null );
-    u.setRef( QString::null );
-    encodedurl.file = u.url();
-    int pos = encodedurl.file.findRev('/');
-    encodedurl.path = encodedurl.file;
-    if ( pos > 0 ) {
-	encodedurl.path.truncate( pos );
-	encodedurl.path += '/';
-    }
-    u.setPath( QString::null );
-    encodedurl.host = u.url();
-
-    //kdDebug() << "CSSStyleSelector::CSSStyleSelector encoded url " << encodedurl.path << endl;
 }
 
 CSSStyleSelector::CSSStyleSelector( CSSStyleSheetImpl *sheet )
@@ -189,6 +241,25 @@ void CSSStyleSelector::init()
     settings = 0;
     paintDeviceMetrics = 0;
     m_matchedRuleCount = m_matchedDeclCount = m_tmpRuleCount = 0;
+}
+
+void CSSStyleSelector::setEncodedURL(const KURL& url)
+{
+    KURL u = url;
+
+    u.setQuery( QString::null );
+    u.setRef( QString::null );
+    encodedurl.file = u.url();
+    int pos = encodedurl.file.findRev('/');
+    encodedurl.path = encodedurl.file;
+    if ( pos > 0 ) {
+	encodedurl.path.truncate( pos );
+	encodedurl.path += '/';
+    }
+    u.setPath( QString::null );
+    encodedurl.host = u.url();
+
+    //kdDebug() << "CSSStyleSelector::CSSStyleSelector encoded url " << encodedurl.path << endl;
 }
 
 CSSStyleSelector::~CSSStyleSelector()
@@ -258,7 +329,7 @@ void CSSStyleSelector::addMatchedRule(CSSRuleData* rule)
     m_matchedRules[m_matchedRuleCount++] = rule;
 }
 
-void CSSStyleSelector::addMatchedDeclaration(CSSStyleDeclarationImpl* decl)
+void CSSStyleSelector::addMatchedDeclaration(CSSMutableStyleDeclarationImpl* decl)
 {
     if (m_matchedDecls.size() <= m_matchedDeclCount)
         m_matchedDecls.resize(2*m_matchedDecls.size()+1);
@@ -307,14 +378,14 @@ void CSSStyleSelector::matchRulesForList(CSSRuleDataList* rules,
         Q_UINT16 tag = localNamePart(d->selector()->tag);
         if ((cssTagId == tag || tag == anyLocalName) && checkSelector(d->selector(), element)) {
             // If the rule has no properties to apply, then ignore it.
-            CSSStyleDeclarationImpl* decl = rule->declaration();
-            if (!decl) continue;
+            CSSMutableStyleDeclarationImpl* decl = rule->declaration();
+            if (!decl || !decl->length()) continue;
             
             // If we're matching normal rules, set a pseudo bit if 
             // we really just matched a pseudo-element.
             if (dynamicPseudo != RenderStyle::NOPSEUDO && pseudoStyle == RenderStyle::NOPSEUDO)
                 style->setHasPseudoStyle(dynamicPseudo);
-            else  {
+            else {
                 // Update our first/last rule indices in the matched rules array.
                 lastRuleIndex = m_matchedDeclCount + m_matchedRuleCount;
                 if (firstRuleIndex == -1) firstRuleIndex = m_matchedDeclCount + m_matchedRuleCount;
@@ -583,13 +654,8 @@ bool CSSStyleSelector::canShareStyleWithElement(NodeImpl* n)
                         anchorsMatch = (pseudoState == s->renderer()->style()->pseudoState());
                     }
                     
-                    if (anchorsMatch) {
-#ifdef STYLE_SHARING_STATS
-                        fraction++; total++;
-                        printf("Sharing %d out of %d\n", fraction, total);
-#endif
+                    if (anchorsMatch)
                         return true;
-                    }
                 }
             }
         }
@@ -599,7 +665,6 @@ bool CSSStyleSelector::canShareStyleWithElement(NodeImpl* n)
 
 RenderStyle* CSSStyleSelector::locateSharedStyle()
 {
-    //total++;
     if (htmlElement && !htmlElement->inlineStyleDecl() && !htmlElement->hasID() &&
         !htmlElement->getDocument()->usesSiblingRules()) {
         // Check previous siblings.
@@ -623,14 +688,11 @@ RenderStyle* CSSStyleSelector::locateSharedStyle()
             for (n = n->previousSibling(); n && !n->isElementNode(); n = n->previousSibling());
         }        
     }
-#ifdef STYLE_SHARING_STATS
-    total++;
-    printf("Sharing %d out of %d\n", fraction, total);
-#endif
     return 0;
 }
 
-RenderStyle* CSSStyleSelector::styleForElement(ElementImpl* e, RenderStyle* defaultParent)
+
+RenderStyle* CSSStyleSelector::styleForElement(ElementImpl* e, RenderStyle* defaultParent, bool allowSharing)
 {
     if (!e->getDocument()->haveStylesheetsLoaded()) {
         if (!styleNotYetAvailable) {
@@ -642,9 +704,16 @@ RenderStyle* CSSStyleSelector::styleForElement(ElementImpl* e, RenderStyle* defa
     }
     
     initElementAndPseudoState(e);
-    style = locateSharedStyle();
-    if (style)
-        return style;
+    if (allowSharing) {
+        style = locateSharedStyle();
+#ifdef STYLE_SHARING_STATS
+        fraction += style != 0;
+        total++;
+        printf("Sharing %d out of %d\n", fraction, total);
+#endif
+        if (style)
+            return style;
+    }
     initForStyleResolve(e, defaultParent);
 
     style = new (e->getDocument()->renderArena()) RenderStyle();
@@ -690,7 +759,7 @@ RenderStyle* CSSStyleSelector::styleForElement(ElementImpl* e, RenderStyle* defa
         // Now we check additional mapped declarations.
         // Tables and table cells share an additional mapped rule that must be applied
         // after all attributes, since their mapped style depends on the values of multiple attributes.
-        CSSStyleDeclarationImpl* attributeDecl = htmlElement->additionalAttributeStyleDecl();
+        CSSMutableStyleDeclarationImpl* attributeDecl = htmlElement->additionalAttributeStyleDecl();
         if (attributeDecl) {
             if (firstAuthorRule == -1) firstAuthorRule = m_matchedDeclCount;
             lastAuthorRule = m_matchedDeclCount;
@@ -703,7 +772,7 @@ RenderStyle* CSSStyleSelector::styleForElement(ElementImpl* e, RenderStyle* defa
     
     // 7. Now check our inline style attribute.
     if (htmlElement) {
-        CSSStyleDeclarationImpl* inlineDecl = htmlElement->inlineStyleDecl();
+        CSSMutableStyleDeclarationImpl* inlineDecl = htmlElement->inlineStyleDecl();
         if (inlineDecl) {
             if (firstAuthorRule == -1) firstAuthorRule = m_matchedDeclCount;
             lastAuthorRule = m_matchedDeclCount;
@@ -759,16 +828,7 @@ RenderStyle* CSSStyleSelector::pseudoStyleForElement(RenderStyle::PseudoId pseud
 {
     if (!e)
         return 0;
-    
-    if (!e->getDocument()->haveStylesheetsLoaded()) {
-        if (!styleNotYetAvailable) {
-            styleNotYetAvailable = ::new RenderStyle();
-            styleNotYetAvailable->setDisplay(NONE);
-            styleNotYetAvailable->ref();
-        }
-        return styleNotYetAvailable;
-    }
-    
+
     initElementAndPseudoState(e);
     initForStyleResolve(e, parentStyle);
     pseudoStyle = pseudo;
@@ -848,9 +908,11 @@ void CSSStyleSelector::adjustRenderStyle(RenderStyle* style, DOM::ElementImpl *e
         }
 
         // Frames and framesets never honor position:relative or position:absolute.  This is necessary to
-        // fix a crash where a site tries to position these objects.
-        if (e && (e->id() == ID_FRAME || e->id() == ID_FRAMESET))
+        // fix a crash where a site tries to position these objects.  They also never honor display.
+        if (e && (e->id() == ID_FRAME || e->id() == ID_FRAMESET)) {
             style->setPosition(STATIC);
+            style->setDisplay(BLOCK);
+        }
 
         // Table headers with a text-align of auto will change the text-align to center.
         if (e && e->id() == ID_TH && style->textAlign() == TAAUTO)
@@ -906,6 +968,15 @@ void CSSStyleSelector::adjustRenderStyle(RenderStyle* style, DOM::ElementImpl *e
         style->setTextDecorationsInEffect(style->textDecoration());
     else
         style->addToTextDecorationsInEffect(style->textDecoration());
+    
+    // Cull out any useless layers and also repeat patterns into additional layers.
+    style->adjustBackgroundLayers();
+
+    // Only use slow repaints if we actually have a background image.
+    // FIXME: We only need to invalidate the fixed regions when scrolling.  It's total overkill to
+    // prevent the entire view from blitting on a scroll.
+    if (style->hasFixedBackgroundImage() && view)
+        view->useSlowRepaints();
 }
 
 static bool subject;
@@ -1031,8 +1102,9 @@ bool CSSStyleSelector::checkOneSelector(DOM::CSSSelector *sel, DOM::ElementImpl 
         Q_UINT16 selLocalName = localNamePart(sel->tag);
         Q_UINT16 selNS = namespacePart(sel->tag);
         
-        if (selNS == xhtmlNamespace && localName < ID_LAST_TAG)
-            selNS = anyNamespace; // Always match HTML elements even when in HTML docs.
+        if (localName <= ID_LAST_TAG && e->isHTMLElement())
+            ns = xhtmlNamespace; // FIXME: Really want to move away from this complicated hackery and just
+                                 // switch tags and attr names over to AtomicStrings.
         
         if ((selLocalName != anyLocalName && localName != selLocalName) ||
             (selNS != anyNamespace && ns != selNS))
@@ -1475,7 +1547,9 @@ static const colorMap cmap[] = {
     { CSS_VAL_TEAL, 0xFF008080  },
     { CSS_VAL_WHITE, 0xFFFFFFFF },
     { CSS_VAL_YELLOW, 0xFFFFFF00 },
+#if !APPLE_CHANGES
     { CSS_VAL_INVERT, invertedColor },
+#endif
     { CSS_VAL_TRANSPARENT, transparentColor },
     { CSS_VAL_GREY, 0xFF808080 },
 #if APPLE_CHANGES
@@ -1636,41 +1710,39 @@ void CSSStyleSelector::applyDeclarations(bool applyFirst, bool isImportant,
 {
     if (startIndex == -1) return;
     for (int i = startIndex; i <= endIndex; i++) {
-        CSSStyleDeclarationImpl* decl = m_matchedDecls[i];
-        QPtrList<CSSProperty>* props = decl->values();
-        if (props) {
-            QPtrListIterator<CSSProperty> propertyIt(*props);
-            CSSProperty* current;
-            for (propertyIt.toFirst(); (current = propertyIt.current()); ++propertyIt) {
-                // give special priority to font-xxx, color properties
-                if (isImportant == current->isImportant()) {
-                    bool first;
-                    switch(current->id())
-                    {
-                        case CSS_PROP_BACKGROUND:
-                        case CSS_PROP_BACKGROUND_IMAGE:
-                        case CSS_PROP_COLOR:
-                        case CSS_PROP_DISPLAY:
-                        case CSS_PROP_FONT:
-                        case CSS_PROP_FONT_SIZE:
-                        case CSS_PROP_FONT_STYLE:
-                        case CSS_PROP_FONT_FAMILY:
-                        case CSS_PROP_FONT_WEIGHT:
+        CSSMutableStyleDeclarationImpl* decl = m_matchedDecls[i];
+        QValueListConstIterator<CSSProperty> end;
+        for (QValueListConstIterator<CSSProperty> it = decl->valuesIterator(); it != end; ++it) {
+            const CSSProperty& current = *it;
+            // give special priority to font-xxx, color properties
+            if (isImportant == current.isImportant()) {
+                bool first;
+                switch(current.id())
+                {
+                    case CSS_PROP_BACKGROUND:
+                    case CSS_PROP_BACKGROUND_IMAGE:
+                    case CSS_PROP_COLOR:
+                    case CSS_PROP_DIRECTION:
+                    case CSS_PROP_DISPLAY:
+                    case CSS_PROP_FONT:
+                    case CSS_PROP_FONT_SIZE:
+                    case CSS_PROP_FONT_STYLE:
+                    case CSS_PROP_FONT_FAMILY:
+                    case CSS_PROP_FONT_WEIGHT:
 #if APPLE_CHANGES
-                        case CSS_PROP__APPLE_TEXT_SIZE_ADJUST:
+                    case CSS_PROP__APPLE_TEXT_SIZE_ADJUST:
 #endif
-                            // these have to be applied first, because other properties use the computed
-                            // values of these porperties.
-                            first = true;
-                            break;
-                        default:
-                            first = false;
-                            break;
-                    }
-                    
-                    if (first == applyFirst)
-                        applyProperty(current->id(), current->value());
+                        // these have to be applied first, because other properties use the computed
+                        // values of these porperties.
+                        first = true;
+                        break;
+                    default:
+                        first = false;
+                        break;
                 }
+                
+                if (first == applyFirst)
+                    applyProperty(current.id(), current.value());
             }
         }
     }
@@ -1690,6 +1762,12 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
     bool isInitial = (value->cssValueType() == CSSValue::CSS_INITIAL) ||
                      (!parentNode && value->cssValueType() == CSSValue::CSS_INHERIT);
 
+    // These properties are used to set the correct margins/padding on RTL lists.
+    if (id == CSS_PROP__KHTML_MARGIN_START)
+        id = style->direction() == LTR ? CSS_PROP_MARGIN_LEFT : CSS_PROP_MARGIN_RIGHT;
+    else if (id == CSS_PROP__KHTML_PADDING_START)
+        id = style->direction() == LTR ? CSS_PROP_PADDING_LEFT : CSS_PROP_PADDING_RIGHT;
+
     // What follows is a list that maps the CSS properties into their corresponding front-end
     // RenderStyle values.  Shorthands (e.g. border, background) occur in this list as well and
     // are only hit when mapping "inherit" or "initial" into front-end values.
@@ -1697,46 +1775,11 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
     {
 // ident only properties
     case CSS_PROP_BACKGROUND_ATTACHMENT:
-        HANDLE_INHERIT_AND_INITIAL(backgroundAttachment, BackgroundAttachment)
-        if(!primitiveValue) break;
-        switch(primitiveValue->getIdent())
-        {
-        case CSS_VAL_FIXED:
-            {
-                style->setBackgroundAttachment(false);
-		// only use slow repaints if we actually have a background pixmap
-                if( style->backgroundImage() && view )
-                    view->useSlowRepaints();
-                break;
-            }
-        case CSS_VAL_SCROLL:
-            style->setBackgroundAttachment(true);
-            break;
-        default:
-            return;
-        }
+        HANDLE_BACKGROUND_VALUE(backgroundAttachment, BackgroundAttachment, value)
+        break;
     case CSS_PROP_BACKGROUND_REPEAT:
-    {
-        HANDLE_INHERIT_AND_INITIAL(backgroundRepeat, BackgroundRepeat)
-        if(!primitiveValue) return;
-	switch(primitiveValue->getIdent())
-	{
-	case CSS_VAL_REPEAT:
-	    style->setBackgroundRepeat( REPEAT );
-	    break;
-	case CSS_VAL_REPEAT_X:
-	    style->setBackgroundRepeat( REPEAT_X );
-	    break;
-	case CSS_VAL_REPEAT_Y:
-	    style->setBackgroundRepeat( REPEAT_Y );
-	    break;
-	case CSS_VAL_NO_REPEAT:
-	    style->setBackgroundRepeat( NO_REPEAT );
-	    break;
-	default:
-	    return;
-	}
-    }
+        HANDLE_BACKGROUND_VALUE(backgroundRepeat, BackgroundRepeat, value)
+        break;
     case CSS_PROP_BORDER_COLLAPSE:
         HANDLE_INHERIT_AND_INITIAL(borderCollapse, BorderCollapse)
         if(!primitiveValue) break;
@@ -2208,47 +2251,26 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
         break;
 
     case CSS_PROP_BACKGROUND_POSITION:
-        if (isInherit) {
-            style->setBackgroundXPosition(parentStyle->backgroundXPosition());
-            style->setBackgroundYPosition(parentStyle->backgroundYPosition());
-        }
-        else if (isInitial) {
-            style->setBackgroundXPosition(RenderStyle::initialBackgroundXPosition());
-            style->setBackgroundYPosition(RenderStyle::initialBackgroundYPosition());
-        }
+        HANDLE_BACKGROUND_INHERIT_AND_INITIAL(backgroundXPosition, BackgroundXPosition);
+        HANDLE_BACKGROUND_INHERIT_AND_INITIAL(backgroundYPosition, BackgroundYPosition);
         break;
     case CSS_PROP_BACKGROUND_POSITION_X: {
-        HANDLE_INHERIT_AND_INITIAL(backgroundXPosition, BackgroundXPosition)
-        if(!primitiveValue) break;
-        Length l;
-        int type = primitiveValue->primitiveType();
-        if(type > CSSPrimitiveValue::CSS_PERCENTAGE && type < CSSPrimitiveValue::CSS_DEG)
-        l = Length(primitiveValue->computeLength(style, paintDeviceMetrics), Fixed);
-        else if(type == CSSPrimitiveValue::CSS_PERCENTAGE)
-        l = Length((int)primitiveValue->getFloatValue(CSSPrimitiveValue::CSS_PERCENTAGE), Percent);
-        else
-        return;
-        style->setBackgroundXPosition(l);
+        HANDLE_BACKGROUND_VALUE(backgroundXPosition, BackgroundXPosition, value)
         break;
     }
     case CSS_PROP_BACKGROUND_POSITION_Y: {
-        HANDLE_INHERIT_AND_INITIAL(backgroundYPosition, BackgroundYPosition)
-        if(!primitiveValue) break;
-        Length l;
-        int type = primitiveValue->primitiveType();
-        if(type > CSSPrimitiveValue::CSS_PERCENTAGE && type < CSSPrimitiveValue::CSS_DEG)
-        l = Length(primitiveValue->computeLength(style, paintDeviceMetrics), Fixed);
-        else if(type == CSSPrimitiveValue::CSS_PERCENTAGE)
-        l = Length((int)primitiveValue->getFloatValue(CSSPrimitiveValue::CSS_PERCENTAGE), Percent);
-        else
-        return;
-        style->setBackgroundYPosition(l);
+        HANDLE_BACKGROUND_VALUE(backgroundYPosition, BackgroundYPosition, value)
         break;
     }
     case CSS_PROP_BORDER_SPACING: {
-        if(value->cssValueType() != CSSValue::CSS_INHERIT || !parentNode) return;
-        style->setHorizontalBorderSpacing(parentStyle->horizontalBorderSpacing());
-        style->setVerticalBorderSpacing(parentStyle->verticalBorderSpacing());
+        if (isInherit) {
+            style->setHorizontalBorderSpacing(parentStyle->horizontalBorderSpacing());
+            style->setVerticalBorderSpacing(parentStyle->verticalBorderSpacing());
+        }
+        else if (isInitial) {
+            style->setHorizontalBorderSpacing(0);
+            style->setVerticalBorderSpacing(0);
+        }
         break;
     }
     case CSS_PROP__KHTML_BORDER_HORIZONTAL_SPACING: {
@@ -2368,16 +2390,11 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
         return;
     }
     break;
+    
 // uri || inherit
     case CSS_PROP_BACKGROUND_IMAGE:
-    {
-        HANDLE_INHERIT_AND_INITIAL(backgroundImage, BackgroundImage)
-	if (!primitiveValue) return;
-	style->setBackgroundImage(static_cast<CSSImageValueImpl *>(primitiveValue)
-                                  ->image(element->getDocument()->docLoader()));
-        //kdDebug( 6080 ) << "setting image in style to " << image->image() << endl;
+        HANDLE_BACKGROUND_VALUE(backgroundImage, BackgroundImage, value)
         break;
-    }
     case CSS_PROP_LIST_STYLE_IMAGE:
     {
         HANDLE_INHERIT_AND_INITIAL(listStyleImage, ListStyleImage)
@@ -2492,6 +2509,86 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
         return;
     }
 
+    case CSS_PROP_WORD_WRAP:
+    {
+        HANDLE_INHERIT_AND_INITIAL(wordWrap, WordWrap)
+
+        if(!primitiveValue->getIdent()) return;
+
+        EWordWrap s;
+        switch(primitiveValue->getIdent()) {
+        case CSS_VAL_BREAK_WORD:
+            s = BREAK_WORD;
+            break;
+        case CSS_VAL_NORMAL:
+        default:
+            s = WBNORMAL;
+            break;
+        }
+        style->setWordWrap(s);
+        break;
+    }
+
+    case CSS_PROP__KHTML_NBSP_MODE:
+    {
+        HANDLE_INHERIT_AND_INITIAL(nbspMode, NBSPMode)
+
+        if (!primitiveValue->getIdent()) return;
+
+        ENBSPMode m;
+        switch(primitiveValue->getIdent()) {
+        case CSS_VAL_SPACE:
+            m = SPACE;
+            break;
+        case CSS_VAL_NORMAL:
+        default:
+            m = NBNORMAL;
+            break;
+        }
+        style->setNBSPMode(m);
+        break;
+    }
+
+    case CSS_PROP__KHTML_LINE_BREAK:
+    {
+        HANDLE_INHERIT_AND_INITIAL(khtmlLineBreak, KHTMLLineBreak)
+
+        if (!primitiveValue->getIdent()) return;
+
+        EKHTMLLineBreak b;
+        switch(primitiveValue->getIdent()) {
+        case CSS_VAL_AFTER_WHITE_SPACE:
+            b = AFTER_WHITE_SPACE;
+            break;
+        case CSS_VAL_NORMAL:
+        default:
+            b = LBNORMAL;
+            break;
+        }
+        style->setKHTMLLineBreak(b);
+        break;
+    }
+
+    case CSS_PROP__KHTML_MATCH_NEAREST_MAIL_BLOCKQUOTE_COLOR:
+    {
+        HANDLE_INHERIT_AND_INITIAL(matchNearestMailBlockquoteColor, MatchNearestMailBlockquoteColor)
+
+        if (!primitiveValue->getIdent()) return;
+
+        EMatchNearestMailBlockquoteColor c;
+        switch(primitiveValue->getIdent()) {
+        case CSS_VAL_NORMAL:
+            c = BCNORMAL;
+            break;
+        case CSS_VAL_MATCH:
+        default:
+            c = MATCH;
+            break;
+        }
+        style->setMatchNearestMailBlockquoteColor(c);
+        break;
+    }
+
         // length, percent
     case CSS_PROP_MAX_WIDTH:
         // +none +inherit
@@ -2518,7 +2615,7 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
                 apply = true;
             }
         }
-        else if (id != CSS_PROP_MAX_WIDTH && primitiveValue &&
+        if (id != CSS_PROP_MAX_WIDTH && primitiveValue &&
            primitiveValue->getIdent() == CSS_VAL_AUTO)
         {
             //kdDebug( 6080 ) << "found value=auto" << endl;
@@ -2951,14 +3048,14 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
             CSSPrimitiveValueImpl *val = static_cast<CSSPrimitiveValueImpl *>(item);
             if(val->primitiveType()==CSSPrimitiveValue::CSS_STRING)
             {
-                style->setContent(val->getStringValue(), i != 0);
+                style->setContent(val->getStringValue().implementation(), i != 0);
             }
             else if (val->primitiveType()==CSSPrimitiveValue::CSS_ATTR)
             {
                 // FIXME: Should work with generic XML attributes also, and not
                 // just the hardcoded HTML set.  Can a namespace be specified for
                 // an attr(foo)?
-                int attrID = element->getDocument()->attrId(0, val->getStringValue(), false);
+                int attrID = element->getDocument()->attrId(0, val->getStringValue().implementation(), false);
                 if (attrID)
                     style->setContent(element->getAttribute(attrID).implementation(), i != 0);
             }
@@ -3105,21 +3202,16 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
 
 // shorthand properties
     case CSS_PROP_BACKGROUND:
-        if (isInherit) {
-            style->setBackgroundColor(parentStyle->backgroundColor());
-            style->setBackgroundImage(parentStyle->backgroundImage());
-            style->setBackgroundRepeat(parentStyle->backgroundRepeat());
-            style->setBackgroundAttachment(parentStyle->backgroundAttachment());
-            style->setBackgroundXPosition(parentStyle->backgroundXPosition());
-            style->setBackgroundYPosition(parentStyle->backgroundYPosition());
+        if (isInitial) {
+            style->clearBackgroundLayers();
+            return;
         }
-        else if (isInitial) {
-            style->setBackgroundColor(QColor());
-            style->setBackgroundImage(RenderStyle::initialBackgroundImage());
-            style->setBackgroundRepeat(RenderStyle::initialBackgroundRepeat());
-            style->setBackgroundAttachment(RenderStyle::initialBackgroundAttachment());
-            style->setBackgroundXPosition(RenderStyle::initialBackgroundXPosition());
-            style->setBackgroundYPosition(RenderStyle::initialBackgroundYPosition());
+        else if (isInherit) {
+            if (parentStyle)
+                style->inheritBackgroundLayers(*parentStyle->backgroundLayers());
+            else
+                style->clearBackgroundLayers();
+            return;
         }
         break;
     case CSS_PROP_BORDER:
@@ -3600,7 +3692,8 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
         HANDLE_INHERIT_AND_INITIAL(userModify, UserModify)      
         if (!primitiveValue || !primitiveValue->getIdent())
             return;
-        style->setUserModify(EUserModify(primitiveValue->getIdent() - CSS_VAL_READ_ONLY));
+        EUserModify userModify = EUserModify(primitiveValue->getIdent() - CSS_VAL_READ_ONLY);
+        style->setUserModify(userModify);
         break;
     }
     case CSS_PROP__KHTML_USER_SELECT: {
@@ -3631,6 +3724,51 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
         style->setTextOverflow(primitiveValue->getIdent() == CSS_VAL_ELLIPSIS);
         break;
     }
+    case CSS_PROP__KHTML_MARGIN_COLLAPSE: {
+        if (isInherit) {
+            style->setMarginTopCollapse(parentStyle->marginTopCollapse());
+            style->setMarginBottomCollapse(parentStyle->marginBottomCollapse());
+        }
+        else if (isInitial) {
+            style->setMarginTopCollapse(MCOLLAPSE);
+            style->setMarginBottomCollapse(MCOLLAPSE);
+        }
+        break;
+    }
+    case CSS_PROP__KHTML_MARGIN_TOP_COLLAPSE: {
+        HANDLE_INHERIT_AND_INITIAL(marginTopCollapse, MarginTopCollapse)
+        if (!primitiveValue || !primitiveValue->getIdent()) return;
+        EMarginCollapse val;
+        switch (primitiveValue->getIdent()) {
+            case CSS_VAL_SEPARATE:
+                val = MSEPARATE;
+                break;
+            case CSS_VAL_DISCARD:
+                val = MDISCARD;
+                break;
+            default:
+                val = MCOLLAPSE;
+        }
+        style->setMarginTopCollapse(val);
+        break;
+    }
+    case CSS_PROP__KHTML_MARGIN_BOTTOM_COLLAPSE: {
+        HANDLE_INHERIT_AND_INITIAL(marginBottomCollapse, MarginBottomCollapse)
+        if (!primitiveValue || !primitiveValue->getIdent()) return;
+        EMarginCollapse val;
+        switch (primitiveValue->getIdent()) {
+            case CSS_VAL_SEPARATE:
+                val = MSEPARATE;
+                break;
+            case CSS_VAL_DISCARD:
+                val = MDISCARD;
+                break;
+            default:
+                val = MCOLLAPSE;
+        }
+        style->setMarginBottomCollapse(val);
+        break;
+    }
 
 #if APPLE_CHANGES
     // Apple-specific changes.  Do not merge these properties into KHTML.
@@ -3646,12 +3784,145 @@ void CSSStyleSelector::applyProperty( int id, DOM::CSSValueImpl *value )
         style->setTextSizeAdjust(primitiveValue->getIdent() == CSS_VAL_AUTO);
         fontDirty = true;
         break;
-    }        
+    }
+    case CSS_PROP__APPLE_DASHBOARD_REGION: {
+        HANDLE_INHERIT_AND_INITIAL(dashboardRegions, DashboardRegions)
+        if (!primitiveValue)
+            return;
+
+        if(primitiveValue->getIdent() == CSS_VAL_NONE) {
+            style->setDashboardRegions(RenderStyle::noneDashboardRegions());
+            return;
+        }
+
+        DashboardRegionImpl *region = primitiveValue->getDashboardRegionValue();
+        if (!region)
+            return;
+            
+        DashboardRegionImpl *first = region;
+        while (region) {
+            Length top = convertToLength (region->top(), style, paintDeviceMetrics );
+            Length right = convertToLength (region->right(), style, paintDeviceMetrics );
+            Length bottom = convertToLength (region->bottom(), style, paintDeviceMetrics );
+            Length left = convertToLength (region->left(), style, paintDeviceMetrics );
+            if (region->m_isCircle) {
+                style->setDashboardRegion (StyleDashboardRegion::Circle, region->m_label, top, right, bottom, left, region == first ? false : true);
+            }
+            else if (region->m_isRectangle) {
+                style->setDashboardRegion (StyleDashboardRegion::Rectangle, region->m_label, top, right, bottom, left, region == first ? false : true);
+            }
+            region = region->m_next;
+        }
+        
+        element->getDocument()->setHasDashboardRegions (true);
+        
+        break;
+    }   
 #endif
 
     default:
         return;
     }
+}
+
+void CSSStyleSelector::mapBackgroundAttachment(BackgroundLayer* layer, DOM::CSSValueImpl* value)
+{
+    if (value->cssValueType() == CSSValue::CSS_INITIAL) {
+        layer->setBackgroundAttachment(RenderStyle::initialBackgroundAttachment());
+        return;
+    }
+
+    if (!value->isPrimitiveValue()) return;
+    CSSPrimitiveValueImpl* primitiveValue = static_cast<CSSPrimitiveValueImpl*>(value);
+    switch (primitiveValue->getIdent()) {
+        case CSS_VAL_FIXED:
+            layer->setBackgroundAttachment(false);
+            break;
+        case CSS_VAL_SCROLL:
+            layer->setBackgroundAttachment(true);
+            break;
+        default:
+            return;
+    }
+}
+
+void CSSStyleSelector::mapBackgroundImage(BackgroundLayer* layer, DOM::CSSValueImpl* value)
+{
+    if (value->cssValueType() == CSSValue::CSS_INITIAL) {
+        layer->setBackgroundImage(RenderStyle::initialBackgroundImage());
+        return;
+    }
+    
+    if (!value->isPrimitiveValue()) return;
+    CSSPrimitiveValueImpl* primitiveValue = static_cast<CSSPrimitiveValueImpl*>(value);
+    layer->setBackgroundImage(static_cast<CSSImageValueImpl *>(primitiveValue)->image(element->getDocument()->docLoader()));
+}
+
+void CSSStyleSelector::mapBackgroundRepeat(BackgroundLayer* layer, DOM::CSSValueImpl* value)
+{
+    if (value->cssValueType() == CSSValue::CSS_INITIAL) {
+        layer->setBackgroundRepeat(RenderStyle::initialBackgroundRepeat());
+        return;
+    }
+    
+    if (!value->isPrimitiveValue()) return;
+    CSSPrimitiveValueImpl* primitiveValue = static_cast<CSSPrimitiveValueImpl*>(value);
+    switch(primitiveValue->getIdent()) {
+	case CSS_VAL_REPEAT:
+	    layer->setBackgroundRepeat(REPEAT);
+	    break;
+	case CSS_VAL_REPEAT_X:
+	    layer->setBackgroundRepeat(REPEAT_X);
+	    break;
+	case CSS_VAL_REPEAT_Y:
+	    layer->setBackgroundRepeat(REPEAT_Y);
+	    break;
+	case CSS_VAL_NO_REPEAT:
+	    layer->setBackgroundRepeat(NO_REPEAT);
+	    break;
+	default:
+	    return;
+    }
+}
+
+void CSSStyleSelector::mapBackgroundXPosition(BackgroundLayer* layer, DOM::CSSValueImpl* value)
+{
+    if (value->cssValueType() == CSSValue::CSS_INITIAL) {
+        layer->setBackgroundXPosition(RenderStyle::initialBackgroundXPosition());
+        return;
+    }
+    
+    if (!value->isPrimitiveValue()) return;
+    CSSPrimitiveValueImpl* primitiveValue = static_cast<CSSPrimitiveValueImpl*>(value);
+    Length l;
+    int type = primitiveValue->primitiveType();
+    if(type > CSSPrimitiveValue::CSS_PERCENTAGE && type < CSSPrimitiveValue::CSS_DEG)
+        l = Length(primitiveValue->computeLength(style, paintDeviceMetrics), Fixed);
+    else if(type == CSSPrimitiveValue::CSS_PERCENTAGE)
+        l = Length((int)primitiveValue->getFloatValue(CSSPrimitiveValue::CSS_PERCENTAGE), Percent);
+    else
+        return;
+    layer->setBackgroundXPosition(l);
+}
+
+void CSSStyleSelector::mapBackgroundYPosition(BackgroundLayer* layer, DOM::CSSValueImpl* value)
+{
+    if (value->cssValueType() == CSSValue::CSS_INITIAL) {
+        layer->setBackgroundYPosition(RenderStyle::initialBackgroundYPosition());
+        return;
+    }
+    
+    if (!value->isPrimitiveValue()) return;
+    CSSPrimitiveValueImpl* primitiveValue = static_cast<CSSPrimitiveValueImpl*>(value);
+    Length l;
+    int type = primitiveValue->primitiveType();
+    if(type > CSSPrimitiveValue::CSS_PERCENTAGE && type < CSSPrimitiveValue::CSS_DEG)
+        l = Length(primitiveValue->computeLength(style, paintDeviceMetrics), Fixed);
+    else if(type == CSSPrimitiveValue::CSS_PERCENTAGE)
+        l = Length((int)primitiveValue->getFloatValue(CSSPrimitiveValue::CSS_PERCENTAGE), Percent);
+    else
+        return;
+    layer->setBackgroundYPosition(l);
 }
 
 #if APPLE_CHANGES

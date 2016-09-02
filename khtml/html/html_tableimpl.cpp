@@ -316,6 +316,24 @@ NodeImpl *HTMLTableElementImpl::addChild(NodeImpl *child)
         return this;
     }
     
+    // We do not want this check-node-allowed test here, however the code to
+    // build up tables relies on childAllowed failing to make sure that the
+    // table is well-formed, the primary work being to add a tbody element.
+    // As 99.9999% of tables on the weeb do not have tbody elements, it seems
+    // odd to traverse an "error" case for the most common table markup.
+    // See <rdar://problem/3719373> Table parsing and construction relies on 
+    // childAllowed failures to build up proper DOM
+    if (child->nodeType() == Node::DOCUMENT_FRAGMENT_NODE) {
+        // child is a DocumentFragment... check all its children instead of child itself
+        for (NodeImpl *c = child->firstChild(); c; c = c->nextSibling())
+            if (!childAllowed(c))
+                return 0;
+    }
+    else if (!childAllowed(child)) {
+        // child is not a DocumentFragment... check if it's allowed directly
+        return 0;
+    }
+
     int exceptioncode = 0;
     NodeImpl *retval = appendChild( child, exceptioncode );
     if ( retval ) {
@@ -388,9 +406,13 @@ void HTMLTableElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
         if (attr->isNull()) break;
         if (attr->decl()) {
             CSSValueImpl* val = attr->decl()->getPropertyCSSValue(CSS_PROP_BORDER_LEFT_WIDTH);
-            if (val && val->isPrimitiveValue()) {
-                CSSPrimitiveValueImpl* primVal = static_cast<CSSPrimitiveValueImpl*>(val);
-                m_noBorder = !primVal->getFloatValue(CSSPrimitiveValue::CSS_NUMBER);
+            if (val) {
+                val->ref();
+                if (val->isPrimitiveValue()) {
+                    CSSPrimitiveValueImpl* primVal = static_cast<CSSPrimitiveValueImpl*>(val);
+                    m_noBorder = !primVal->getFloatValue(CSSPrimitiveValue::CSS_NUMBER);
+                }
+                val->deref();
             }
         }
         else {
@@ -522,7 +544,7 @@ void HTMLTableElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
     }
 }
 
-CSSStyleDeclarationImpl* HTMLTableElementImpl::additionalAttributeStyleDecl()
+CSSMutableStyleDeclarationImpl* HTMLTableElementImpl::additionalAttributeStyleDecl()
 {
     if (m_noBorder)
         return 0;
@@ -550,7 +572,7 @@ CSSStyleDeclarationImpl* HTMLTableElementImpl::additionalAttributeStyleDecl()
     return decl;
 }
 
-CSSStyleDeclarationImpl* HTMLTableElementImpl::getSharedCellDecl()
+CSSMutableStyleDeclarationImpl* HTMLTableElementImpl::getSharedCellDecl()
 {
     HTMLAttributeImpl attr(ATTR_CELLBORDER, m_noBorder ? "none" : (m_solid ? "solid" : "inset"));
     CSSMappedAttributeDeclarationImpl* decl = getMappedAttributeDecl(ePersistent, &attr);
@@ -913,16 +935,16 @@ void HTMLTableCellElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
     switch(attr->id())
     {
     case ATTR_ROWSPAN:
-        // ###
         rSpan = !attr->isNull() ? attr->value().toInt() : 1;
-        // limit this to something not causing an overflow with short int
-        if(rSpan < 1 || rSpan > 1024) rSpan = 1;
+        if (rSpan < 1) rSpan = 1;
+        if (renderer() && renderer()->isTableCell())
+            static_cast<RenderTableCell*>(renderer())->updateFromElement();
         break;
     case ATTR_COLSPAN:
-        // ###
         cSpan = !attr->isNull() ? attr->value().toInt() : 1;
-        // limit this to something not causing an overflow with short int
-        if(cSpan < 1 || cSpan > 1024) cSpan = 1;
+        if (cSpan < 1) cSpan = 1;
+        if (renderer() && renderer()->isTableCell())
+            static_cast<RenderTableCell*>(renderer())->updateFromElement();
         break;
     case ATTR_NOWRAP:
         if (!attr->isNull())
@@ -950,7 +972,7 @@ void HTMLTableCellElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
 }
 
 // used by table cells to share style decls created by the enclosing table.
-CSSStyleDeclarationImpl* HTMLTableCellElementImpl::additionalAttributeStyleDecl()
+CSSMutableStyleDeclarationImpl* HTMLTableCellElementImpl::additionalAttributeStyleDecl()
 {
     HTMLElementImpl* p = static_cast<HTMLElementImpl*>(parentNode());
     while(p && p->id() != ID_TABLE)
@@ -1010,6 +1032,8 @@ void HTMLTableColElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
     {
     case ATTR_SPAN:
         _span = !attr->isNull() ? attr->value().toInt() : 1;
+        if (renderer() && renderer()->isTableCol())
+            static_cast<RenderTableCol*>(renderer())->updateFromElement();
         break;
     case ATTR_WIDTH:
         if (!attr->value().isEmpty())

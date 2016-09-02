@@ -43,6 +43,9 @@ class QTextEdit : public QScrollView
     } TextFormat;
 
     QTextEdit(QWidget *parent);
+    ~QTextEdit();
+
+    virtual void setPalette(const QPalette &);
 
     void setAlignment(AlignmentFlags);
 
@@ -65,6 +68,8 @@ class QTextEdit : public QScrollView
 
     void setWordWrap(WrapStyle);
     WrapStyle wordWrap() const;
+
+    void setScrollBarModes(ScrollBarMode hMode, ScrollBarMode vMode);
 
     void setWritingDirection(QPainter::TextDirection);
     

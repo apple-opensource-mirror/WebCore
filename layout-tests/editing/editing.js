@@ -39,6 +39,66 @@ function extendSelectionForwardByCharacterCommand() {
 
 //-------------------------------------------------------------------------------------------------------
 
+function execMoveSelectionForwardByWordCommand() {
+    selection.modify("move", "forward", "word");
+}
+function moveSelectionForwardByWordCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execMoveSelectionForwardByWordCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execMoveSelectionForwardByWordCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execExtendSelectionForwardByWordCommand() {
+    selection.modify("extend", "forward", "word");
+}
+function extendSelectionForwardByWordCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execExtendSelectionForwardByWordCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execExtendSelectionForwardByWordCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execMoveSelectionForwardByLineCommand() {
+    selection.modify("move", "forward", "line");
+}
+function moveSelectionForwardByLineCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execMoveSelectionForwardByLineCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execMoveSelectionForwardByLineCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execExtendSelectionForwardByLineCommand() {
+    selection.modify("extend", "forward", "line");
+}
+function extendSelectionForwardByLineCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execExtendSelectionForwardByLineCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execExtendSelectionForwardByLineCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
 function execMoveSelectionBackwardByCharacterCommand() {
     selection.modify("move", "backward", "character");
 }
@@ -69,6 +129,66 @@ function extendSelectionBackwardByCharacterCommand() {
 
 //-------------------------------------------------------------------------------------------------------
 
+function execMoveSelectionBackwardByWordCommand() {
+    selection.modify("move", "backward", "word");
+}
+function moveSelectionBackwardByWordCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execMoveSelectionBackwardByWordCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execMoveSelectionBackwardByWordCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execExtendSelectionBackwardByWordCommand() {
+    selection.modify("extend", "backward", "word");
+}
+function extendSelectionBackwardByWordCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execExtendSelectionBackwardByWordCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execExtendSelectionBackwardByWordCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execMoveSelectionBackwardByLineCommand() {
+    selection.modify("move", "backward", "line");
+}
+function moveSelectionBackwardByLineCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execMoveSelectionBackwardByLineCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execMoveSelectionBackwardByLineCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execExtendSelectionBackwardByLineCommand() {
+    selection.modify("extend", "backward", "line");
+}
+function extendSelectionBackwardByLineCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execExtendSelectionBackwardByLineCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execExtendSelectionBackwardByLineCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
 function execBoldCommand() {
     document.execCommand("Bold");
 }
@@ -84,31 +204,176 @@ function boldCommand() {
 
 //-------------------------------------------------------------------------------------------------------
 
-function execInsertNewlineCommand() {
-    document.execCommand("InsertNewline");
+function execUnderlineCommand() {
+    document.execCommand("Underline");
 }
-function insertNewlineCommand() {
+function underlineCommand() {
     if (commandDelay > 0) {
-        window.setTimeout(execInsertNewlineCommand, commandCount * commandDelay);
+        window.setTimeout(execUnderlineCommand, commandCount * commandDelay);
         commandCount++;
     }
     else {
-        execInsertNewlineCommand();
+        execUnderlineCommand();
     }
 }
 
 //-------------------------------------------------------------------------------------------------------
 
-function execTypeCharacterCommand() {
-    document.execCommand("InsertText", false, "x");
+function execFontNameCommand() {
+    document.execCommand("FontName", false, "Courier");
 }
-function typeCharacterCommand() {
+function fontNameCommand() {
     if (commandDelay > 0) {
-        window.setTimeout(execTypeCharacterCommand, commandCount * commandDelay);
+        window.setTimeout(execFontNameCommand, commandCount * commandDelay);
         commandCount++;
     }
     else {
-        execTypeCharacterCommand();
+        execFontNameCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execFontSizeCommand(s) {
+    if (arguments.length == 0 || s == undefined || s.length == 0)
+        s = '12px';
+    document.execCommand("FontSize", false, s);
+}
+function fontSizeCommand(s) {
+    if (commandDelay > 0) {
+        window.setTimeout(execFontSizeCommand, commandCount * commandDelay, s);
+        commandCount++;
+    }
+    else {
+        execFontSizeCommand(s);
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execFontSizeDeltaCommand(s) {
+    if (arguments.length == 0 || s == undefined || s.length == 0)
+        s = '1px';
+    document.execCommand("FontSizeDelta", false, s);
+}
+function fontSizeDeltaCommand(s) {
+    if (commandDelay > 0) {
+        window.setTimeout(execFontSizeDeltaCommand, commandCount * commandDelay, s);
+        commandCount++;
+    }
+    else {
+        execFontSizeDeltaCommand(s);
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execItalicCommand() {
+    document.execCommand("Italic");
+}
+function italicCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execItalicCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execItalicCommand();
+    }
+}
+
+
+//-------------------------------------------------------------------------------------------------------
+
+function execJustifyCenterCommand() {
+    document.execCommand("JustifyCenter");
+}
+function justifyCenterCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execJustifyCenterCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execJustifyCenterCommand();
+    }
+}
+
+
+//-------------------------------------------------------------------------------------------------------
+
+function execJustifyLeftCommand() {
+    document.execCommand("JustifyLeft");
+}
+function justifyLeftCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execJustifyLeftCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execJustifyLeftCommand();
+    }
+}
+
+
+//-------------------------------------------------------------------------------------------------------
+
+function execJustifyRightCommand() {
+    document.execCommand("JustifyRight");
+}
+function justifyRightCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execJustifyRightCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execJustifyRightCommand();
+    }
+}
+
+
+//-------------------------------------------------------------------------------------------------------
+
+function execInsertLineBreakCommand() {
+    document.execCommand("InsertLineBreak");
+}
+function insertLineBreakCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execInsertLineBreakCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execInsertLineBreakCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+ 
+function execInsertParagraphCommand() {
+    document.execCommand("InsertParagraph");
+}
+function insertParagraphCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execInsertParagraphCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execInsertParagraphCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+function execTypeCharacterCommand(c) {
+    if (arguments.length == 0 || c == undefined || c.length == 0 || c.length > 1)
+        c = 'x';
+    document.execCommand("InsertText", false, c);
+}
+function typeCharacterCommand(c) {
+    if (commandDelay > 0) {
+        window.setTimeout(execTypeCharacterCommand, commandCount * commandDelay, c);
+        commandCount++;
+    }
+    else {
+        execTypeCharacterCommand(c);
     }
 }
 
@@ -219,6 +484,21 @@ function pasteCommand() {
 
 //-------------------------------------------------------------------------------------------------------
 
+function execPasteAndMatchStyleCommand() {
+    document.execCommand("PasteAndMatchStyle");
+}
+function pasteAndMatchStyleCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execPasteAndMatchStyleCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execPasteAndMatchStyleCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
 function execDeleteCommand() {
     document.execCommand("Delete");
 }
@@ -234,6 +514,21 @@ function deleteCommand() {
 
 //-------------------------------------------------------------------------------------------------------
 
+function execForwardDeleteCommand() {
+    document.execCommand("ForwardDelete");
+}
+function forwardDeleteCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execForwardDeleteCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execForwardDeleteCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
 function runEditingTest() {
     var elem = document.getElementById("test");
     var selection = window.getSelection();
@@ -242,3 +537,35 @@ function runEditingTest() {
 }
 
 //-------------------------------------------------------------------------------------------------------
+
+
+function execBackColorCommand() {
+    document.execCommand("BackColor", false, "Chartreuse");
+}
+function backColorCommand() {
+    if (commandDelay > 0) {
+        window.setTimeout(execBackColorCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        execBackColorCommand();
+    }
+}
+
+//-------------------------------------------------------------------------------------------------------
+
+
+function runCommand(command, arg1, arg2) {
+    document.execCommand(command,arg1,arg2);
+}
+
+function executeCommand(command,arg1,arg2) {
+    if (commandDelay > 0) {
+        window.setTimeout(runCommand, commandCount * commandDelay);
+        commandCount++;
+    }
+    else {
+        runCommand(command,arg1,arg2);
+    }
+}
+

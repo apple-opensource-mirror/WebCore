@@ -140,12 +140,14 @@ void QTimer::setMonitor(void (*monitorFunction)(void *context), void *context)
 
 void QTimer::fire()
 {
-    m_timeoutSignal.call();
+    // Ensure that m_timer is kept around for duration of callback.
+    // Final reference will eventually be released in stop(), which may be called 
+    // in this frame, hence the need to ensure the timer is kept around until
+    // the pool is released. 
+    [[m_timer retain] autorelease];
 
-    if (![m_timer isValid]) {
-        KWQRelease(m_timer);
-        m_timer = nil;
-    }
+    // Note: This call may destroy the QTimer, so be sure not to touch any fields afterward.
+    m_timeoutSignal.call();
 }
 
 void QTimer::singleShot(int msec, QObject *receiver, const char *member)

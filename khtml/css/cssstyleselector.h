@@ -94,7 +94,7 @@ namespace khtml
 	 * creates a list of rules it needs to apply to objects
 	 */
 	CSSStyleSelector(DOM::DocumentImpl* doc, QString userStyleSheet, 
-                         DOM::StyleSheetListImpl *styleSheets, const KURL &url,
+                         DOM::StyleSheetListImpl *styleSheets,
                          bool _strictParsing);
 	/**
 	 * same as above but for a single stylesheet.
@@ -106,21 +106,23 @@ namespace khtml
 
         void initElementAndPseudoState(DOM::ElementImpl* e);
         void initForStyleResolve(DOM::ElementImpl* e, RenderStyle* parentStyle);
-	RenderStyle *styleForElement(DOM::ElementImpl* e, RenderStyle* parentStyle=0);
+	RenderStyle *styleForElement(DOM::ElementImpl* e, RenderStyle* parentStyle=0, bool allowSharing=true);
         RenderStyle* pseudoStyleForElement(RenderStyle::PseudoId pseudoStyle, 
                                            DOM::ElementImpl* e, RenderStyle* parentStyle=0);
 
         RenderStyle* locateSharedStyle();
         DOM::NodeImpl* locateCousinList(DOM::ElementImpl* parent);
-        bool canShareStyleWithElement(DOM::NodeImpl* e);
+        bool canShareStyleWithElement(DOM::NodeImpl* n);
         
 	bool strictParsing;
-	struct Encodedurl {
+	
+        struct Encodedurl {
 	    QString host; //also contains protocol
 	    QString path;
 	    QString file;
 	} encodedurl;
-
+        void setEncodedURL(const KURL& url);
+        
         // Given a CSS keyword in the range (xx-small to -khtml-xxx-large), this function will return
         // the correct font size scaled relative to the user's default (medium).
         float fontSizeForKeyword(int keyword, bool quirksMode) const;
@@ -160,7 +162,7 @@ namespace khtml
                                int& firstRuleIndex, int& lastRuleIndex);
         void sortMatchedRules(uint firstRuleIndex, uint lastRuleIndex);
         void addMatchedRule(CSSRuleData* rule);
-        void addMatchedDeclaration(DOM::CSSStyleDeclarationImpl* decl);
+        void addMatchedDeclaration(DOM::CSSMutableStyleDeclarationImpl* decl);
         void applyDeclarations(bool firstPass, bool important, int startIndex, int endIndex);
         
 	static DOM::CSSStyleSheetImpl *defaultSheet;
@@ -177,13 +179,19 @@ public:
  
     private:
         void init();
-
+        
+        void mapBackgroundAttachment(BackgroundLayer* layer, DOM::CSSValueImpl* value);
+        void mapBackgroundImage(BackgroundLayer* layer, DOM::CSSValueImpl* value);
+        void mapBackgroundRepeat(BackgroundLayer* layer, DOM::CSSValueImpl* value);
+        void mapBackgroundXPosition(BackgroundLayer* layer, DOM::CSSValueImpl* value);
+        void mapBackgroundYPosition(BackgroundLayer* layer, DOM::CSSValueImpl* value);
+        
     protected:
         // We collect the set of decls that match in |m_matchedDecls|.  We then walk the
         // set of matched decls four times, once for those properties that others depend on (like font-size),
         // and then a second time for all the remaining properties.  We then do the same two passes
         // for any !important rules.
-        QMemArray<DOM::CSSStyleDeclarationImpl*> m_matchedDecls;
+        QMemArray<DOM::CSSMutableStyleDeclarationImpl*> m_matchedDecls;
         unsigned m_matchedDeclCount;
         
         // A buffer used to hold the set of matched rules for an element, and a temporary buffer used for

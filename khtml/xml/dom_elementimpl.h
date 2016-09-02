@@ -177,15 +177,13 @@ public:
     virtual NodeImpl *cloneNode ( bool deep );
     virtual DOMString nodeName() const;
     virtual bool isElementNode() const { return true; }
+    virtual void insertedIntoDocument();
+    virtual void removedFromDocument();
 
     // convenience methods which ignore exceptions
     void setAttribute (NodeImpl::Id id, const DOMString &value);
 
-    NamedAttrMapImpl* attributes(bool readonly = false) const
-    {
-        if (!readonly && !namedAttrMap) createAttributeMap();
-        return namedAttrMap;
-    }
+    NamedAttrMapImpl* attributes(bool readonly = false) const;
 
     // This method is called whenever an attribute is added, changed or removed.
     virtual void attributeChanged(AttributeImpl* attr, bool preserveDecls = false) {}
@@ -197,7 +195,6 @@ public:
     virtual QString state() { return QString::null; }
 
     virtual void attach();
-    virtual void detach();
     virtual khtml::RenderStyle *styleForRenderer(khtml::RenderObject *parent);
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
     virtual void recalcStyle( StyleChange = NoChange );
@@ -211,12 +208,10 @@ public:
     void dispatchAttrRemovalEvent(AttributeImpl *attr);
     void dispatchAttrAdditionEvent(AttributeImpl *attr);
 
-    virtual void accessKeyAction() {};
+    virtual void accessKeyAction(bool sendToAnyEvent) { };
 
     virtual DOMString toString() const;
 
-    virtual void defaultEventHandler(EventImpl *evt);
-    
     virtual bool isURLAttribute(AttributeImpl *attr) const;
     
 #ifndef NDEBUG
@@ -226,12 +221,19 @@ public:
 #if APPLE_CHANGES
     static Element createInstance(ElementImpl *impl);
 #endif
+
+#ifndef NDEBUG
+    virtual void formatForDebugger(char *buffer, unsigned length) const;
+#endif
+
 protected:
     virtual void createAttributeMap() const;
     DOMString openTagStartToString() const;
 
 private:
     void updateId(const AtomicString& oldId, const AtomicString& newId);
+
+    virtual void updateStyleAttributeIfNeeded() const {};
 
 protected: // member variables
     mutable NamedAttrMapImpl *namedAttrMap;
@@ -274,6 +276,7 @@ public:
     virtual AttrImpl *getNamedItem ( NodeImpl::Id id ) const;
     virtual Node removeNamedItem ( NodeImpl::Id id, int &exceptioncode );
     virtual Node setNamedItem ( NodeImpl* arg, int &exceptioncode );
+
 
     virtual AttrImpl *item ( unsigned long index ) const;
     unsigned long length() const { return len; }

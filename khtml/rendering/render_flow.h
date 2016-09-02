@@ -24,7 +24,7 @@
 #ifndef RENDER_FLOW_H
 #define RENDER_FLOW_H
 
-#include "render_box.h"
+#include "render_container.h"
 #include "bidi.h"
 #include "render_line.h"
 
@@ -39,11 +39,11 @@ namespace khtml {
  * behaviour of text, so putting the layouting routines in the inline
  * elements is impossible.
  */
-class RenderFlow : public RenderBox
+class RenderFlow : public RenderContainer
 {
 public:
     RenderFlow(DOM::NodeImpl* node)
-      : RenderBox(node), m_lineHeight(-1)
+      : RenderContainer(node), m_lineHeight(-1)
     { m_continuation = 0; m_firstLineBox = 0; m_lastLineBox = 0;}
 
     virtual RenderFlow* continuation() const { return m_continuation; }
@@ -62,7 +62,7 @@ public:
     void deleteLineBoxes();
     virtual void detach();
 
-    virtual void dirtyLinesFromChangedChild(RenderObject* child);
+    virtual void dirtyLinesFromChangedChild(RenderObject* child, bool adding = true);
     
     virtual short lineHeight(bool firstLine, bool isRootLineBox=false) const;
     
@@ -72,8 +72,8 @@ public:
     virtual InlineBox* createInlineBox(bool makePlaceHolderBox, bool isRootLineBox, bool isOnlyRun=false);
     virtual void dirtyLineBoxes(bool fullLayout, bool isRootLineBox = false);
     
-    void paintLineBoxBackgroundBorder(PaintInfo& i, int _tx, int _ty);
-    void paintLineBoxDecorations(PaintInfo& i, int _tx, int _ty, bool paintedChildren = false);
+    void paintLines(PaintInfo& i, int _tx, int _ty);
+    bool hitTestLines(NodeInfo& i, int x, int y, int tx, int ty, HitTestAction hitTestAction);
 
     virtual QRect getAbsoluteRepaintRect();
     
@@ -81,7 +81,14 @@ public:
     virtual int rightmostPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
     virtual int leftmostPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
     
-    virtual void caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height);
+    virtual QRect caretRect(int offset, EAffinity affinity = UPSTREAM, int *extraWidthToEndOfLine = 0);
+
+#ifdef APPLE_CHANGES
+    virtual void addFocusRingRects(QPainter *painter, int _tx, int _ty);
+    void paintFocusRing(QPainter *p, int tx, int ty);
+#endif
+    void paintOutlineForLine(QPainter *p, int tx, int ty, const QRect &prevLine, const QRect &thisLine, const QRect &nextLine);
+    void paintOutlines(QPainter *p, int tx, int ty);
 
 protected:
     // An inline can be split with blocks occurring in between the inline content.

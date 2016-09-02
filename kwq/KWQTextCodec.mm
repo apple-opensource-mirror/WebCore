@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003 Apple Computer, Inc.  All rights reserved.
+ * Copyright (C) 2004 Apple Computer, Inc.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -147,7 +147,7 @@ QCString QTextCodec::fromUnicode(const QString &qcs) const
     // FIXME: Since there's no "force ASCII range" mode in CFString, we change the backslash into a yen sign.
     // Encoding will change the yen sign back into a backslash.
     QString copy = qcs;
-    copy.replace('\\', backslashAsCurrencySymbol());
+    copy.replace(QChar('\\'), backslashAsCurrencySymbol());
     CFStringRef cfs = copy.getCFString();
 
     CFRange range = CFRangeMake(0, CFStringGetLength(cfs));
@@ -251,7 +251,7 @@ QString KWQTextDecoder::convertLatin1(const unsigned char *s, int length)
         return QString(reinterpret_cast<const char *>(s), length);
     }
 
-    QString result;
+    QString result("");
     
     result.reserve(length);
     
@@ -279,7 +279,7 @@ QString KWQTextDecoder::convertUTF16(const unsigned char *s, int length)
     const unsigned char *p = s;
     unsigned len = length;
     
-    QString result;
+    QString result("");
     
     result.reserve(length / 2);
 
@@ -321,7 +321,7 @@ QString KWQTextDecoder::convertUTF16(const unsigned char *s, int length)
             }
         }
         result.append(reinterpret_cast<QChar *>(buffer), bufferLength);
-        len -= bufferLength * 2;
+        len -= runLength * 2;
     }
     
     if (len) {
@@ -395,6 +395,7 @@ OSStatus KWQTextDecoder::convertOneChunkUsingTEC(const unsigned char *inputBuffe
         // Now, do a conversion on the buffer.
         status = TECConvertText(_converter, _bufferedBytes, _numBufferedBytes + bytesToPutInBuffer, &bytesRead,
             reinterpret_cast<unsigned char *>(outputBuffer), outputBufferLength, &bytesWritten);
+        ASSERT(bytesRead <= _numBufferedBytes + bytesToPutInBuffer);
 
         if (status == kTECPartialCharErr && bytesRead == 0) {
             // Handle the case where the partial character was not converted.
@@ -428,6 +429,7 @@ OSStatus KWQTextDecoder::convertOneChunkUsingTEC(const unsigned char *inputBuffe
     } else {
         status = TECConvertText(_converter, inputBuffer, inputBufferLength, &bytesRead,
             static_cast<unsigned char *>(outputBuffer), outputBufferLength, &bytesWritten);
+        ASSERT(static_cast<int>(bytesRead) <= inputBufferLength);
     }
 
     // Work around bug 3351093, where sometimes we get kTECBufferBelowMinimumSizeErr instead of kTECOutputBufferFullStatus.
@@ -447,7 +449,7 @@ QString KWQTextDecoder::convertUsingTEC(const unsigned char *chs, int len, bool 
         return QString();
     }
     
-    QString result;
+    QString result("");
 
     result.reserve(len);
 
@@ -552,8 +554,11 @@ QString KWQTextDecoder::toUnicode(const char *chs, int len, bool flush)
 {
     ASSERT_ARG(len, len >= 0);
     
-    if (_error || !chs || (len <= 0 && !flush)) {
+    if (_error || !chs) {
         return QString();
+    }
+    if (len <= 0 && !flush) {
+        return "";
     }
 
     // Handle normal case.
@@ -590,7 +595,7 @@ QString KWQTextDecoder::toUnicode(const char *chs, int len, bool flush)
         int skip = BOMLength - numBufferedBytes;
         _numBufferedBytes = 0;
         _atStart = false;
-        return len == skip ? QString() : convert(chs + skip, len - skip, flush);
+        return len == skip ? QString("") : convert(chs + skip, len - skip, flush);
     }
 
     // Handle case where we know there is no BOM coming.
@@ -609,5 +614,5 @@ QString KWQTextDecoder::toUnicode(const char *chs, int len, bool flush)
     // Continue to look for the BOM.
     memcpy(&_bufferedBytes[numBufferedBytes], chs, len);
     _numBufferedBytes += len;
-    return QString();
+    return "";
 }

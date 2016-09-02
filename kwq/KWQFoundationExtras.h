@@ -60,11 +60,24 @@ static inline id KWQRetainNSRelease(id obj)
     return obj;
 }
 
+// Use KWQCFAutorelease to return an object made by a CoreFoundation
+// "create" or "copy" function as an autoreleased and garbage collected
+// object. CF objects need to be "made collectable" for autorelease to work
+// properly under GC.
+
+static inline id KWQCFAutorelease(CFTypeRef obj)
+{
+#if !BUILDING_ON_PANTHER
+    if (obj) CFMakeCollectable(obj);
+#endif
+    [(id)obj autorelease];
+    return (id)obj;
+}
+
 // Definitions for GC-specific methods for Panther.
 // The finalize method simply won't be called.
-// The drain method is implemented (as a simple call to release).
 
-#if MAC_OS_X_VERSION_MAX_ALLOWED <= MAC_OS_X_VERSION_10_3
+#if BUILDING_ON_PANTHER
 
 @interface NSObject (KWQFoundationExtras)
 - (void)finalize;

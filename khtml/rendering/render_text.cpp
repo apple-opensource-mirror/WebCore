@@ -25,8 +25,10 @@
 //#define BIDI_DEBUG
 
 #include "rendering/render_canvas.h"
+#include "rendering/render_object.h"
 #include "rendering/render_text.h"
 #include "rendering/break_lines.h"
+#include "dom/dom2_range.h"
 #include "xml/dom_nodeimpl.h"
 #include "xml/dom_docimpl.h"
 #include "xml/dom_position.h"
@@ -34,9 +36,21 @@
 
 #include "misc/loader.h"
 
+#include "khtml_part.h"
+
 #include <qpainter.h>
 #include <kdebug.h>
 #include <assert.h>
+
+// You may have to turn this to 0 to compile without the headers for ICU installed.
+#define HAVE_ICU_LIBRARY 1
+
+#if HAVE_ICU_LIBRARY
+#include <unicode/ubrk.h>
+#include <unicode/uloc.h>
+#include <unicode/utypes.h>
+#include <unicode/parseerr.h>
+#endif
 
 using namespace khtml;
 using namespace DOM;
@@ -70,6 +84,100 @@ void InlineTextBox::operator delete(void* ptr, size_t sz)
     
     // Stash size where detach can find it.
     *(size_t *)ptr = sz;
+}
+
+RenderText* InlineTextBox::textObject()
+{
+    return static_cast<RenderText*>(m_object);
+}
+
+bool InlineTextBox::checkVerticalPoint(int _y, int _ty, int _h)
+{
+    int topY = m_y;
+    int bottomY = m_y + m_height;
+    if (root()->hasSelectedChildren()) {
+        topY = kMin(root()->selectionTop(), topY);
+        bottomY = kMax(bottomY, root()->bottomOverflow());
+    }
+    if ((_ty + topY >= _y + _h) || (_ty + bottomY <= _y))
+        return false;
+    return true;
+}
+
+bool InlineTextBox::isSelected(int startPos, int endPos) const
+{
+    int sPos = kMax(startPos - m_start, 0);
+    int ePos = kMin(endPos - m_start, (int)m_len);
+    return (sPos < ePos);
+}
+
+RenderObject::SelectionState InlineTextBox::selectionState()
+{
+    RenderObject::SelectionState state = object()->selectionState();
+    if (state == RenderObject::SelectionStart || state == RenderObject::SelectionEnd ||
+        state == RenderObject::SelectionBoth) {
+        int startPos, endPos;
+        object()->selectionStartEnd(startPos, endPos);
+        
+        bool start = (state != RenderObject::SelectionEnd && startPos >= m_start && startPos < m_start + m_len);
+        bool end = (state != RenderObject::SelectionStart && endPos > m_start && endPos <= m_start + m_len);
+        if (start && end)
+            state = RenderObject::SelectionBoth;
+        else if (start)
+            state = RenderObject::SelectionStart;
+        else if (end)
+            state = RenderObject::SelectionEnd;
+        else if ((state == RenderObject::SelectionEnd || startPos < m_start) &&
+                 (state == RenderObject::SelectionStart || endPos > m_start + m_len))
+            state = RenderObject::SelectionInside;
+    }
+    return state;
+}
+
+QRect InlineTextBox::selectionRect(int tx, int ty, int startPos, int endPos)
+{
+    int sPos = kMax(startPos - m_start, 0);
+    int ePos = kMin(endPos - m_start, (int)m_len);
+    
+    if (sPos >= ePos)
+        return QRect();
+
+    RootInlineBox* rootBox = root();
+    int selStart = m_reversed ? m_x + m_width : m_x;
+    int selEnd = selStart;
+    int selTop = rootBox->selectionTop();
+    int selHeight = rootBox->selectionHeight();
+    
+    // FIXME: For justified text, just return the entire text box's rect.  At the moment there's still no easy
+    // way to get the width of a run including the justification padding.
+    if (sPos > 0 && !m_toAdd) {
+        // The selection begins in the middle of our run.
+        int w = textObject()->width(m_start, sPos, m_firstLine);
+        if (m_reversed)
+            selStart -= w;
+        else
+            selStart += w;
+    }
+
+    if (m_toAdd || (sPos == 0 && ePos == m_len)) {
+        if (m_reversed)
+            selEnd = m_x;
+        else
+            selEnd = m_x + m_width;
+    }
+    else {
+        // Our run is partially selected, and so we have to actually do a measurement.
+        int w = textObject()->width(sPos + m_start, ePos - sPos, m_firstLine);
+        if (m_reversed)
+            selEnd = selStart - w;
+        else
+            selEnd = selStart + w;
+    }
+
+    int selLeft = m_reversed ? selEnd : selStart;
+    int selRight = m_reversed ? selStart : selEnd;
+
+    return QRect(selLeft + tx, selTop + ty, selRight - selLeft, selHeight);
 }
 
 void InlineTextBox::deleteLine(RenderArena* arena)
@@ -137,7 +245,299 @@ int InlineTextBox::placeEllipsisBox(bool ltr, int blockEdge, int ellipsisWidth, 
     return -1;
 }
 
-void InlineTextBox::paintSelection(const Font *f, RenderText *text, QPainter *p, RenderStyle* style, int tx, int ty, int startPos, int endPos, bool extendSelection)
+static int
+simpleDifferenceBetweenColors(QColor c1, QColor c2)
+{
+    // a distance could be computed by squaring the differences between components, but
+    // this is faster and so far seems good enough for our purposes.
+    return abs(c1.red() - c2.red()) + abs(c1.green() - c2.green()) + abs(c1.blue() - c2.blue());
+}
+
+static QColor 
+correctedTextColor(QColor textColor, QColor backgroundColor) 
+{
+    // Adjust the text color if it is too close to the background color,
+    // by darkening or lightening it to move it further away.
+    
+    int d = simpleDifferenceBetweenColors(textColor, backgroundColor);
+    // semi-arbitrarily chose 255 value here after a few tests; 
+    if (d > 255) {
+        return textColor;
+    }
+    
+    int distanceFromWhite = simpleDifferenceBetweenColors(textColor, Qt::white);
+    int distanceFromBlack = simpleDifferenceBetweenColors(textColor, Qt::black);
+
+    if (distanceFromWhite < distanceFromBlack) {
+        return textColor.dark();
+    }
+    
+    return textColor.light();
+}
+
+bool InlineTextBox::nodeAtPoint(RenderObject::NodeInfo& i, int x, int y, int tx, int ty)
+{
+    if (object()->isBR())
+        return false;
+
+    QRect rect(tx + m_x, ty + m_y, m_width, m_height);
+    if (m_truncation != cFullTruncation && 
+        object()->style()->visibility() == VISIBLE && rect.contains(x, y)) {
+        object()->setInnerNode(i);
+        return true;
+    }
+    return false;
+}
+
+void InlineTextBox::paint(RenderObject::PaintInfo& i, int tx, int ty)
+{
+    if (object()->isBR() || !object()->shouldPaintWithinRoot(i) || object()->style()->visibility() != VISIBLE ||
+        m_truncation == cFullTruncation || i.phase == PaintActionOutline)
+        return;
+
+    int xPos = tx + m_x;
+    int w = width();
+    if ((xPos >= i.r.x() + i.r.width()) || (xPos + w <= i.r.x()))
+        return;
+        
+    bool isPrinting = (i.p->device()->devType() == QInternal::Printer);
+
+    // Determine whether or not we're selected.
+    bool haveSelection = !isPrinting && selectionState() != RenderObject::SelectionNone;
+    if (!haveSelection && i.phase == PaintActionSelection)
+        // When only painting the selection, don't bother to paint if there is none.
+        return;
+
+    // Determine whether or not we have marked text.
+    Range markedTextRange = KWQ(object()->document()->part())->markedTextRange();
+    bool haveMarkedText = markedTextRange.handle() != 0 && markedTextRange.startContainer() == object()->node();
+    bool markedTextUsesUnderlines = KWQ(object()->document()->part())->markedTextUsesUnderlines();
+
+
+    // Set our font.
+    RenderStyle* styleToUse = object()->style(m_firstLine);
+    int d = styleToUse->textDecorationsInEffect();
+    if (styleToUse->font() != i.p->font())
+        i.p->setFont(styleToUse->font());
+    const Font *font = &styleToUse->htmlFont();
+
+    // 1. Paint backgrounds behind text if needed.  Examples of such backgrounds include selection
+    // and marked text.
+    if ((haveSelection || haveMarkedText) && !markedTextUsesUnderlines && i.phase != PaintActionSelection && !isPrinting) {
+        if (haveMarkedText)
+            paintMarkedTextBackground(i.p, tx, ty, styleToUse, font, markedTextRange.startOffset(), markedTextRange.endOffset());
+
+        if (haveSelection)
+            paintSelection(i.p, tx, ty, styleToUse, font);
+    }
+
+    // 2. Now paint the foreground, including text and decorations like underline/overline (in quirks mode only).
+    if (m_len <= 0) return;
+    QValueList<DocumentMarker> markers = object()->document()->markersForNode(object()->node());
+    QValueListIterator <DocumentMarker> markerIt = markers.begin();
+
+    QValueList<KWQKHTMLPart::MarkedTextUnderline> underlines;
+    if (haveMarkedText && markedTextUsesUnderlines) {
+        underlines = KWQ(object()->document()->part())->markedTextUnderlines();
+    }
+    QValueListIterator<KWQKHTMLPart::MarkedTextUnderline> underlineIt = underlines.begin();
+
+    QColor textColor = styleToUse->color();
+    
+    // Make the text color legible against a white background
+    if (styleToUse->forceBackgroundsToWhite())
+        textColor = correctedTextColor(textColor, Qt::white);
+
+    if (textColor != i.p->pen().color())
+        i.p->setPen(textColor);
+
+    // Set a text shadow if we have one.
+    // FIXME: Support multiple shadow effects.  Need more from the CG API before
+    // we can do this.
+    bool setShadow = false;
+    if (styleToUse->textShadow()) {
+        i.p->setShadow(styleToUse->textShadow()->x, styleToUse->textShadow()->y,
+                        styleToUse->textShadow()->blur, styleToUse->textShadow()->color);
+        setShadow = true;
+    }
+
+    bool paintSelectedTextOnly = (i.phase == PaintActionSelection);
+    bool paintSelectedTextSeparately = false; // Whether or not we have to do multiple paints.  Only
+                                              // necessary when a custom ::selection foreground color is applied.
+    QColor selectionColor = i.p->pen().color();
+    ShadowData* selectionTextShadow = 0;
+    if (haveSelection) {
+        RenderStyle* pseudoStyle = object()->getPseudoStyle(RenderStyle::SELECTION);
+        if (pseudoStyle) {
+            if (pseudoStyle->color() != selectionColor || pseudoStyle->textShadow()) {
+                if (!paintSelectedTextOnly)
+                    paintSelectedTextSeparately = true;
+                if (pseudoStyle->color() != selectionColor)
+                    selectionColor = pseudoStyle->color();
+                if (pseudoStyle->textShadow())
+                    selectionTextShadow = pseudoStyle->textShadow();
+            }
+        }
+    }
+
+    if (!paintSelectedTextOnly && !paintSelectedTextSeparately) {
+        // paint all the text
+        // FIXME: Handle RTL direction, handle reversed strings.  For now truncation can only be turned on
+        // for non-reversed LTR strings.
+        int endPoint = m_len;
+        if (m_truncation != cNoTruncation)
+            endPoint = m_truncation - m_start;
+        font->drawText(i.p, m_x + tx, m_y + ty + m_baseline,
+                       textObject()->string()->s, textObject()->string()->l, m_start, endPoint,
+                       m_toAdd, m_reversed ? QPainter::RTL : QPainter::LTR, styleToUse->visuallyOrdered());
+    } else {
+        int sPos, ePos;
+        selectionStartEnd(sPos, ePos);
+        if (paintSelectedTextSeparately) {
+            // paint only the text that is not selected
+            if (sPos >= ePos) {
+                font->drawText(i.p, m_x + tx, m_y + ty + m_baseline,
+                               textObject()->string()->s, textObject()->string()->l, m_start, m_len,
+                               m_toAdd, m_reversed ? QPainter::RTL : QPainter::LTR, styleToUse->visuallyOrdered());
+            } else {
+                if (sPos - 1 >= 0) {
+                    font->drawText(i.p, m_x + tx, m_y + ty + m_baseline, textObject()->string()->s,
+                                   textObject()->string()->l, m_start, m_len,
+                                   m_toAdd, m_reversed ? QPainter::RTL : QPainter::LTR, styleToUse->visuallyOrdered(), 0, sPos);
+                }
+                if (ePos < m_start + m_len) {
+                    font->drawText(i.p, m_x + tx, m_y + ty + m_baseline, textObject()->string()->s,
+                                   textObject()->string()->l, m_start, m_len,
+                                   m_toAdd, m_reversed ? QPainter::RTL : QPainter::LTR, styleToUse->visuallyOrdered(), ePos, -1);
+                }
+            }
+        }
+            
+        if (sPos < ePos) {
+            // paint only the text that is selected
+            if (selectionColor != i.p->pen().color())
+                i.p->setPen(selectionColor);
+            
+            if (selectionTextShadow)
+                i.p->setShadow(selectionTextShadow->x,
+                               selectionTextShadow->y,
+                               selectionTextShadow->blur,
+                               selectionTextShadow->color);
+            font->drawText(i.p, m_x + tx, m_y + ty + m_baseline, textObject()->string()->s,
+                           textObject()->string()->l, m_start, m_len,
+                           m_toAdd, m_reversed ? QPainter::RTL : QPainter::LTR, styleToUse->visuallyOrdered(), sPos, ePos);
+            if (selectionTextShadow)
+                i.p->clearShadow();
+        }
+    }
+
+    // Paint decorations
+    if (d != TDNONE && i.phase != PaintActionSelection && styleToUse->htmlHacks()) {
+        i.p->setPen(styleToUse->color());
+        paintDecoration(i.p, tx, ty, d);
+    }
+
+    // Draw any doc markers that touch this run
+    // Note end() points at the last char, not one past it like endOffset and ranges do
+    if (i.phase != PaintActionSelection) {
+        for ( ; markerIt != markers.end(); markerIt++) {
+            DocumentMarker marker = *markerIt;
+
+            if (marker.endOffset <= start())
+                // marker is completely before this run.  This might be a marker that sits before the
+                // first run we draw, or markers that were within runs we skipped due to truncation.
+                continue;
+            
+            if (marker.startOffset <= end()) {
+                // marker intersects this run.  Paint it.
+                paintMarker(i.p, tx, ty, marker);
+                if (marker.endOffset > end() + 1)
+                    // marker also runs into the next run. Bail now, no more marker advancement.
+                    break;
+            } else
+                // marker is completely after this run, bail.  A later run will paint it.
+                break;
+        }
+
+
+        for ( ; underlineIt != underlines.end(); underlineIt++) {
+            KWQKHTMLPart::MarkedTextUnderline underline = *underlineIt;
+
+            if (underline.endOffset <= start())
+                // underline is completely before this run.  This might be an underlinethat sits
+                // before the first run we draw, or underlines that were within runs we skipped 
+                // due to truncation.
+                continue;
+            
+            if (underline.startOffset <= end()) {
+                // underline intersects this run.  Paint it.
+                paintMarkedTextUnderline(i.p, tx, ty, underline);
+                if (underline.endOffset > end() + 1)
+                    // underline also runs into the next run. Bail now, no more marker advancement.
+                    break;
+            } else
+                // underline is completely after this run, bail.  A later run will paint it.
+                break;
+        }
+
+
+
+    }
+
+    if (setShadow)
+        i.p->clearShadow();
+}
+
+void InlineTextBox::selectionStartEnd(int& sPos, int& ePos)
+{
+    int startPos, endPos;
+    if (object()->selectionState() == RenderObject::SelectionInside) {
+        startPos = 0;
+        endPos = textObject()->string()->l;
+    } else {
+        textObject()->selectionStartEnd(startPos, endPos);
+        if (object()->selectionState() == RenderObject::SelectionStart)
+            endPos = textObject()->string()->l;
+        else if (object()->selectionState() == RenderObject::SelectionEnd)
+            startPos = 0;
+    }
+
+    sPos = kMax(startPos - m_start, 0);
+    ePos = kMin(endPos - m_start, (int)m_len);
+}
+
+void InlineTextBox::paintSelection(QPainter* p, int tx, int ty, RenderStyle* style, const Font* f)
+{
+    // See if we have a selection to paint at all.
+    int sPos, ePos;
+    selectionStartEnd(sPos, ePos);
+    if (sPos >= ePos)
+        return;
+
+    // Macintosh-style text highlighting is to draw with a particular background color, not invert.
+    QColor textColor = style->color();
+    QColor c = object()->selectionColor(p);
+    if (!c.isValid())
+        return;
+
+    // If the text color ends up being the same as the selection background, invert the selection
+    // background.  This should basically never happen, since the selection has transparency.
+    if (textColor == c)
+        c = QColor(0xff - c.red(), 0xff - c.green(), 0xff - c.blue());
+
+    p->save();
+    p->setPen(c); // Don't draw text at all!
+    RootInlineBox* r = root();
+    int x = m_x + tx;
+    int y = r->selectionTop();
+    int h = r->selectionHeight();
+    f->drawHighlightForText(p, x, y + ty, h,
+                            textObject()->str->s, textObject()->str->l, m_start, m_len,
+                            m_toAdd, m_reversed ? QPainter::RTL : QPainter::LTR, style->visuallyOrdered(), sPos, ePos, c);
+    p->restore();
+}
+
+void InlineTextBox::paintMarkedTextBackground(QPainter* p, int tx, int ty, RenderStyle* style, const Font* f, int startPos, int endPos)
 {
     int offset = m_start;
     int sPos = kMax(startPos - offset, 0);
@@ -147,61 +547,20 @@ void InlineTextBox::paintSelection(const Font *f, RenderText *text, QPainter *p,
         return;
 
     p->save();
-#if APPLE_CHANGES
-    // Macintosh-style text highlighting is to draw with a particular background color, not invert.
-    QColor textColor = style->color();
-    QColor c = p->selectedTextBackgroundColor();
-    
-    // if text color and selection background color are identical, invert background color.
-    if (textColor == c)
-        c = QColor(0xff - c.red(), 0xff - c.green(), 0xff - c.blue());
 
-    RenderStyle* pseudoStyle = object()->getPseudoStyle(RenderStyle::SELECTION);
-    if (pseudoStyle && pseudoStyle->backgroundColor().isValid())
-        c = pseudoStyle->backgroundColor();
+    QColor c = QColor(225, 221, 85);
+    
     p->setPen(c); // Don't draw text at all!
-    
-#else
-    QColor c = style->color();
-    p->setPen(QColor(0xff-c.red(),0xff-c.green(),0xff-c.blue()));
-    ty + m_baseline;
-#endif
-    
-#if APPLE_CHANGES
-    // Do the calculations to draw selections as tall as the line.
-    // Use the bottom of the line above as the y position (if there is one, 
-    // otherwise use the top of this renderer's line) and the height of the line as the height. 
-    // This mimics Cocoa.
-    RenderBlock *cb = object()->containingBlock();
 
-    if (root()->prevRootBox())
-        ty = root()->prevRootBox()->bottomOverflow();
-    else
-        ty = root()->topOverflow();
-
-    int h = root()->bottomOverflow() - ty;
-
-    int absx, absy;
-    cb->absolutePosition(absx, absy);
-    
+    RootInlineBox* r = root();
     int x = m_x + tx;
-    int minX = x;
-    int maxX = x;
-    if ((extendSelection || startPos < m_start) && root()->firstLeafChild() == this)
-        minX = absx + kMax(cb->leftOffset(ty), cb->leftOffset(root()->blockHeight()));
-    if ((extendSelection || endPos > m_start + m_len) && root()->lastLeafChild() == this)
-        maxX = absx + kMin(cb->rightOffset(ty), cb->rightOffset(root()->blockHeight()));
-    
-    f->drawHighlightForText(p, x, minX, maxX, absy + ty, h, text->str->s, text->str->l, m_start, m_len,
+    int y = r->selectionTop();
+    int h = r->selectionHeight();
+    f->drawHighlightForText(p, x, y + ty, h, textObject()->str->s, textObject()->str->l, m_start, m_len,
 		m_toAdd, m_reversed ? QPainter::RTL : QPainter::LTR, style->visuallyOrdered(), sPos, ePos, c);
-#else
-    f->drawHighlightForText(p, m_x + tx, m_y + ty, text->str->s, text->str->l, m_start, m_len,
-		m_toAdd, m_reversed ? QPainter::RTL : QPainter::LTR, sPos, ePos, c);
-#endif
     p->restore();
 }
 
-#ifdef APPLE_CHANGES
 void InlineTextBox::paintDecoration( QPainter *pt, int _tx, int _ty, int deco)
 {
     _tx += m_x;
@@ -231,36 +590,90 @@ void InlineTextBox::paintDecoration( QPainter *pt, int _tx, int _ty, int deco)
         pt->drawLineForText(_tx, _ty, 2*m_baseline/3, width);
     }
 }
-#else
-void InlineTextBox::paintDecoration( QPainter *pt, int _tx, int _ty, int decoration)
+
+void InlineTextBox::paintMarker(QPainter *pt, int _tx, int _ty, DocumentMarker marker)
 {
     _tx += m_x;
     _ty += m_y;
 
-    int width = m_width - 1;
-
-    QColor underline, overline, linethrough;
-    object()->getTextDecorationColors(decoration, underline, overline, linethrough, true);
+    if (m_truncation == cFullTruncation)
+        return;
     
-    int underlineOffset = ( pt->fontMetrics().height() + m_baseline ) / 2;
-    if(underlineOffset <= m_baseline) underlineOffset = m_baseline+1;
+    int start = 0;                  // start of line to draw, relative to _tx
+    int width = m_width;            // how much line to draw
+    bool useWholeWidth = true;
+    ulong paintStart = m_start;
+    ulong paintEnd = end()+1;      // end points at the last char, not past it
+    if (paintStart <= marker.startOffset) {
+        paintStart = marker.startOffset;
+        useWholeWidth = false;
+        start = static_cast<RenderText*>(m_object)->width(m_start, paintStart - m_start, m_firstLine);
+    }
+    if (paintEnd != marker.endOffset) {      // end points at the last char, not past it
+        paintEnd = kMin(paintEnd, marker.endOffset);
+        useWholeWidth = false;
+    }
+    if (m_truncation != cNoTruncation) {
+        paintEnd = kMin(paintEnd, (ulong)m_truncation);
+        useWholeWidth = false;
+    }
+    if (!useWholeWidth) {
+        width = static_cast<RenderText*>(m_object)->width(paintStart, paintEnd - paintStart, m_firstLine);
+    }
 
-    if(deco & UNDERLINE){
-        pt->setPen(underline);
-        pt->drawLine(_tx, _ty + underlineOffset, _tx + width, _ty + underlineOffset );
+    // IMPORTANT: The misspelling underline is not considered when calculating the text bounds, so we have to
+    // make sure to fit within those bounds.  This means the top pixel(s) of the underline will overlap the
+    // bottom pixel(s) of the glyphs in smaller font sizes.  The alternatives are to increase the line spacing (bad!!)
+    // or decrease the underline thickness.  The overlap is actually the most useful, and matches what AppKit does.
+    // So, we generally place the underline at the bottom of the text, but in larger fonts that's not so good so
+    // we pin to two pixels under the baseline.
+    int lineThickness = pt->misspellingLineThickness();
+    int descent = m_height - m_baseline;
+    int underlineOffset;
+    if (descent <= (2 + lineThickness)) {
+        // place the underline at the very bottom of the text in small/medium fonts
+        underlineOffset = m_height - lineThickness;
+    } else {
+        // in larger fonts, tho, place the underline up near the baseline to prevent big gap
+        underlineOffset = m_baseline + 2;
     }
-    if (deco & OVERLINE) {
-        pt->setPen(overline);
-        pt->drawLine(_tx, _ty, _tx + width, _ty );
-    }
-    if(deco & LINE_THROUGH) {
-        pt->setPen(linethrough);
-        pt->drawLine(_tx, _ty + 2*m_baseline/3, _tx + width, _ty + 2*m_baseline/3 );
-    }
-    // NO! Do NOT add BLINK! It is the most annouing feature of Netscape, and IE has a reason not to
-    // support it. Lars
+    pt->drawLineForMisspelling(_tx + start, _ty + underlineOffset, width);
 }
-#endif
+
+void InlineTextBox::paintMarkedTextUnderline(QPainter *pt, int _tx, int _ty, KWQKHTMLPart::MarkedTextUnderline underline)
+{
+    _tx += m_x;
+    _ty += m_y;
+
+    if (m_truncation == cFullTruncation)
+        return;
+    
+    int start = 0;                  // start of line to draw, relative to _tx
+    int width = m_width;            // how much line to draw
+    bool useWholeWidth = true;
+    ulong paintStart = m_start;
+    ulong paintEnd = end()+1;      // end points at the last char, not past it
+    if (paintStart <= underline.startOffset) {
+        paintStart = underline.startOffset;
+        useWholeWidth = false;
+        start = static_cast<RenderText*>(m_object)->width(m_start, paintStart - m_start, m_firstLine);
+    }
+    if (paintEnd != underline.endOffset) {      // end points at the last char, not past it
+        paintEnd = kMin(paintEnd, (ulong)underline.endOffset);
+        useWholeWidth = false;
+    }
+    if (m_truncation != cNoTruncation) {
+        paintEnd = kMin(paintEnd, (ulong)m_truncation);
+        useWholeWidth = false;
+    }
+    if (!useWholeWidth) {
+        width = static_cast<RenderText*>(m_object)->width(paintStart, paintEnd - paintStart, m_firstLine);
+    }
+
+    int underlineOffset = m_height - 3;
+    pt->setPen(QPen(underline.color, underline.thick ? 2 : 0));
+    pt->drawLineForText(_tx + start, _ty, underlineOffset, width);
+}
 
 long InlineTextBox::caretMinOffset() const
 {
@@ -275,6 +688,55 @@ long InlineTextBox::caretMaxOffset() const
 unsigned long InlineTextBox::caretMaxRenderedOffset() const
 {
     return m_start + m_len;
+}
+
+#if HAVE_ICU_LIBRARY
+
+static UBreakIterator *getCharacterBreakIterator(const DOMStringImpl *i)
+{
+    // The locale is currently ignored when determining character cluster breaks.  This may change
+    // in the future (according to Deborah Goldsmith).
+    static bool createdIterator = false;
+    static UBreakIterator *iterator;
+    UErrorCode status;
+    if (!createdIterator) {
+        status = U_ZERO_ERROR;
+        iterator = ubrk_open(UBRK_CHARACTER, "en_us", NULL, 0, &status);
+        createdIterator = true;
+    }
+    if (!iterator) {
+        return NULL;
+    }
+    status = U_ZERO_ERROR;
+    ubrk_setText(iterator, reinterpret_cast<const UChar *>(i->s), i->l, &status);
+    if (status != U_ZERO_ERROR) {
+        return NULL;
+    }
+    return iterator;
+}
+
+#endif
+
+long RenderText::previousOffset (long current) const
+{
+#if HAVE_ICU_LIBRARY
+    UBreakIterator *iterator = getCharacterBreakIterator(str);
+    if (iterator) {
+        return ubrk_preceding(iterator, current);
+    }
+#endif
+    return current - 1;
+}
+
+long RenderText::nextOffset (long current) const
+{
+#if HAVE_ICU_LIBRARY
+    UBreakIterator *iterator = getCharacterBreakIterator(str);
+    if (iterator) {
+        return ubrk_following(iterator, current);
+    }
+#endif
+    return current + 1;
 }
 
 #define LOCAL_WIDTH_BUF_SIZE	1024
@@ -349,11 +811,17 @@ RenderText::~RenderText()
 void RenderText::detach()
 {
     if (!documentBeingDestroyed()) {
-        if (firstTextBox())
+        if (firstTextBox()) {
+            if (isBR()) {
+                RootInlineBox* next = firstTextBox()->root()->nextRootBox();
+                if (next)
+                    next->markDirty();
+            }
             for (InlineTextBox* box = firstTextBox(); box; box = box->nextTextBox())
                 box->remove();
-        else if (parent() && isBR())
-            parent()->dirtyLinesFromChangedChild(this);
+        }
+        else if (parent())
+            parent()->dirtyLinesFromChangedChild(this, false);
     }
     deleteTextBoxes();
     RenderObject::detach();
@@ -432,7 +900,7 @@ void RenderText::absoluteRects(QValueList<QRect>& rects, int _tx, int _ty)
                            box->height()));
 }
 
-InlineTextBox* RenderText::findNextInlineTextBox(int offset, int &pos)
+InlineTextBox* RenderText::findNextInlineTextBox(int offset, int &pos) const
 {
     // The text runs point to parts of the rendertext's str string
     // (they don't include '\n')
@@ -454,44 +922,10 @@ InlineTextBox* RenderText::findNextInlineTextBox(int offset, int &pos)
     return s;
 }
 
-bool RenderText::nodeAtPoint(NodeInfo& info, int _x, int _y, int _tx, int _ty,
-                             HitTestAction hitTestAction, bool inside)
-{
-    assert(parent());
-
-    for (InlineTextBox *s = m_firstTextBox; s; s = s->nextTextBox()) {
-        if((_y >=_ty + s->m_y) && (_y < _ty + s->m_y + s->height()) &&
-           (_x >= _tx + s->m_x) && (_x <_tx + s->m_x + s->m_width) ) {
-            inside = true;
-            break;
-        }
-    }
-
-    if (inside && element()) {
-        if (info.innerNode() && info.innerNode()->renderer() && 
-            !info.innerNode()->renderer()->isInline()) {
-            // Within the same layer, inlines are ALWAYS fully above blocks.  Change inner node.
-            info.setInnerNode(element());
-            
-            // Clear everything else.
-            info.setInnerNonSharedNode(0);
-            info.setURLElement(0);
-        }
-        
-        if (!info.innerNode())
-            info.setInnerNode(element());
-
-        if (!info.innerNonSharedNode())
-            info.setInnerNonSharedNode(element());
-    }
-
-    return inside;
-}
-
-Position RenderText::positionForCoordinates(int _x, int _y)
+VisiblePosition RenderText::positionForCoordinates(int _x, int _y)
 {
     if (!firstTextBox() || stringLength() == 0)
-        return Position(element(), 0);
+        return VisiblePosition(element(), 0, DOWNSTREAM);
 
     int absx, absy;
     containingBlock()->absolutePosition(absx, absy);
@@ -499,13 +933,13 @@ Position RenderText::positionForCoordinates(int _x, int _y)
     if (firstTextBox() && _y < absy + firstTextBox()->root()->bottomOverflow() && _x < absx + firstTextBox()->m_x) {
         // at the y coordinate of the first line or above
         // and the x coordinate is to the left than the first text box left edge
-        return Position(element(), firstTextBox()->m_start);
+        return VisiblePosition(element(), firstTextBox()->m_start, DOWNSTREAM);
     }
 
     if (lastTextBox() && _y >= absy + lastTextBox()->root()->topOverflow() && _x >= absx + lastTextBox()->m_x + lastTextBox()->m_width) {
         // at the y coordinate of the last line or below
         // and the x coordinate is to the right than the last text box right edge
-        return Position(element(), lastTextBox()->m_start + lastTextBox()->m_len);
+        return VisiblePosition(element(), lastTextBox()->m_start + lastTextBox()->m_len, DOWNSTREAM);
     }
 
     for (InlineTextBox *box = firstTextBox(); box; box = box->nextTextBox()) {
@@ -515,60 +949,152 @@ Position RenderText::positionForCoordinates(int _x, int _y)
                 // check to see if position goes in this box
                 int offset = box->offsetForPosition(_x - absx);
                 if (offset != -1) {
-                    return Position(element(), offset + box->m_start);
+                    EAffinity affinity = offset >= box->m_len && !box->nextOnLine() ? UPSTREAM : DOWNSTREAM;
+                    return VisiblePosition(element(), offset + box->m_start, affinity);
                 }
             }
-            else if (!box->prevOnLine() && _x < absx + box->m_x)
+            else if (!box->prevOnLine() && _x < absx + box->m_x) {
                 // box is first on line
-                // and the x coordinate is to the left than the first text box left edge
-                return Position(element(), box->m_start);
+                // and the x coordinate is to the left of the first text box left edge
+                return VisiblePosition(element(), box->m_start, DOWNSTREAM);
+            }
             else if (!box->nextOnLine() && _x >= absx + box->m_x + box->m_width)
                 // box is last on line
-                // and the x coordinate is to the right than the last text box right edge
-                return Position(element(), box->m_start + box->m_len);
+                // and the x coordinate is to the right of the last text box right edge
+                return VisiblePosition(element(), box->m_start + box->m_len, UPSTREAM);
         }
     }
     
-    return Position(element(), 0);
+    return VisiblePosition(element(), 0, DOWNSTREAM);
 }
 
-void RenderText::caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height)
+static RenderObject *firstRendererOnNextLine(InlineBox *box)
+{
+    if (!box)
+        return 0;
+
+    RootInlineBox *root = box->root();
+    if (!root)
+        return 0;
+        
+    if (root->endsWithBreak())
+        return 0;
+    
+    RootInlineBox *nextRoot = root->nextRootBox();
+    if (!nextRoot)
+        return 0;
+    
+    InlineBox *firstChild = nextRoot->firstChild();
+    if (!firstChild)
+        return 0;
+
+    return firstChild->object();
+}
+
+static RenderObject *lastRendererOnPrevLine(InlineBox *box)
+{
+    if (!box)
+        return 0;
+    
+    RootInlineBox *root = box->root();
+    if (!root)
+        return 0;
+    
+    if (root->endsWithBreak())
+        return 0;
+    
+    RootInlineBox *prevRoot = root->prevRootBox();
+    if (!prevRoot)
+        return 0;
+    
+    InlineBox *lastChild = prevRoot->lastChild();
+    if (!lastChild)
+        return 0;
+    
+    return lastChild->object();
+}
+
+QRect RenderText::caretRect(int offset, EAffinity affinity, int *extraWidthToEndOfLine)
 {
     if (!firstTextBox() || stringLength() == 0) {
-        _x = _y = height = -1;
-        return;
+        return QRect();
     }
 
     // Find the text box for the given offset
     InlineTextBox *box = 0;
     for (box = firstTextBox(); box; box = box->nextTextBox()) {
-        if (offset <= box->m_start + box->m_len)
+        if ((offset >= box->m_start) && (offset <= box->m_start + box->m_len)) {
+            // Check if downstream affinity would make us move to the next line.
+            InlineTextBox *nextBox = box->nextTextBox();
+            if (offset == box->m_start + box->m_len && affinity == DOWNSTREAM  && nextBox &&  !box->nextOnLine()) {
+                // We're at the end of a line broken on a word boundary and affinity is downstream.
+                // Try to jump down to the next line.
+                if (nextBox) {
+                    // Use the next text box
+                    box = nextBox;
+                    offset = box->m_start;
+                } else {
+                    // Look on the next line
+                    RenderObject *object = firstRendererOnNextLine(box);
+                    if (object)
+                        return object->caretRect(0, affinity);
+                }
+            } else {
+		InlineTextBox *prevBox = box->prevTextBox();
+		if (offset == box->m_start && affinity == UPSTREAM && prevBox && !box->prevOnLine()) {
+		    if (prevBox) {
+			box = prevBox;
+			offset = box->m_start + box->m_len;
+		    } else {
+			RenderObject *object = lastRendererOnPrevLine(box);
+			if (object)
+			    return object->caretRect(0, affinity);
+		    }
+		}
+	    }
             break;
+        }
     }
     
     if (!box) {
-        _x = _y = height = -1;
-        return;
+        return QRect();
     }
 
-    height = box->root()->bottomOverflow() - box->root()->topOverflow();
-    _y = box->root()->topOverflow();
+    int height = box->root()->bottomOverflow() - box->root()->topOverflow();
+    int top = box->root()->topOverflow();
 
     const QFontMetrics &fm = metrics(box->isFirstLineStyle());
-    QString string(str->s + box->m_start, box->m_len);
-    long pos = offset - box->m_start; // the number of characters we are into the string
-    _x = box->m_x + (fm.boundingRect(string, pos)).right();
+    int left;
+    if (box->m_reversed) {
+	long len = box->m_start+box->m_len-offset;
+	QString string(str->s +offset,len);
+	left = box->m_x + fm.boundingRect(string,len).right();
+    } else {
+	long len = offset - box->m_start; // the number of characters we are into the string
+	QString string(str->s + box->m_start,len);
+	left = box->m_x + fm.boundingRect(string,len).right();
+    }
 
-#if 0
-    // EDIT FIXME
-    if (pos)
-        _x += fm.rightBearing(*(str->s + box->m_start + offset));
-#endif
+    // FIXME: should we use the width of the root inline box or the
+    // width of the containing block for this?
+    if (extraWidthToEndOfLine)
+        *extraWidthToEndOfLine = (box->root()->width() + box->root()->xPos()) - (left + 1);
 
     int absx, absy;
     absolutePosition(absx,absy);
-    _x += absx;
-    _y += absy;
+    left += absx;
+    top += absy;
+
+    // FIXME: Need the +1 to match caret position of other programs on Macintosh.
+    // Would be better to somehow derive it once we understand exactly why it's needed.
+    left += 1;
+
+    RenderBlock *cb = containingBlock();
+    int availableWidth = cb->lineWidth(top);
+    if (style()->whiteSpace() == NORMAL)
+        left = kMin(left, absx + box->m_x + availableWidth - 1);
+    
+    return QRect(left, top, 1, height);
 }
 
 void RenderText::posOfChar(int chr, int &x, int &y)
@@ -587,285 +1113,6 @@ void RenderText::posOfChar(int chr, int &x, int &y)
         x += s->m_x; // this is the x of the beginning of the line, but it's good enough for now
         y += s->m_y;
     }
-}
-
-static int
-simpleDifferenceBetweenColors(QColor c1, QColor c2)
-{
-    // a distance could be computed by squaring the differences between components, but
-    // this is faster and so far seems good enough for our purposes.
-    return abs(c1.red() - c2.red()) + abs(c1.green() - c2.green()) + abs(c1.blue() - c2.blue());
-}
-
-static QColor 
-correctedTextColor(QColor textColor, QColor backgroundColor) 
-{
-    // Adjust the text color if it is too close to the background color,
-    // by darkening or lightening it to move it further away.
-    
-    int d = simpleDifferenceBetweenColors(textColor, backgroundColor);
-    // semi-arbitrarily chose 255 value here after a few tests; 
-    if (d > 255) {
-        return textColor;
-    }
-    
-    int distanceFromWhite = simpleDifferenceBetweenColors(textColor, Qt::white);
-    int distanceFromBlack = simpleDifferenceBetweenColors(textColor, Qt::black);
-
-    if (distanceFromWhite < distanceFromBlack) {
-        return textColor.dark();
-    }
-    
-    return textColor.light();
-}
-
-void RenderText::paint(PaintInfo& i, int tx, int ty)
-{
-    if (i.phase != PaintActionForeground && i.phase != PaintActionSelection)
-        return;
-    
-    if (!shouldPaintWithinRoot(i))
-        return;
-        
-    if (style()->visibility() != VISIBLE || !firstTextBox())
-        return;
-    
-    if (ty + firstTextBox()->yPos() > i.r.y() + i.r.height()) return;
-    if (ty + lastTextBox()->yPos() + lastTextBox()->height() < i.r.y()) return;
-    
-    QPainter* p = i.p;
-    RenderStyle* pseudoStyle = style(true);
-    if (pseudoStyle == style()) pseudoStyle = 0;
-    int d = style()->textDecorationsInEffect();
-    bool isPrinting = (p->device()->devType() == QInternal::Printer);
-    
-    // Walk forward until we hit the first line that needs to be painted.
-    InlineTextBox* s = firstTextBox();
-    for (; s && !s->checkVerticalPoint(i.r.y(), ty, i.r.height()); s = s->nextTextBox());
-    if (!s) return;
-    
-    // Now calculate startPos and endPos, for painting selection.
-    // We paint selection while endPos > 0
-    int endPos, startPos;
-    if (!isPrinting && (selectionState() != SelectionNone)) {
-        if (selectionState() == SelectionInside) {
-            //kdDebug(6040) << this << " SelectionInside -> 0 to end" << endl;
-            startPos = 0;
-            endPos = str->l;
-        } else {
-            selectionStartEnd(startPos, endPos);
-            if(selectionState() == SelectionStart)
-                endPos = str->l;
-            else if(selectionState() == SelectionEnd)
-                startPos = 0;
-        }
-        //kdDebug(6040) << this << " Selection from " << startPos << " to " << endPos << endl;
-    }
-
-    const Font *font = &style()->htmlFont();
-
-#if APPLE_CHANGES
-    // Do one pass for the selection, then another for the rest.
-    bool haveSelection = startPos != endPos && !isPrinting && selectionState() != SelectionNone;
-    if (!haveSelection && i.phase == PaintActionSelection) {
-        // When only painting the selection, don't bother to paint if there is none.
-        return;
-    }
-
-    InlineTextBox* startBox = s;
-    for (int pass = 0; pass < (haveSelection ? 2 : 1); pass++) {
-        s = startBox;
-        bool drawSelectionBackground = haveSelection && pass == 0 && i.phase != PaintActionSelection;
-        bool drawText = !haveSelection || pass == 1;
-#endif
-
-    // run until we find one that is outside the range, then we
-    // know we can stop
-    do {
-        if (isPrinting)
-        {
-            if (ty+s->m_y+s->height() > i.r.y() + i.r.height())
-            {
-               RenderCanvas* canvasObj = canvas();
-               if (ty+s->m_y < canvasObj->truncatedAt())
-#if APPLE_CHANGES
-                   canvasObj->setBestTruncatedAt(ty+s->m_y, this);
-#else
-                   canvasObj->setTruncatedAt(ty+s->m_y);
-#endif
-               // Let's stop here.
-               break;
-            }
-        }
-
-        if (s->m_truncation == cFullTruncation)
-            continue;
-        
-        RenderStyle* _style = pseudoStyle && s->m_firstLine ? pseudoStyle : style();
-
-        if (_style->font() != p->font())
-            p->setFont(_style->font());
-
-        font = &_style->htmlFont(); // Always update, since smallCaps is not stored in the QFont.
-
-#if APPLE_CHANGES
-        if (drawText) {
-#endif
-        
-        QColor textColor = _style->color();
-        if (_style->shouldCorrectTextColor()) {
-            textColor = correctedTextColor(textColor, _style->backgroundColor());
-        }
-
-        if(textColor != p->pen().color())
-            p->setPen(textColor);
-
-#if APPLE_CHANGES
-        // Set a text shadow if we have one.
-        // FIXME: Support multiple shadow effects.  Need more from the CG API before
-        // we can do this.
-        bool setShadow = false;
-        if (_style->textShadow()) {
-            p->setShadow(_style->textShadow()->x, _style->textShadow()->y,
-                         _style->textShadow()->blur, _style->textShadow()->color);
-            setShadow = true;
-        }
-#endif
-        
-        if (s->m_len > 0) {
-            bool paintSelectedTextOnly = (i.phase == PaintActionSelection);
-            bool paintSelectedTextSeparately = false; // Whether or not we have to do multiple paints.  Only
-                                           // necessary when a custom ::selection foreground color is applied.
-            QColor selectionColor = p->pen().color();
-            ShadowData* selectionTextShadow = 0;
-            if (haveSelection) {
-                RenderStyle* pseudoStyle = getPseudoStyle(RenderStyle::SELECTION);
-                if (pseudoStyle) {
-                    if (pseudoStyle->color() != selectionColor || pseudoStyle->textShadow()) {
-                        if (!paintSelectedTextOnly)
-                            paintSelectedTextSeparately = true;
-                        if (pseudoStyle->color() != selectionColor)
-                            selectionColor = pseudoStyle->color();
-                        if (pseudoStyle->textShadow())
-                            selectionTextShadow = pseudoStyle->textShadow();
-                    }
-                }
-            }
-            
-            if (!paintSelectedTextOnly && !paintSelectedTextSeparately) {
-                // FIXME: Handle RTL direction, handle reversed strings.  For now truncation can only be turned on
-                // for non-reversed LTR strings.
-                int endPoint = s->m_len;
-                if (s->m_truncation != cNoTruncation)
-                    endPoint = s->m_truncation - s->m_start;
-                font->drawText(p, s->m_x + tx, s->m_y + ty + s->m_baseline,
-                               str->s, str->l, s->m_start, endPoint,
-                               s->m_toAdd, s->m_reversed ? QPainter::RTL : QPainter::LTR, style()->visuallyOrdered());
-            }
-            else {
-                int offset = s->m_start;
-                int sPos = QMAX( startPos - offset, 0 );
-                int ePos = QMIN( endPos - offset, s->m_len );
-                if (paintSelectedTextSeparately) {
-                    if (sPos >= ePos)
-#if APPLE_CHANGES
-                        font->drawText(p, s->m_x + tx, s->m_y + ty + s->m_baseline,
-                                       str->s, str->l, s->m_start, s->m_len,
-                                       s->m_toAdd, s->m_reversed ? QPainter::RTL : QPainter::LTR, style()->visuallyOrdered());
-#else
-                        font->drawText(p, s->m_x + tx, s->m_y + ty + s->m_baseline,
-                                       str->s, str->l, s->m_start, s->m_len,
-                                       s->m_toAdd, s->m_reversed ? QPainter::RTL : QPainter::LTR);
-#endif
-                    else {
-                        if (sPos-1 >= 0)
-#if APPLE_CHANGES
-                            font->drawText(p, s->m_x + tx, s->m_y + ty + s->m_baseline, str->s,
-                                        str->l, s->m_start, s->m_len,
-                                        s->m_toAdd, s->m_reversed ? QPainter::RTL : QPainter::LTR, style()->visuallyOrdered(), 0, sPos);
-#else
-                            font->drawText(p, s->m_x + tx, s->m_y + ty + s->m_baseline, str->s,
-                                        str->l, s->m_start, s->m_len,
-                                        s->m_toAdd, s->m_reversed ? QPainter::RTL : QPainter::LTR, 0, sPos);
-#endif
-                        if (ePos < s->m_start+s->m_len)
-#if APPLE_CHANGES
-                            font->drawText(p, s->m_x + tx, s->m_y + ty + s->m_baseline, str->s,
-                                        str->l, s->m_start, s->m_len,
-                                        s->m_toAdd, s->m_reversed ? QPainter::RTL : QPainter::LTR, style()->visuallyOrdered(), ePos, -1);
-#else
-                            font->drawText(p, s->m_x + tx, s->m_y + ty + s->m_baseline, str->s,
-                                        str->l, s->m_start, s->m_len,
-                                        s->m_toAdd, s->m_reversed ? QPainter::RTL : QPainter::LTR, ePos, -1);
-#endif
-                    }
-                }
-                
-                if ( sPos < ePos ) {
-                    if (selectionColor != p->pen().color())
-                        p->setPen(selectionColor);
-
-#if APPLE_CHANGES
-                    if (selectionTextShadow)
-                        p->setShadow(selectionTextShadow->x,
-                                     selectionTextShadow->y,
-                                     selectionTextShadow->blur,
-                                     selectionTextShadow->color);
-#endif                       
-
-#if APPLE_CHANGES
-                    font->drawText(p, s->m_x + tx, s->m_y + ty + s->m_baseline, str->s,
-                                   str->l, s->m_start, s->m_len,
-                                   s->m_toAdd, s->m_reversed ? QPainter::RTL : QPainter::LTR, style()->visuallyOrdered(), sPos, ePos);
-#else
-                    font->drawText(p, s->m_x + tx, s->m_y + ty + s->m_baseline, str->s,
-                                   str->l, s->m_start, s->m_len,
-                                   s->m_toAdd, s->m_reversed ? QPainter::RTL : QPainter::LTR, sPos, ePos);
-#endif
-
-#if APPLE_CHANGES
-                    if (selectionTextShadow)
-                        p->clearShadow();
-#endif
-                }
-            } 
-        }
-        
-        if (d != TDNONE && i.phase == PaintActionForeground &&
-            style()->htmlHacks()) {
-            p->setPen(_style->color());
-            s->paintDecoration(p, tx, ty, d);
-        }
-
-#if APPLE_CHANGES
-        if (setShadow)
-            p->clearShadow();
-        
-        } // drawText
-#endif
-
-#if APPLE_CHANGES
-        if (drawSelectionBackground)
-#endif
-        if (!isPrinting && (selectionState() != SelectionNone))
-            s->paintSelection(font, this, p, _style, tx, ty, startPos, endPos, selectionState() == SelectionInside);
-
-#ifdef BIDI_DEBUG
-        {
-            int h = lineHeight( false ) + paddingTop() + paddingBottom() + borderTop() + borderBottom();
-            QColor c2 = QColor("#0000ff");
-            drawBorder(p, tx, ty, tx+1, ty + h,
-                          RenderObject::BSLeft, c2, c2, SOLID, 1, 1);
-            drawBorder(p, tx + s->m_width, ty, tx + s->m_width + 1, ty + h,
-                          RenderObject::BSRight, c2, c2, SOLID, 1, 1);
-        }
-#endif
-
-    } while (((s = s->nextTextBox()) != 0) && s->checkVerticalPoint(i.r.y(), ty, i.r.height()));
-
-#if APPLE_CHANGES
-    } // end of for loop
-#endif
 }
 
 #ifdef APPLE_CHANGES
@@ -1194,6 +1441,43 @@ const QFont &RenderText::font()
     return style()->font();
 }
 
+void RenderText::setSelectionState(SelectionState s)
+{
+    InlineTextBox* box;
+    
+    m_selectionState = s;
+    if (s == SelectionStart || s == SelectionEnd || s == SelectionBoth) {
+        int startPos, endPos;
+        selectionStartEnd(startPos, endPos);
+        if(selectionState() == SelectionStart) {
+            endPos = str->l;
+            
+            // to handle selection from end of text to end of line
+            if (startPos != 0 && startPos == endPos) {
+                startPos = endPos - 1;
+            }
+        } else if(selectionState() == SelectionEnd)
+            startPos = 0;
+        
+        for (box = firstTextBox(); box; box = box->nextTextBox()) {
+            if (box->isSelected(startPos, endPos)) {
+                RootInlineBox* line = box->root();
+                if (line)
+                    line->setHasSelectedChildren(true);
+            }
+        }
+    }
+    else {
+        for (box = firstTextBox(); box; box = box->nextTextBox()) {
+            RootInlineBox* line = box->root();
+            if (line)
+                line->setHasSelectedChildren(s == SelectionInside);
+        }
+    }
+    
+    containingBlock()->setSelectionState(s);
+}
+
 void RenderText::setTextWithOffset(DOMStringImpl *text, uint offset, uint len, bool force)
 {
     uint oldLen = str ? str->l : 0;
@@ -1265,6 +1549,10 @@ void RenderText::setText(DOMStringImpl *text, bool force)
         return;
     if (str)
         str->deref();
+
+#ifdef APPLE_CHANGES
+    m_allAsciiChecked = false;
+#endif
 
     str = text;
     if (str) {
@@ -1423,6 +1711,48 @@ QRect RenderText::getAbsoluteRepaintRect()
     return cb->getAbsoluteRepaintRect();
 }
 
+QRect RenderText::selectionRect()
+{
+    QRect rect;
+    if (selectionState() == SelectionNone)
+        return rect;
+    RenderBlock* cb =  containingBlock();
+    if (!cb)
+        return rect;
+    
+    // Now calculate startPos and endPos for painting selection.
+    // We include a selection while endPos > 0
+    int startPos, endPos;
+    if (selectionState() == SelectionInside) {
+        // We are fully selected.
+        startPos = 0;
+        endPos = str->l;
+    } else {
+        selectionStartEnd(startPos, endPos);
+        if (selectionState() == SelectionStart)
+            endPos = str->l;
+        else if (selectionState() == SelectionEnd)
+            startPos = 0;
+    }
+    
+    if (startPos == endPos)
+        return rect;
+
+    int absx, absy;
+    cb->absolutePosition(absx, absy);
+    for (InlineTextBox* box = firstTextBox(); box; box = box->nextTextBox()) {
+        QRect r = box->selectionRect(absx, absy, startPos, endPos);
+        if (!r.isEmpty()) {
+            if (rect.isEmpty())
+                rect = r;
+            else
+                rect = rect.unite(r);
+        }
+    }
+
+    return rect;
+}
+
 short RenderText::verticalPositionHint( bool firstLine ) const
 {
     return parent()->verticalPositionHint( firstLine );
@@ -1440,24 +1770,24 @@ const Font *RenderText::htmlFont(bool firstLine) const
 
 long RenderText::caretMinOffset() const
 {
-    if (!firstTextBox()) 
+    InlineTextBox *box = firstTextBox();
+    if (!box)
         return 0;
-    // EDIT FIXME: it is *not* guaranteed that the first run contains the lowest offset
-    // Either make this a linear search (slow),
-    // or maintain an index (needs much mem),
-    // or calculate and store it in bidi.cpp (needs calculation even if not needed)
-    return firstTextBox()->m_start;
+    int minOffset = box->m_start;
+    for (box = box->nextTextBox(); box; box = box->nextTextBox())
+        minOffset = kMin(minOffset, box->m_start);
+    return minOffset;
 }
 
 long RenderText::caretMaxOffset() const
 {
-    if (!firstTextBox()) 
+    InlineTextBox* box = lastTextBox();
+    if (!box) 
         return str->l;
-    // EDIT FIXME: it is *not* guaranteed that the last run contains the highest offset
-    // Either make this a linear search (slow),
-    // or maintain an index (needs much mem),
-    // or calculate and store it in bidi.cpp (needs calculation even if not needed)
-    return lastTextBox()->m_start + lastTextBox()->m_len;
+    int maxOffset = box->m_start + box->m_len;
+    for (box = box->prevTextBox(); box; box = box->prevTextBox())
+	maxOffset = kMax(maxOffset,box->m_start + box->m_len);
+    return maxOffset;
 }
 
 unsigned long RenderText::caretMaxRenderedOffset() const
@@ -1468,10 +1798,12 @@ unsigned long RenderText::caretMaxRenderedOffset() const
     return l;
 }
 
-InlineBox *RenderText::inlineBox(long offset)
+InlineBox *RenderText::inlineBox(long offset, EAffinity affinity)
 {
     for (InlineTextBox *box = firstTextBox(); box; box = box->nextTextBox()) {
         if (offset >= box->m_start && offset <= box->m_start + box->m_len) {
+            if (affinity == DOWNSTREAM && box->nextTextBox() && offset == box->m_start + box->m_len)
+                return box->nextTextBox();
             return box;
         }
         else if (offset < box->m_start) {

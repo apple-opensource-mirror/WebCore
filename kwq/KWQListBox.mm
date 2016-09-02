@@ -44,7 +44,10 @@ const float bottomMargin = 1;
 const float leftMargin = 2;
 const float rightMargin = 2;
 
-@interface KWQListBoxScrollView : WebCoreScrollView
+@interface KWQListBoxScrollView : WebCoreScrollView <KWQWidgetHolder>
+{
+    QListBox *_box;
+}
 @end
 
 @interface KWQTableView : NSTableView <KWQWidgetHolder>
@@ -56,11 +59,17 @@ const float rightMargin = 2;
     NSWritingDirection _direction;
 }
 - (id)initWithListBox:(QListBox *)b;
+- (void)detach;
 - (void)_KWQ_setKeyboardFocusRingNeedsDisplay;
 - (QWidget *)widget;
 - (void)setBaseWritingDirection:(NSWritingDirection)direction;
 - (NSWritingDirection)baseWritingDirection;
 @end
+
+static id <WebCoreTextRenderer> itemScreenRenderer;
+static id <WebCoreTextRenderer> itemPrinterRenderer;
+static id <WebCoreTextRenderer> groupLabelScreenRenderer;
+static id <WebCoreTextRenderer> groupLabelPrinterRenderer;
 
 static NSFont *itemFont()
 {
@@ -77,26 +86,34 @@ static NSFont *groupLabelFont()
 static id <WebCoreTextRenderer> itemTextRenderer()
 {
     if ([NSGraphicsContext currentContextDrawingToScreen]) {
-        static id <WebCoreTextRenderer> renderer = [[WebCoreTextRendererFactory sharedFactory]
-            rendererWithFont:itemFont() usingPrinterFont:NO];
-        return renderer;
+        if (itemScreenRenderer == nil) {
+            itemScreenRenderer = [[[WebCoreTextRendererFactory sharedFactory]
+                rendererWithFont:itemFont() usingPrinterFont:NO] retain];
+        }
+        return itemScreenRenderer;
     } else {
-        static id <WebCoreTextRenderer> renderer = [[WebCoreTextRendererFactory sharedFactory]
-            rendererWithFont:itemFont() usingPrinterFont:YES];
-        return renderer;
+        if (itemPrinterRenderer == nil) {
+            itemPrinterRenderer = [[[WebCoreTextRendererFactory sharedFactory]
+                rendererWithFont:itemFont() usingPrinterFont:YES] retain];
+        }
+        return itemPrinterRenderer;
     }
 }
 
 static id <WebCoreTextRenderer> groupLabelTextRenderer()
 {
     if ([NSGraphicsContext currentContextDrawingToScreen]) {
-        static id <WebCoreTextRenderer> renderer = [[WebCoreTextRendererFactory sharedFactory]
-            rendererWithFont:groupLabelFont() usingPrinterFont:NO];
-        return renderer;
+        if (groupLabelScreenRenderer == nil) {
+            groupLabelScreenRenderer = [[[WebCoreTextRendererFactory sharedFactory]
+                rendererWithFont:groupLabelFont() usingPrinterFont:NO] retain];
+        }
+        return groupLabelScreenRenderer;
     } else {
-        static id <WebCoreTextRenderer> renderer = [[WebCoreTextRendererFactory sharedFactory]
-            rendererWithFont:groupLabelFont() usingPrinterFont:YES];
-        return renderer;
+        if (groupLabelPrinterRenderer == nil) {
+            groupLabelPrinterRenderer = [[[WebCoreTextRendererFactory sharedFactory]
+                rendererWithFont:groupLabelFont() usingPrinterFont:YES] retain];
+        }
+        return groupLabelPrinterRenderer;
     }
 }
 
@@ -110,7 +127,7 @@ QListBox::QListBox(QWidget *parent)
 {
     KWQ_BLOCK_EXCEPTIONS;
 
-    NSScrollView *scrollView = [[KWQListBoxScrollView alloc] init];
+    NSScrollView *scrollView = [[KWQListBoxScrollView alloc] initWithListBox:this];
     setView(scrollView);
     [scrollView release];
     
@@ -142,9 +159,8 @@ QListBox::~QListBox()
     NSScrollView *scrollView = getView();
     
     KWQ_BLOCK_EXCEPTIONS;
-    NSTableView *tableView = [scrollView documentView];
-    [tableView setDelegate:nil];
-    [tableView setDataSource:nil];
+    KWQTableView *tableView = [scrollView documentView];
+    [tableView detach];
     KWQ_UNBLOCK_EXCEPTIONS;
 }
 
@@ -288,10 +304,10 @@ QWidget::FocusPolicy QListBox::focusPolicy() const
 {
     KWQ_BLOCK_EXCEPTIONS;
     
-    // Lists are only focused when full keyboard access is turned on.
-    unsigned keyboardUIMode = [KWQKHTMLPart::bridgeForWidget(this) keyboardUIMode];
-    if ((keyboardUIMode & WebCoreKeyboardAccessFull) == 0)
+    WebCoreBridge *bridge = KWQKHTMLPart::bridgeForWidget(this);
+    if (!bridge || ![bridge part] || ![bridge part]->tabsToAllControls()) {
         return NoFocus;
+    }
     
     KWQ_UNBLOCK_EXCEPTIONS;
     
@@ -318,7 +334,36 @@ void QListBox::setWritingDirection(QPainter::TextDirection d)
     KWQ_UNBLOCK_EXCEPTIONS;
 }
 
+void QListBox::clearCachedTextRenderers()
+{
+    [itemScreenRenderer release];
+    itemScreenRenderer = nil;
+
+    [itemPrinterRenderer release];
+    itemPrinterRenderer = nil;
+
+    [groupLabelScreenRenderer release];
+    groupLabelScreenRenderer = nil;
+
+    [groupLabelPrinterRenderer release];
+    groupLabelPrinterRenderer = nil;
+}
+
 @implementation KWQListBoxScrollView
+
+- (id)initWithListBox:(QListBox *)b
+{
+    if (!(self = [super init]))
+        return nil;
+
+    _box = b;
+    return self;
+}
+
+- (QWidget *)widget
+{
+    return _box;
+}
 
 - (void)setFrameSize:(NSSize)size
 {
@@ -366,21 +411,40 @@ void QListBox::setWritingDirection(QPainter::TextDirection d)
     return self;
 }
 
+- (void)detach
+{
+    _box = 0;
+    [self setDelegate:nil];
+    [self setDataSource:nil];
+}
+
 - (void)mouseDown:(NSEvent *)event
 {
-    processingMouseEvent = TRUE;
+    if (!_box) {
+        [super mouseDown:event];
+        return;
+    }
+
+    processingMouseEvent = YES;
+    NSView *outerView = [_box->getOuterView() retain];
+    QWidget::beforeMouseDown(outerView);
     [super mouseDown:event];
-    processingMouseEvent = FALSE;
+    QWidget::afterMouseDown(outerView);
+    [outerView release];
+    processingMouseEvent = NO;
 
     if (clickedDuringMouseEvent) {
 	clickedDuringMouseEvent = false;
-    } else {
+    } else if (_box) {
 	_box->sendConsumedMouseUp();
     }
 }
 
 - (void)keyDown:(NSEvent *)event
 {
+    if (!_box)  {
+        return;
+    }
     WebCoreBridge *bridge = KWQKHTMLPart::bridgeForWidget(_box);
     if (![bridge interceptKeyEvent:event toView:self]) {
 	[super keyDown:event];
@@ -389,6 +453,9 @@ void QListBox::setWritingDirection(QPainter::TextDirection d)
 
 - (void)keyUp:(NSEvent *)event
 {
+    if (!_box)  {
+        return;
+    }
     WebCoreBridge *bridge = KWQKHTMLPart::bridgeForWidget(_box);
     if (![bridge interceptKeyEvent:event toView:self]) {
 	[super keyUp:event];
@@ -397,15 +464,22 @@ void QListBox::setWritingDirection(QPainter::TextDirection d)
 
 - (BOOL)becomeFirstResponder
 {
+    if (!_box) {
+        return NO;
+    }
+
     BOOL become = [super becomeFirstResponder];
     
     if (become) {
-        if (!KWQKHTMLPart::currentEventIsMouseDownInWidget(_box)) {
+        if (_box && !KWQKHTMLPart::currentEventIsMouseDownInWidget(_box)) {
             [self _KWQ_scrollFrameToVisible];
         }        
 	[self _KWQ_setKeyboardFocusRingNeedsDisplay];
-	QFocusEvent event(QEvent::FocusIn);
-	const_cast<QObject *>(_box->eventFilterObject())->eventFilter(_box, &event);
+
+        if (_box) {
+            QFocusEvent event(QEvent::FocusIn);
+            const_cast<QObject *>(_box->eventFilterObject())->eventFilter(_box, &event);
+        }
     }
 
     return become;
@@ -414,20 +488,20 @@ void QListBox::setWritingDirection(QPainter::TextDirection d)
 - (BOOL)resignFirstResponder
 {
     BOOL resign = [super resignFirstResponder];
-    if (resign) {
+    if (resign && _box) {
         QFocusEvent event(QEvent::FocusOut);
         const_cast<QObject *>(_box->eventFilterObject())->eventFilter(_box, &event);
     }
     return resign;
 }
 
-- (BOOL)canBecomeKeyView {
+- (BOOL)canBecomeKeyView
+{
     // Simplified method from NSView; overridden to replace NSView's way of checking
     // for full keyboard access with ours.
-    if (!KWQKHTMLPart::partForWidget(_box)->tabsToAllControls()) {
+    if (!_box || !KWQKHTMLPart::partForWidget(_box)->tabsToAllControls()) {
         return NO;
     }
-    
     return ([self window] != nil) && ![self isHiddenOrHasHiddenAncestor] && [self acceptsFirstResponder];
 }
 
@@ -463,7 +537,7 @@ void QListBox::setWritingDirection(QPainter::TextDirection d)
 
 - (int)numberOfRowsInTableView:(NSTableView *)tableView
 {
-    return _box->count();
+    return _box ? _box->count() : 0;
 }
 
 - (id)tableView:(NSTableView *)tableView objectValueForTableColumn:(NSTableColumn *)column row:(int)row
@@ -473,28 +547,36 @@ void QListBox::setWritingDirection(QPainter::TextDirection d)
 
 - (void)tableViewSelectionDidChange:(NSNotification *)notification
 {
-    _box->selectionChanged();
-    if (!_box->changingSelection()) {
+    if (_box) {
+        _box->selectionChanged();
+    }
+    if (_box && !_box->changingSelection()) {
 	if (processingMouseEvent) {
 	    clickedDuringMouseEvent = true;
 	    _box->sendConsumedMouseUp();
 	}
-        _box->clicked();
+        if (_box) {
+            _box->clicked();
+        }
     }
 }
 
 - (BOOL)tableView:(NSTableView *)tableView shouldSelectRow:(int)row
 {
-    return !_box->itemAtIndex(row).isGroupLabel;
+    return _box && !_box->itemAtIndex(row).isGroupLabel;
 }
 
 - (BOOL)selectionShouldChangeInTableView:(NSTableView *)aTableView
 {
-    return _box->isEnabled();
+    return _box && _box->isEnabled();
 }
 
 - (void)drawRow:(int)row clipRect:(NSRect)clipRect
 {
+    if (!_box) {
+        return;
+    }
+
     const KWQListBoxItem &item = _box->itemAtIndex(row);
 
     NSColor *color;
@@ -562,7 +644,9 @@ void QListBox::setWritingDirection(QPainter::TextDirection d)
 - (NSCell *)_accessibilityTableCell:(int)row tableColumn:(NSTableColumn *)tableColumn
 {
     NSCell *cell = [super _accessibilityTableCell:row tableColumn:tableColumn];
-    [cell setStringValue:_box->itemAtIndex(row).string.getNSString()];
+    if (_box) {
+        [cell setStringValue:_box->itemAtIndex(row).string.getNSString()];
+    }
     return cell;
 }
 

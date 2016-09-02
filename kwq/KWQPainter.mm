@@ -70,6 +70,24 @@ struct QPainterPrivate {
     QColor focusRingColor;
 };
 
+
+static CGColorRef CGColorFromNSColor(NSColor *color)
+{
+    // this needs to always use device colorspace so it can de-calibrate the color for
+    // CGColor to possibly recalibrate it
+    NSColor* deviceColor = [color colorUsingColorSpaceName:NSDeviceRGBColorSpace];
+    float red = [deviceColor redComponent];
+    float green = [deviceColor greenComponent];
+    float blue = [deviceColor blueComponent];
+    float alpha = [deviceColor alphaComponent];
+    const float components[] = { red, green, blue, alpha };
+    
+    CGColorSpaceRef colorSpace = QPainter::rgbColorSpace();
+    CGColorRef cgColor = CGColorCreate(colorSpace, components);
+    CGColorSpaceRelease(colorSpace);
+    return cgColor;
+}
+
 QPainter::QPainter() : data(new QPainterPrivate), _isForPrinting(false), _usesInactiveTextBackgroundColor(false), _drawsFocusRing(true)
 {
 }
@@ -343,11 +361,24 @@ void QPainter::drawEllipse(int x, int y, int w, int h)
 
     if (data->state.brush.style() != NoBrush) {
         _setColorFromBrush();
-        CGContextFillPath(context);
+	if (data->state.pen.style() != NoPen) {
+	    // stroke and fill
+	    _setColorFromPen();
+	    uint penWidth = data->state.pen.width();
+	    if (penWidth == 0) 
+		penWidth++;
+	    CGContextSetLineWidth(context, penWidth);
+	    CGContextDrawPath(context, kCGPathFillStroke);
+	} else {
+	    CGContextFillPath(context);
+	}
     }
     if (data->state.pen.style() != NoPen) {
         _setColorFromPen();
-        CGContextSetLineWidth(context, data->state.pen.width());
+	uint penWidth = data->state.pen.width();
+	if (penWidth == 0) 
+	    penWidth++;
+        CGContextSetLineWidth(context, penWidth);
         CGContextStrokePath(context);
     }
 }
@@ -513,6 +544,12 @@ void QPainter::drawPixmap( int x, int y, const QPixmap &pixmap,
 void QPainter::drawPixmap( int x, int y, int w, int h, const QPixmap &pixmap,
                            int sx, int sy, int sw, int sh, int compositeOperator, CGContextRef context)
 {
+    drawFloatPixmap ((float)x, (float)y, (float)w, (float)h, pixmap, (float)sx, (float)sy, (float)sw, (float)sh, compositeOperator, context);
+}
+
+void QPainter::drawFloatPixmap( float x, float y, float w, float h, const QPixmap &pixmap,
+                           float sx, float sy, float sw, float sh, int compositeOperator, CGContextRef context)
+{
     if (data->state.paintingDisabled)
         return;
         
@@ -627,7 +664,7 @@ void QPainter::drawText(int x, int y, const QChar *str, int len, int from, int t
     [data->textRenderer drawRun:&run style:&style geometry:&geometry];
 }
 
-void QPainter::drawHighlightForText(int x, int minX, int maxX, int y, int h, 
+void QPainter::drawHighlightForText(int x, int y, int h, 
     const QChar *str, int len, int from, int to, int toAdd, const QColor &backgroundColor, 
     QPainter::TextDirection d, bool visuallyOrdered, int letterSpacing, int wordSpacing, bool smallCaps)
 {
@@ -663,8 +700,6 @@ void QPainter::drawHighlightForText(int x, int minX, int maxX, int y, int h,
     geometry.point = NSMakePoint(x, y);
     geometry.selectionY = y;
     geometry.selectionHeight = h;
-    geometry.selectionMinX = minX;
-    geometry.selectionMaxX = maxX;
     geometry.useFontMetricsForSelectionYAndHeight = false;
     [data->textRenderer drawHighlightForRun:&run style:&style geometry:&geometry];
 }
@@ -677,17 +712,54 @@ void QPainter::drawLineForText(int x, int y, int yOffset, int width)
     [data->textRenderer
         drawLineForCharacters: NSMakePoint(x, y)
                yOffset:(float)yOffset
-             withWidth: width
-             withColor:data->state.pen.color().getNSColor()];
+                 width: width
+                 color:data->state.pen.color().getNSColor()
+             thickness:data->state.pen.width()];
+}
+
+void QPainter::drawLineForMisspelling(int x, int y, int width)
+{
+    if (data->state.paintingDisabled)
+        return;
+    _updateRenderer();
+    [data->textRenderer drawLineForMisspelling:NSMakePoint(x, y) withWidth:width];
+}
+
+int QPainter::misspellingLineThickness() const
+{
+    return [data->textRenderer misspellingLineThickness];
+}
+
+static int getBlendedColorComponent(int c, int a)
+{
+    // We use white.
+    float alpha = (float)(a) / 255;
+    int whiteBlend = 255 - a;
+    c -= whiteBlend;
+    return (int)(c/alpha);
 }
 
 QColor QPainter::selectedTextBackgroundColor() const
 {
     NSColor *color = _usesInactiveTextBackgroundColor ? [NSColor secondarySelectedControlColor] : [NSColor selectedTextBackgroundColor];
-    color = [color colorUsingColorSpaceName:NSCalibratedRGBColorSpace];
-    return QColor((int)(255 * [color redComponent]), (int)(255 * [color greenComponent]), (int)(255 * [color blueComponent]));
+    // this needs to always use device colorspace so it can de-calibrate the color for
+    // QColor to possibly recalibrate it
+    color = [color colorUsingColorSpaceName:NSDeviceRGBColorSpace];
+    
+    QColor col = QColor((int)(255 * [color redComponent]), (int)(255 * [color greenComponent]), (int)(255 * [color blueComponent]));
+    
+    // Attempt to make the selection 60% transparent.  We do this by applying a standard blend and then
+    // seeing if the resultant color is still within the 0-255 range.
+    int alpha = 153;
+    int red = getBlendedColorComponent(col.red(), alpha);
+    int green = getBlendedColorComponent(col.green(), alpha);
+    int blue = getBlendedColorComponent(col.blue(), alpha);
+    if (red >= 0 && red <= 255 && green >= 0 && green <= 255 && blue >= 0 && blue <= 255)
+        return QColor(qRgba(red, green, blue, alpha));
+    return col;
 }
 
+// A fillRect designed to work around buggy behavior in NSRectFill.
 void QPainter::_fillRect(float x, float y, float w, float h, const QColor& col)
 {
     [col.getNSColor() set];
@@ -701,6 +773,11 @@ void QPainter::fillRect(int x, int y, int w, int h, const QBrush &brush)
 
     if (brush.style() == SolidPattern)
         _fillRect(x, y, w, h, brush.color());
+}
+
+void QPainter::fillRect(const QRect &rect, const QBrush &brush)
+{
+    fillRect(rect.left(), rect.top(), rect.width(), rect.height(), brush);
 }
 
 void QPainter::addClip(const QRect &rect)
@@ -752,24 +829,15 @@ void QPainter::setShadow(int x, int y, int blur, const QColor& color)
     // Check for an invalid color, as this means that the color was not set for the shadow
     // and we should therefore just use the default shadow color.
     CGContextRef context = (CGContextRef)([[NSGraphicsContext currentContext] graphicsPort]);
-    if (!color.isValid())
+    if (!color.isValid()) {
         CGContextSetShadow(context, CGSizeMake(x,-y), blur); // y is flipped.
-    else {
-        NSColor* deviceColor = [color.getNSColor() colorUsingColorSpaceName: @"NSDeviceRGBColorSpace"];
-        float red = [deviceColor redComponent];
-        float green = [deviceColor greenComponent];
-        float blue = [deviceColor blueComponent];
-        float alpha = [deviceColor alphaComponent];
-        const float components[] = { red, green, blue, alpha };
-        
-        CGColorSpaceRef colorSpace = CGColorSpaceCreateDeviceRGB();
-        CGColorRef color = CGColorCreate(colorSpace, components);
-        CGColorSpaceRelease(colorSpace);
+    } else {
+	CGColorRef cgColor = CGColorFromNSColor(color.getNSColor());
         CGContextSetShadowWithColor(context,
                                     CGSizeMake(x,-y), // y is flipped.
                                     blur, 
-                                    color);
-        CGColorRelease(color);
+                                    cgColor);
+        CGColorRelease(cgColor);
     }
 }
 
@@ -846,3 +914,20 @@ void QPainter::clearFocusRing()
         data->focusRingPath = nil;
     }
 }
+
+CGColorSpaceRef QPainter::rgbColorSpace()
+{
+    return [[WebCoreGraphicsBridge sharedBridge] createRGBColorSpace];
+}
+
+CGColorSpaceRef QPainter::grayColorSpace()
+{
+    return [[WebCoreGraphicsBridge sharedBridge] createGrayColorSpace];
+}
+
+CGColorSpaceRef QPainter::cmykColorSpace()
+{
+    return [[WebCoreGraphicsBridge sharedBridge] createCMYKColorSpace];
+}
+
+

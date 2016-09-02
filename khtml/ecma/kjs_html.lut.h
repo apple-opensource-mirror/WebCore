@@ -41,11 +41,12 @@ const struct HashEntry HTMLDocumentTableEntries[] = {
    { "fgColor", HTMLDocument::FgColor, DontDelete, 0, 0 },
    { "linkColor", HTMLDocument::LinkColor, DontDelete, 0, 0 },
    { "vlinkColor", HTMLDocument::VlinkColor, DontDelete, 0, 0 },
-   { "height", HTMLDocument::Height, DontDelete|ReadOnly, 0, 0 },
-   { "width", HTMLDocument::Width, DontDelete|ReadOnly, 0, 0 }
+   { "height", HTMLDocument::Height, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[40] },
+   { "width", HTMLDocument::Width, DontDelete|ReadOnly, 0, 0 },
+   { "designMode", HTMLDocument::DesignMode, DontDelete, 0, 0 }
 };
 
-const struct HashTable HTMLDocumentTable = { 2, 40, HTMLDocumentTableEntries, 30 };
+const struct HashTable HTMLDocumentTable = { 2, 41, HTMLDocumentTableEntries, 30 };
 
 } // namespace
 
@@ -943,7 +944,7 @@ const struct HashTable HTMLFrameSetElementTable = { 2, 3, HTMLFrameSetElementTab
 namespace KJS {
 
 const struct HashEntry HTMLFrameElementTableEntries[] = {
-   { 0, 0, 0, 0, 0 },
+   { "contentWindow", KJS::HTMLElement::FrameContentWindow, DontDelete|ReadOnly, 0, 0 },
    { "contentDocument", KJS::HTMLElement::FrameContentDocument, DontDelete|ReadOnly, 0, &HTMLFrameElementTableEntries[9] },
    { "location", KJS::HTMLElement::FrameLocation, DontDelete, 0, 0 },
    { "name", KJS::HTMLElement::FrameName, DontDelete, 0, 0 },
@@ -965,25 +966,26 @@ namespace KJS {
 
 const struct HashEntry HTMLIFrameElementTableEntries[] = {
    { 0, 0, 0, 0, 0 },
-   { "frameBorder", KJS::HTMLElement::IFrameFrameBorder, DontDelete, 0, &HTMLIFrameElementTableEntries[15] },
+   { "frameBorder", KJS::HTMLElement::IFrameFrameBorder, DontDelete, 0, &HTMLIFrameElementTableEntries[16] },
    { 0, 0, 0, 0, 0 },
-   { "marginHeight", KJS::HTMLElement::IFrameMarginHeight, DontDelete, 0, 0 },
-   { "src", KJS::HTMLElement::IFrameSrc, DontDelete, 0, &HTMLIFrameElementTableEntries[16] },
+   { "contentWindow", KJS::HTMLElement::IFrameContentWindow, DontDelete|ReadOnly, 0, &HTMLIFrameElementTableEntries[13] },
+   { "src", KJS::HTMLElement::IFrameSrc, DontDelete, 0, &HTMLIFrameElementTableEntries[17] },
    { 0, 0, 0, 0, 0 },
    { 0, 0, 0, 0, 0 },
    { "align", KJS::HTMLElement::IFrameAlign, DontDelete, 0, 0 },
    { 0, 0, 0, 0, 0 },
-   { "height", KJS::HTMLElement::IFrameHeight, DontDelete, 0, &HTMLIFrameElementTableEntries[14] },
-   { "contentDocument", KJS::HTMLElement::IFrameContentDocument, DontDelete|ReadOnly, 0, &HTMLIFrameElementTableEntries[13] },
+   { "height", KJS::HTMLElement::IFrameHeight, DontDelete, 0, &HTMLIFrameElementTableEntries[15] },
+   { "contentDocument", KJS::HTMLElement::IFrameContentDocument, DontDelete|ReadOnly, 0, &HTMLIFrameElementTableEntries[14] },
    { "document", KJS::HTMLElement::IFrameDocument, DontDelete|ReadOnly, 0, &HTMLIFrameElementTableEntries[12] },
    { "longDesc", KJS::HTMLElement::IFrameLongDesc, DontDelete, 0, 0 },
+   { "marginHeight", KJS::HTMLElement::IFrameMarginHeight, DontDelete, 0, 0 },
    { "marginWidth", KJS::HTMLElement::IFrameMarginWidth, DontDelete, 0, 0 },
    { "name", KJS::HTMLElement::IFrameName, DontDelete, 0, 0 },
    { "scrolling", KJS::HTMLElement::IFrameScrolling, DontDelete, 0, 0 },
    { "width", KJS::HTMLElement::IFrameWidth, DontDelete, 0, 0 }
 };
 
-const struct HashTable HTMLIFrameElementTable = { 2, 17, HTMLIFrameElementTableEntries, 12 };
+const struct HashTable HTMLIFrameElementTable = { 2, 18, HTMLIFrameElementTableEntries, 12 };
 
 } // namespace
 
@@ -1026,63 +1028,103 @@ namespace KJS {
 
 const struct HashEntry ImageTableEntries[] = {
    { 0, 0, 0, 0, 0 },
-   { "src", Image::Src, DontDelete, 0, &ImageTableEntries[3] },
+   { "onload", Image::OnLoad, DontDelete, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "height", Image::Height, DontDelete|ReadOnly, 0, 0 },
+   { "src", Image::Src, DontDelete, 0, &ImageTableEntries[6] },
    { "complete", Image::Complete, DontDelete|ReadOnly, 0, 0 },
-   { "onload", Image::OnLoad, DontDelete, 0, 0 }
+   { "width", Image::Width, DontDelete|ReadOnly, 0, 0 }
 };
 
-const struct HashTable ImageTable = { 2, 4, ImageTableEntries, 3 };
+const struct HashTable ImageTable = { 2, 7, ImageTableEntries, 6 };
 
 } // namespace
 
 namespace KJS {
 
 const struct HashEntry Context2DTableEntries[] = {
-   { 0, 0, 0, 0, 0 },
-   { "closePath", Context2D::ClosePath, DontDelete|Function, 0, &Context2DTableEntries[34] },
-   { 0, 0, 0, 0, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "rotate", Context2D::Rotate, DontDelete|Function, 2, 0 },
-   { 0, 0, 0, 0, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "strokePath", Context2D::StrokePath, DontDelete|Function, 0, 0 },
-   { "setLineCap", Context2D::SetLineCap, DontDelete|Function, 1, &Context2DTableEntries[32] },
-   { "moveToPoint", Context2D::MoveToPoint, DontDelete|Function, 2, 0 },
-   { "drawImageFromRect", Context2D::DrawImageFromRect, DontDelete|Function, 10, 0 },
-   { "addLineToPoint", Context2D::AddLineToPoint, DontDelete|Function, 2, 0 },
-   { "setAlpha", Context2D::SetAlpha, DontDelete|Function, 1, 0 },
-   { "translate", Context2D::Translate, DontDelete|Function, 1, &Context2DTableEntries[35] },
-   { "fillPath", Context2D::FillPath, DontDelete|Function, 0, &Context2DTableEntries[40] },
-   { "beginPath", Context2D::BeginPath, DontDelete|Function, 0, &Context2DTableEntries[38] },
-   { "setShadow", Context2D::SetShadow, DontDelete|Function, 3, 0 },
-   { "addArc", Context2D::AddArc, DontDelete|Function, 6, &Context2DTableEntries[41] },
-   { "setStrokeColor", Context2D::SetStrokeColor, DontDelete|Function, 1, &Context2DTableEntries[37] },
-   { 0, 0, 0, 0, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "addArcToPoint", Context2D::AddArcToPoint, DontDelete|Function, 5, &Context2DTableEntries[36] },
-   { 0, 0, 0, 0, 0 },
-   { "setMiterLimit", Context2D::SetMiterLimit, DontDelete|Function, 1, &Context2DTableEntries[42] },
-   { "scale", Context2D::Scale, DontDelete|Function, 2, 0 },
-   { "setFillColor", Context2D::SetFillColor, DontDelete|Function, 1, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "setLineWidth", Context2D::SetLineWidth, DontDelete|Function, 1, 0 },
-   { "save", Context2D::Save, DontDelete|Function, 0, &Context2DTableEntries[31] },
-   { 0, 0, 0, 0, 0 },
+   { "miterLimit", Context2D::MiterLimit, DontDelete, 0, 0 },
+   { "drawImage", Context2D::DrawImage, DontDelete|Function, 6, 0 },
+   { "beginPath", Context2D::BeginPath, DontDelete|Function, 0, &Context2DTableEntries[59] },
    { 0, 0, 0, 0, 0 },
    { "restore", Context2D::Restore, DontDelete|Function, 0, 0 },
-   { "setLineJoin", Context2D::SetLineJoin, DontDelete|Function, 1, &Context2DTableEntries[33] },
-   { "addQuadraticCurveToPoint", Context2D::AddQuadraticCurveToPoint, DontDelete|Function, 4, &Context2DTableEntries[39] },
-   { "addBezierCurveToPoint", Context2D::AddBezierCurveToPoint, DontDelete|Function, 6, 0 },
-   { "addRect", Context2D::AddRect, DontDelete|Function, 4, 0 },
+   { "shadowOffsetX", Context2D::ShadowOffsetX, DontDelete, 0, &Context2DTableEntries[48] },
+   { "shadowOffsetY", Context2D::ShadowOffsetY, DontDelete, 0, &Context2DTableEntries[56] },
+   { "globalAlpha", Context2D::GlobalAlpha, DontDelete, 0, 0 },
+   { "lineJoin", Context2D::LineJoin, DontDelete, 0, 0 },
+   { "bezierCurveTo", Context2D::BezierCurveTo, DontDelete|Function, 6, 0 },
+   { "moveTo", Context2D::MoveTo, DontDelete|Function, 2, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "setMiterLimit", Context2D::SetMiterLimit, DontDelete|Function, 1, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "translate", Context2D::Translate, DontDelete|Function, 1, 0 },
+   { "createRadialGradient", Context2D::CreateRadialGradient, DontDelete|Function, 6, 0 },
+   { "setCompositeOperation", Context2D::SetCompositeOperation, DontDelete|Function, 1, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "createPattern", Context2D::CreatePattern, DontDelete|Function, 2, 0 },
+   { "closePath", Context2D::ClosePath, DontDelete|Function, 0, 0 },
+   { "setLineJoin", Context2D::SetLineJoin, DontDelete|Function, 1, 0 },
+   { "globalCompositeOperation", Context2D::GlobalCompositeOperation, DontDelete, 0, 0 },
+   { "arc", Context2D::Arc, DontDelete|Function, 6, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "lineWidth", Context2D::LineWidth, DontDelete, 0, 0 },
+   { "arcTo", Context2D::ArcTo, DontDelete|Function, 5, 0 },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "lineCap", Context2D::LineCap, DontDelete, 0, 0 },
+   { "clearShadow", Context2D::ClearShadow, DontDelete|Function, 0, &Context2DTableEntries[60] },
+   { 0, 0, 0, 0, 0 },
+   { "rotate", Context2D::Rotate, DontDelete|Function, 2, 0 },
+   { "quadraticCurveToPoint", Context2D::QuadraticCurveTo, DontDelete|Function, 4, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "setFillColor", Context2D::SetFillColor, DontDelete|Function, 1, &Context2DTableEntries[58] },
+   { "setStrokeColor", Context2D::SetStrokeColor, DontDelete|Function, 1, &Context2DTableEntries[57] },
+   { "setLineWidth", Context2D::SetLineWidth, DontDelete|Function, 1, 0 },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "fill", Context2D::Fill, DontDelete|Function, 0, 0 },
+   { "fillStyle", Context2D::FillStyle, DontDelete, 0, &Context2DTableEntries[49] },
+   { "strokeStyle", Context2D::StrokeStyle, DontDelete, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "shadowBlur", Context2D::ShadowBlur, DontDelete, 0, &Context2DTableEntries[52] },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "rect", Context2D::Rect, DontDelete|Function, 4, 0 },
+   { "save", Context2D::Save, DontDelete|Function, 0, 0 },
+   { "shadowColor", Context2D::ShadowColor, DontDelete, 0, &Context2DTableEntries[54] },
+   { "scale", Context2D::Scale, DontDelete|Function, 2, &Context2DTableEntries[50] },
+   { "setLineCap", Context2D::SetLineCap, DontDelete|Function, 1, &Context2DTableEntries[51] },
+   { "stroke", Context2D::Stroke, DontDelete|Function, 0, &Context2DTableEntries[53] },
+   { "lineTo", Context2D::LineTo, DontDelete|Function, 2, 0 },
    { "clip", Context2D::Clip, DontDelete|Function, 0, 0 },
-   { "clearRect", Context2D::ClearRect, DontDelete|Function, 4, 0 },
+   { "clearRect", Context2D::ClearRect, DontDelete|Function, 4, &Context2DTableEntries[55] },
    { "fillRect", Context2D::FillRect, DontDelete|Function, 4, 0 },
    { "strokeRect", Context2D::StrokeRect, DontDelete|Function, 4, 0 },
-   { "drawImage", Context2D::DrawImage, DontDelete|Function, 6, 0 },
-   { "clearShadow", Context2D::ClearShadow, DontDelete|Function, 0, 0 },
-   { "setCompositeOperation", Context2D::SetCompositeOperation, DontDelete|Function, 1, 0 }
+   { "drawImageFromRect", Context2D::DrawImageFromRect, DontDelete|Function, 10, 0 },
+   { "setShadow", Context2D::SetShadow, DontDelete|Function, 3, 0 },
+   { "setAlpha", Context2D::SetAlpha, DontDelete|Function, 1, 0 },
+   { "createLinearGradient", Context2D::CreateLinearGradient, DontDelete|Function, 4, 0 }
 };
 
-const struct HashTable Context2DTable = { 2, 43, Context2DTableEntries, 31 };
+const struct HashTable Context2DTable = { 2, 61, Context2DTableEntries, 48 };
+
+} // namespace
+
+namespace KJS {
+
+const struct HashEntry GradientTableEntries[] = {
+   { "addColorStop", Gradient::AddColorStop, DontDelete|Function, 2, 0 }
+};
+
+const struct HashTable GradientTable = { 2, 1, GradientTableEntries, 1 };
+
+} // namespace
+
+namespace KJS {
+
+const struct HashEntry ImagePatternTableEntries[] = {
+};
+
+const struct HashTable ImagePatternTable = { 2, 0, ImagePatternTableEntries, 0 };
 
 } // namespace

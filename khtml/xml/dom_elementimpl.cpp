@@ -5,6 +5,7 @@
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
  *           (C) 2001 Peter Kelly (pmk@post.com)
  *           (C) 2001 Dirk Mueller (mueller@kde.org)
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -40,7 +41,6 @@
 #include "css/css_valueimpl.h"
 #include "css/css_stylesheetimpl.h"
 #include "css/cssstyleselector.h"
-#include "xml/dom_selection.h"
 #include "xml/dom_xmlimpl.h"
 
 #include <qtextstream.h>
@@ -223,6 +223,14 @@ void ElementImpl::setAttribute(NodeImpl::Id id, const DOMString &value)
     setAttribute(id,value.implementation(),exceptioncode);
 }
 
+NamedAttrMapImpl* ElementImpl::attributes(bool readonly) const
+{
+    updateStyleAttributeIfNeeded();
+
+    if (!readonly && !namedAttrMap) createAttributeMap();
+    return namedAttrMap;
+}
+
 unsigned short ElementImpl::nodeType() const
 {
     return Node::ELEMENT_NODE;
@@ -240,6 +248,9 @@ const AtomicString& ElementImpl::getIDAttribute() const
 
 const AtomicString& ElementImpl::getAttribute(NodeImpl::Id id) const
 {
+    if (id == ATTR_STYLE)
+        updateStyleAttributeIfNeeded();
+
     if (namedAttrMap) {
         AttributeImpl* a = namedAttrMap->getAttributeItem(id);
         if (a) return a->value();
@@ -258,6 +269,9 @@ const AtomicString& ElementImpl::getAttributeNS(const DOMString &namespaceURI,
 
 void ElementImpl::setAttribute(NodeImpl::Id id, DOMStringImpl* value, int &exceptioncode )
 {
+    if (inDocument())
+        getDocument()->incDOMTreeVersion();
+
     // allocate attributemap if necessary
     AttributeImpl* old = attributes(false)->getAttributeItem(id);
 
@@ -288,6 +302,9 @@ AttributeImpl* ElementImpl::createAttribute(NodeImpl::Id id, DOMStringImpl* valu
 
 void ElementImpl::setAttributeMap( NamedAttrMapImpl* list )
 {
+    if (inDocument())
+        getDocument()->incDOMTreeVersion();
+
     // If setting the whole map changes the id attribute, we need to
     // call updateId.
 
@@ -314,19 +331,21 @@ void ElementImpl::setAttributeMap( NamedAttrMapImpl* list )
 
 bool ElementImpl::hasAttributes() const
 {
+    updateStyleAttributeIfNeeded();
+
     return namedAttrMap && namedAttrMap->length() > 0;
 }
 
 NodeImpl *ElementImpl::cloneNode(bool deep)
 {
-    // ### we loose the namespace here ... FIXME
+    // ### we lose the namespace here ... FIXME
     int exceptioncode;
     ElementImpl *clone = getDocument()->createElement(tagName(), exceptioncode);
     if (!clone) return 0;
 
     // clone attributes
     if (namedAttrMap)
-        *(static_cast<NamedAttrMapImpl*>(clone->attributes())) = *namedAttrMap;
+        *clone->attributes() = *namedAttrMap;
 
     if (deep)
         cloneChildNodes(clone);
@@ -373,19 +392,6 @@ bool ElementImpl::isURLAttribute(AttributeImpl *attr) const
     
 }
 
-void ElementImpl::defaultEventHandler(EventImpl *evt)
-{
-#if APPLE_CHANGES
-    if (evt->id() == EventImpl::KEYPRESS_EVENT && isContentEditable()) {
-        KHTMLPart *part = getDocument()->part();
-        // Don't treat command-key combos as editing key events
-        if (part && !static_cast<KeyboardEventImpl*>(evt)->metaKey() && KWQ(part)->interceptEditingKeyEvent())
-            evt->setDefaultHandled();
-    }
-#endif
-    NodeBaseImpl::defaultEventHandler(evt);
-}
-
 RenderStyle *ElementImpl::styleForRenderer(RenderObject *parentRenderer)
 {
     return getDocument()->styleSelector()->styleForElement(this);
@@ -402,12 +408,12 @@ RenderObject *ElementImpl::createRenderer(RenderArena *arena, RenderStyle *style
     return RenderObject::createObject(this, style);
 }
 
-void ElementImpl::attach()
+
+void ElementImpl::insertedIntoDocument()
 {
-#if SPEED_DEBUG < 1
-    createRendererIfNeeded();
-#endif
-    NodeBaseImpl::attach();
+    // need to do superclass processing first so inDocument() is true
+    // by the time we reach updateId
+    NodeBaseImpl::insertedIntoDocument();
 
     if (hasID()) {
         NamedAttrMapImpl *attrs = attributes(true);
@@ -420,7 +426,7 @@ void ElementImpl::attach()
     }
 }
 
-void ElementImpl::detach()
+void ElementImpl::removedFromDocument()
 {
     if (hasID()) {
         NamedAttrMapImpl *attrs = attributes(true);
@@ -432,7 +438,15 @@ void ElementImpl::detach()
         }
     }
 
-    NodeBaseImpl::detach();
+    NodeBaseImpl::removedFromDocument();
+}
+
+void ElementImpl::attach()
+{
+#if SPEED_DEBUG < 1
+    createRendererIfNeeded();
+#endif
+    NodeBaseImpl::attach();
 }
 
 void ElementImpl::recalcStyle( StyleChange change )
@@ -475,6 +489,14 @@ void ElementImpl::recalcStyle( StyleChange change )
                 m_render->setStyle(newStyle);
             }
         }
+        else if (changed() && m_render && newStyle && (getDocument()->usesSiblingRules() || getDocument()->usesDescendantRules())) {
+            // Although no change occurred, we use the new style so that the cousin style sharing code won't get
+            // fooled into believing this style is the same.  This is only necessary if the document actually uses
+            // sibling/descendant rules, since otherwise it isn't possible for ancestor styles to affect sharing of
+            // descendants.
+            m_render->setStyleInternal(newStyle);
+        }
+
         newStyle->deref(getDocument()->renderArena());
 
         if ( change != Force) {
@@ -597,7 +619,7 @@ DOMString ElementImpl::toString() const
 
 void ElementImpl::updateId(const AtomicString& oldId, const AtomicString& newId)
 {
-    if (!attached())
+    if (!inDocument())
 	return;
 
     if (oldId == newId)
@@ -613,6 +635,7 @@ void ElementImpl::updateId(const AtomicString& oldId, const AtomicString& newId)
 #ifndef NDEBUG
 void ElementImpl::dump(QTextStream *stream, QString ind) const
 {
+    updateStyleAttributeIfNeeded();
     if (namedAttrMap) {
         for (uint i = 0; i < namedAttrMap->length(); i++) {
             AttributeImpl *attr = namedAttrMap->attributeItem(i);
@@ -622,6 +645,37 @@ void ElementImpl::dump(QTextStream *stream, QString ind) const
     }
 
     NodeBaseImpl::dump(stream,ind);
+}
+#endif
+
+#ifndef NDEBUG
+void ElementImpl::formatForDebugger(char *buffer, unsigned length) const
+{
+    DOMString result;
+    DOMString s;
+    
+    s = nodeName();
+    if (s.length() > 0) {
+        result += s;
+    }
+          
+    s = getAttribute(ATTR_ID);
+    if (s.length() > 0) {
+        if (result.length() > 0)
+            result += "; ";
+        result += "id=";
+        result += s;
+    }
+          
+    s = getAttribute(ATTR_CLASS);
+    if (s.length() > 0) {
+        if (result.length() > 0)
+            result += "; ";
+        result += "class=";
+        result += s;
+    }
+          
+    strncpy(buffer, result.string().latin1(), length - 1);
 }
 #endif
 
@@ -679,8 +733,8 @@ NodeImpl *XMLElementImpl::cloneNode ( bool deep )
     clone->m_id = m_id;
 
     // clone attributes
-    if(namedAttrMap)
-        *(static_cast<NamedAttrMapImpl*>(clone->attributes())) = *namedAttrMap;
+    if (namedAttrMap)
+        *clone->attributes() = *namedAttrMap;
 
     if (deep)
         cloneChildNodes(clone);
@@ -916,7 +970,7 @@ void NamedAttrMapImpl::addAttribute(AttributeImpl *attr)
     if (element) {
         element->attributeChanged(attr);
         element->dispatchAttrAdditionEvent(attr);
-        element->dispatchSubtreeModifiedEvent();
+        element->dispatchSubtreeModifiedEvent(false);
     }
 }
 
@@ -962,7 +1016,7 @@ void NamedAttrMapImpl::removeAttribute(NodeImpl::Id id)
     }
     if (element) {
         element->dispatchAttrRemovalEvent(attr);
-        element->dispatchSubtreeModifiedEvent();
+        element->dispatchSubtreeModifiedEvent(false);
     }
     attr->deref();
 }

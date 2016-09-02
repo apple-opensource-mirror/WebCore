@@ -24,7 +24,7 @@
 #ifndef RENDER_BOX_H
 #define RENDER_BOX_H
 
-#include "render_container.h"
+#include "render_object.h"
 #include "misc/loader.h"
 #include "render_layer.h"
 
@@ -34,7 +34,7 @@ namespace khtml {
     enum WidthType { Width, MinWidth, MaxWidth };
     enum HeightType { Height, MinHeight, MaxHeight };
     
-class RenderBox : public RenderContainer
+class RenderBox : public RenderObject
 {
 
 
@@ -49,6 +49,7 @@ public:
 
     virtual void setStyle(RenderStyle *style);
     virtual void paint(PaintInfo& i, int _tx, int _ty);
+    virtual bool nodeAtPoint(NodeInfo& i, int _x, int _y, int _tx, int _ty, HitTestAction hitTestAction);
 
     virtual void detach();
     
@@ -72,13 +73,15 @@ public:
     virtual int width() const;
     virtual int height() const;
 
-    virtual short marginTop() const { return m_marginTop; }
-    virtual short marginBottom() const { return m_marginBottom; }
-    virtual short marginLeft() const { return m_marginLeft; }
-    virtual short marginRight() const { return m_marginRight; }
+    virtual int marginTop() const { return m_marginTop; }
+    virtual int marginBottom() const { return m_marginBottom; }
+    virtual int marginLeft() const { return m_marginLeft; }
+    virtual int marginRight() const { return m_marginRight; }
 
     virtual void setWidth( int width ) { m_width = width; }
     virtual void setHeight( int height ) { m_height = height; }
+
+    virtual QRect borderBox() const { return QRect(0, -borderTopExtra(), width(), height() + borderTopExtra() + borderBottomExtra()); }
 
     // This method is now public so that centered objects like tables that are
     // shifted right by left-aligned floats can recompute their left and
@@ -130,24 +133,27 @@ public:
 
     virtual RenderLayer* layer() const { return m_layer; }
     
-    virtual void caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height);
+    virtual QRect caretRect(int offset, EAffinity affinity = UPSTREAM, int *extraWidthToEndOfLine = 0);
 
-    virtual void paintBackgroundExtended(QPainter *p, const QColor &c, CachedImage *bg, int clipy, int cliph,
+    virtual void paintBackgroundExtended(QPainter *p, const QColor& c, const BackgroundLayer* bgLayer, int clipy, int cliph,
                                          int _tx, int _ty, int w, int height,
                                          int bleft, int bright);
 
     virtual void setStaticX(int staticX);
     virtual void setStaticY(int staticY);
+    virtual int staticX() const { return m_staticX; }
+    virtual int staticY() const { return m_staticY; }
 
 protected:
     virtual void paintBoxDecorations(PaintInfo& i, int _tx, int _ty);
     void paintRootBoxDecorations(PaintInfo& i, int _tx, int _ty);
 
-    void paintBackground(QPainter *p, const QColor &c, CachedImage *bg, int clipy, int cliph, int _tx, int _ty, int w, int h);
+    void paintBackgrounds(QPainter *p, const QColor& c, const BackgroundLayer* bgLayer, int clipy, int cliph, int _tx, int _ty, int w, int h);
+    void paintBackground(QPainter *p, const QColor& c, const BackgroundLayer* bgLayer, int clipy, int cliph, int _tx, int _ty, int w, int h);
     void outlineBox(QPainter *p, int _tx, int _ty, const char *color = "red");
 
-    virtual int borderTopExtra() { return 0; }
-    virtual int borderBottomExtra() { return 0; }
+    virtual int borderTopExtra() const { return 0; }
+    virtual int borderBottomExtra() const { return 0; }
 
     void calcAbsoluteHorizontal();
     void calcAbsoluteVertical();
@@ -163,11 +169,11 @@ protected:
     int m_x;
     int m_width;
 
-    short m_marginTop;
-    short m_marginBottom;
+    int m_marginTop;
+    int m_marginBottom;
 
-    short m_marginLeft;
-    short m_marginRight;
+    int m_marginLeft;
+    int m_marginRight;
 
     /*
      * the minimum width the element needs, to be able to render

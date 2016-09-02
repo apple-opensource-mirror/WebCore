@@ -797,60 +797,64 @@ NSString *QString::getNSString() const
     // The Cocoa calls in this method don't need exceptions blocked
     // because they are simple NSString calls that can't throw.
 
+    int length = dataHandle[0]->_length;
     if (dataHandle[0]->_isUnicodeValid) {
-        return [NSString stringWithCharacters:(const unichar *)unicode() length:dataHandle[0]->_length];
+        return [NSString stringWithCharacters:(const unichar *)unicode() length:length];
     }
     
     if (dataHandle[0]->_isAsciiValid) {
-        return [(NSString *)CFStringCreateWithCString(kCFAllocatorDefault, ascii(), kCFStringEncodingISOLatin1) autorelease];
+        return [[[NSString alloc] initWithBytes:ascii() length:length encoding:NSISOLatin1StringEncoding] autorelease];
     }
     
     FATAL("invalid character cache");
     return nil;
 }
 
-inline void QString::detachInternal()
-{
-    KWQStringData *oldData = *dataHandle;
-    KWQStringData *newData = new KWQStringData(*oldData);
-    newData->_isHeapAllocated = 1;
-    newData->refCount = oldData->refCount - 1;
-    oldData->refCount = 1;
-    *dataHandle = newData;    
-}
-
 inline void QString::detachIfInternal()
 {
     KWQStringData *oldData = *dataHandle;
     if (oldData->refCount > 1 && oldData == &internalData) {
-        detachInternal();
+	KWQStringData *newData = new KWQStringData(*oldData);
+	newData->_isHeapAllocated = 1;
+	newData->refCount = oldData->refCount;
+	oldData->refCount = 1;
+	oldData->deref();
+	*dataHandle = newData;    
     }
 }
 
+const QChar *QString::stableUnicode()
+{
+    // if we're using the internal data of another string, detach now
+    if (!dataHandle[0]->_isHeapAllocated && *dataHandle != &internalData) {
+	detach();
+    }
+    return unicode();
+}
+
+
 QString::~QString()
 {
-    KWQStringData **oldHandle = dataHandle;
-    KWQStringData *oldData = *oldHandle;
-    
-    ASSERT(oldHandle);
-    ASSERT(oldData->refCount != 0);
+    ASSERT(dataHandle);
+    ASSERT(dataHandle[0]->refCount != 0);
 
     // Only free the handle if no other string has a reference to the
     // data.  The handle will be freed by the string that has the
     // last reference to data.
-    bool needToFreeHandle = oldData->refCount == 1 && oldData != shared_null;
+    bool needToFreeHandle = dataHandle[0]->refCount == 1 && *dataHandle != shared_null;
 
     // Copy our internal data if necessary, other strings still need it.
     detachIfInternal();
     
     // Remove our reference. This should always be the last reference
-    // if *dataHandle points to our internal KWQStringData.
-    oldData->deref();
+    // if *dataHandle points to our internal KWQStringData. If we just detached,
+    // this will remove the extra ref from the new handle.
+    dataHandle[0]->deref();
 
-    ASSERT(oldData != &internalData || oldData->refCount == 0);
+    ASSERT(*dataHandle != &internalData || dataHandle[0]->refCount == 0);
     
     if (needToFreeHandle)
-        freeHandle(oldHandle);
+        freeHandle(dataHandle);
 
     dataHandle = 0;
 }
@@ -2484,6 +2488,45 @@ QString &QString::replace( uint index, uint len, const QString &str )
 {
     return remove(index, len).insert(index, str);
 }
+
+QString &QString::replace(char pattern, const QString &str)
+{
+    int slen = str.dataHandle[0]->_length;
+    int index = 0;
+    while ((index = find(pattern, index)) >= 0) {
+        replace(index, 1, str);
+        index += slen;
+    }
+    return *this;
+}
+
+
+QString &QString::replace(QChar pattern, const QString &str)
+{
+    int slen = str.dataHandle[0]->_length;
+    int index = 0;
+    while ((index = find(pattern, index)) >= 0) {
+        replace(index, 1, str);
+        index += slen;
+    }
+    return *this;
+}
+
+
+QString &QString::replace(const QString &pattern, const QString &str)
+{
+    if (pattern.isEmpty())
+        return *this;
+    int plen = pattern.dataHandle[0]->_length;
+    int slen = str.dataHandle[0]->_length;
+    int index = 0;
+    while ((index = find(pattern, index)) >= 0) {
+        replace(index, plen, str);
+        index += slen;
+    }
+    return *this;
+}
+
 
 QString &QString::replace(const QRegExp &qre, const QString &str)
 {

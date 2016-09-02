@@ -31,7 +31,6 @@
 #include <qstringlist.h>
 
 #if APPLE_CHANGES
-#include <JavaVM/jni.h>
 #include <JavaScriptCore/runtime.h>
 #endif
 
@@ -57,11 +56,13 @@ public:
     
     virtual bool rendererIsNeeded(khtml::RenderStyle *);
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
+    virtual void closeRenderer();
 
     bool getMember(const QString &, JType &, QString &);
     bool callMember(const QString &, const QStringList &, JType &, QString &);
     
 #if APPLE_CHANGES
+    virtual bool allParamsAvailable();
     void setupApplet() const;
     KJS::Bindings::Instance *getAppletInstance() const;
 #endif
@@ -72,6 +73,7 @@ protected:
 private:
 #if APPLE_CHANGES
     mutable KJS::Bindings::Instance *appletInstance;
+    bool m_allParamsAvailable;
 #endif
 };
 
@@ -130,17 +132,27 @@ public:
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
     virtual void detach();
     
-    virtual void recalcStyle( StyleChange ch );
+    virtual void recalcStyle(StyleChange ch);
+    virtual void childrenChanged();
 
     DocumentImpl* contentDocument() const;
     
     virtual bool isURLAttribute(AttributeImpl *attr) const;
+
+#if APPLE_CHANGES
+    KJS::Bindings::Instance *getObjectInstance() const;
+#endif
 
     QString serviceType;
     QString url;
     QString classId;
     bool needWidgetUpdate;
     HTMLImageLoader* m_imageLoader;
+
+#if APPLE_CHANGES
+private:
+    mutable KJS::Bindings::Instance *objectInstance;
+#endif
 };
 
 // -------------------------------------------------------------------------

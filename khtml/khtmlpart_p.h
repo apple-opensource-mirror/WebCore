@@ -1,6 +1,3 @@
-#ifndef khtmlpart_p_h
-#define khtmlpart_p_h
-
 /* This file is part of the KDE project
  *
  * Copyright (C) 1998, 1999 Torben Weis <weis@kde.org>
@@ -26,6 +23,10 @@
  * the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 02111-1307, USA.
  */
+
+#ifndef khtmlpart_p_h
+#define khtmlpart_p_h
+
 #include <kcursor.h>
 #include <klibloader.h>
 #include <kxmlguifactory.h>
@@ -40,11 +41,13 @@
 #include "khtml_iface.h"
 #include "khtml_settings.h"
 #include "misc/decoder.h"
+#include "misc/formdata.h"
 #include "java/kjavaappletcontext.h"
 #include "ecma/kjs_proxy.h"
 #include "css/css_valueimpl.h"
 #include "dom/dom_misc.h"
-#include "xml/dom_selection.h"
+#include "editing/htmlediting.h"
+#include "editing/selection.h"
 
 namespace KIO
 {
@@ -79,12 +82,11 @@ namespace khtml
     bool m_bPreloaded;
     KURL m_workingURL;
     Type m_type;
-    QStringList m_params;
+    QStringList m_paramNames;
+    QStringList m_paramValues;
     bool m_bNotify;
   };
-
-  class EditCommand;
-};
+}
 
 class FrameList : public QValueList<khtml::ChildFrame>
 {
@@ -97,7 +99,13 @@ typedef FrameList::Iterator FrameIt;
 
 static int khtml_part_dcop_counter = 0;
 
-enum RedirectionScheduled { noRedirectionScheduled, redirectionScheduled, historyNavigationScheduled, redirectionDuringLoad };
+enum RedirectionScheduled {
+    noRedirectionScheduled,
+    redirectionScheduled,
+    locationChangeScheduled,
+    historyNavigationScheduled,
+    locationChangeScheduledDuringLoad
+};
 
 class KHTMLPartPrivate
 {
@@ -111,6 +119,7 @@ public:
     m_kjs_lib = 0;
     m_job = 0L;
     m_bComplete = true;
+    m_bLoadingMainResource = false;
     m_bLoadEventEmitted = true;
     m_bUnloadEventEmitted = true;
     m_cachePolicy = KIO::CC_Verify;
@@ -154,7 +163,7 @@ public:
     m_onlyLocalReferences = false;
 
     m_caretBlinkTimer = 0;
-    m_caretVisible = true;
+    m_caretVisible = false;
     m_caretBlinks = true;
     m_caretPaint = true;
     
@@ -194,6 +203,7 @@ public:
         }
     }
 
+    m_isFocused = false;
     m_focusNodeNumber = -1;
     m_focusNodeRestored = false;
     m_opener = 0;
@@ -280,6 +290,7 @@ public:
 #endif
 
   bool m_bComplete:1;
+  bool m_bLoadingMainResource:1;
   bool m_bLoadEventEmitted:1;
   bool m_bUnloadEventEmitted:1;
   bool m_haveEncoding:1;
@@ -297,6 +308,7 @@ public:
   RedirectionScheduled m_scheduledRedirection;
   double m_delayRedirect;
   QString m_redirectURL;
+  QString m_redirectReferrer;
   int m_scheduledHistoryNavigationSteps;
 
 #if !APPLE_CHANGES
@@ -338,7 +350,7 @@ public:
   {
     const char *submitAction;
     QString submitUrl;
-    QByteArray submitFormData;
+    khtml::FormData submitFormData;
     QString target;
     QString submitContentType;
     QString submitBoundary;
@@ -349,15 +361,16 @@ public:
   bool m_bMousePressed;
   DOM::Node m_mousePressNode; //node under the mouse when the mouse was pressed (set in the mouse handler)
 
-  DOM::Selection::ETextGranularity m_selectionGranularity;
+  khtml::ETextGranularity m_selectionGranularity;
   bool m_beganSelectingText;
 #if !APPLE_CHANGES
   QString m_overURL;
   QString m_overURLTarget;
 #endif
 
-  DOM::Selection m_selection;
-  DOM::Selection m_dragCaret;
+  khtml::Selection m_selection;
+  khtml::Selection m_dragCaret;
+  khtml::Selection m_mark;
   int m_caretBlinkTimer;
 
   bool m_caretVisible:1;
@@ -369,10 +382,11 @@ public:
   bool m_bCleared:1;
   bool m_bSecurityInQuestion:1;
   bool m_focusNodeRestored:1;
+  bool m_isFocused:1;
 
-  khtml::EditCommand m_lastEditCommand;
+  khtml::EditCommandPtr m_lastEditCommand;
   int m_xPosForVerticalArrowNavigation;
-  DOM::CSSStyleDeclarationImpl *m_typingStyle;
+  DOM::CSSMutableStyleDeclarationImpl *m_typingStyle;
 
   int m_focusNodeNumber;
 
@@ -414,6 +428,9 @@ public:
   bool m_executingJavaScriptFormAction;
   
   bool m_cancelWithLoadInProgress;
+
+  QTimer m_lifeSupportTimer;
+  
 };
 
 #endif

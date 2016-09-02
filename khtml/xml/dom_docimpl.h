@@ -4,7 +4,7 @@
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
  *           (C) 2001 Dirk Mueller (mueller@kde.org)
- * Copyright (C) 2003 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -33,6 +33,7 @@
 #include <qptrlist.h>
 #include <qobject.h>
 #include <qdict.h>
+#include <qptrdict.h>
 #include <qmap.h>
 #include <qdatetime.h>
 
@@ -42,8 +43,6 @@
 #include "KWQSignal.h"
 #include "decoder.h"
 #endif
-
-#include "htmlediting.h"
 
 class QPaintDevice;
 class QPaintDeviceMetrics;
@@ -55,20 +54,15 @@ class RenderArena;
 class KWQAccObjectCache;
 #endif
 
-// This amount of time must have elapsed before we will even consider scheduling a layout without a delay.
-const int cLayoutScheduleThreshold = 250;
-
-// This is the amount of time we will delay doing a layout whenever we are either still parsing, or 
-// when the minimum amount of time according to the |cLayoutScheduleThreshold| has not yet elapsed.
-const int cLayoutTimerDelay = 1000;
-
 namespace khtml {
     class CSSStyleSelector;
     class DocLoader;
-    class EditCommand;
     class RenderImage;
     class Tokenizer;
     class XMLHandler;
+#if APPLE_CHANGES    
+    struct DashboardRegionValue;
+#endif
 }
 
 #ifndef KHTML_NO_XBL
@@ -107,14 +101,37 @@ namespace DOM {
     class NodeIteratorImpl;
     class NodeListImpl;
     class ProcessingInstructionImpl;
+    class Range;
     class RangeImpl;
     class RegisteredEventListener;
-    class Selection;
     class StyleSheetImpl;
     class StyleSheetListImpl;
     class TextImpl;
     class TreeWalkerImpl;
+#ifdef KHTML_XSLT
+    class XSLStyleSheetImpl;
+#endif
 
+    // A range of a node within a document that is "marked", such as being misspelled
+    struct DocumentMarker
+    {
+        enum MarkerType {
+            Spelling
+            // Not doing grammar yet, but this is a placeholder for it
+            // Grammar
+        };
+        
+        enum MarkerType type;
+        ulong startOffset, endOffset;
+        
+        bool operator == (const DocumentMarker &o) const {
+            return type == o.type && startOffset == o.startOffset && endOffset == o.endOffset;
+        }
+        bool operator != (const DocumentMarker &o) const {
+            return !(*this == o);
+        }
+    };
+    
 class DOMImplementationImpl : public khtml::Shared<DOMImplementationImpl>
 {
 public:
@@ -194,7 +211,8 @@ public:
     virtual bool isDocumentNode() const { return true; }
     virtual bool isHTMLDocument() const { return false; }
 
-    virtual ElementImpl *createHTMLElement ( const DOMString &tagName, int &exceptioncode );
+    ElementImpl *createHTMLElement(const DOMString &tagName, int &exceptioncode);
+    ElementImpl *createHTMLElement(unsigned short tagID);
 
     khtml::CSSStyleSelector *styleSelector() { return m_styleSelector; }
 
@@ -265,6 +283,7 @@ public:
     static QPtrList<DocumentImpl> * changedDocuments;
     virtual void updateRendering();
     void updateLayout();
+    void updateLayoutIgnorePendingStylesheets();
     static void updateDocumentsRendering();
     khtml::DocLoader *docLoader() { return m_docLoader; }
 
@@ -274,8 +293,7 @@ public:
     RenderArena* renderArena() { return m_renderArena; }
 
 #if APPLE_CHANGES
-    KWQAccObjectCache* getExistingAccObjectCache() { return m_accCache; }
-    KWQAccObjectCache* getOrCreateAccObjectCache();
+    KWQAccObjectCache* getAccObjectCache();
 #endif
     
     // to get visually ordered hebrew and arabic pages right
@@ -284,8 +302,9 @@ public:
     void updateSelection();
     
     void open();
+    void implicitOpen();
     void close();
-    void closeInternal ( bool checkTokenizer );
+    void implicitClose();
     void write ( const DOMString &text );
     void write ( const QString &text );
     void writeln ( const DOMString &text );
@@ -293,7 +312,7 @@ public:
     void clear();
 
     QString URL() const { return m_url; }
-    void setURL(QString url) { m_url = url; }
+    void setURL(const QString& url);
 
     QString baseURL() const { return m_baseURL.isEmpty() ? m_url : m_baseURL; }
     void setBaseURL(const QString& baseURL) { m_baseURL = baseURL; }
@@ -308,7 +327,7 @@ public:
 #endif
 
     // from cachedObjectClient
-    virtual void setStyleSheet(const DOM::DOMString &url, const DOM::DOMString &sheetStr);
+    virtual void setStyleSheet(const DOMString &url, const DOMString &sheetStr);
     void setUserStyleSheet(const QString& sheet);
     QString userStyleSheet() const { return m_usersheet; }
     void setPrintStyleSheet(const QString& sheet) { m_printSheet = sheet; }
@@ -317,7 +336,6 @@ public:
     CSSStyleSheetImpl* elementSheet();
     virtual khtml::Tokenizer *createTokenizer();
     khtml::Tokenizer *tokenizer() { return m_tokenizer; }
-    virtual khtml::XMLHandler* createTokenHandler();
     
     QPaintDeviceMetrics *paintDeviceMetrics() { return m_paintDeviceMetrics; }
     QPaintDevice *paintDevice() const { return m_paintDevice; }
@@ -348,7 +366,6 @@ public:
 
     void setParsing(bool b);
     bool parsing() const { return m_bParsing; }
-    bool allDataReceived() const { return m_bAllDataReceived; }
     int minimumLayoutDelay();
     bool shouldScheduleLayout();
     int elapsedTime() const;
@@ -447,7 +464,7 @@ public:
     void removeWindowEventListener(int id, EventListener *listener, bool useCapture);
     bool hasWindowEventListener(int id);
 
-    EventListener *createHTMLEventListener(QString code);
+    EventListener *createHTMLEventListener(QString code, NodeImpl *node);
     
     /**
      * Searches through the document, starting from fromNode, for the next selectable element that comes after fromNode.
@@ -500,6 +517,9 @@ public:
 
     DOMString domain() const;
     void setDomain( const DOMString &newDomain, bool force = false ); // not part of the DOM
+
+    DOMString policyBaseURL() const { return m_policyBaseURL; }
+    void setPolicyBaseURL(const DOMString &s) { m_policyBaseURL = s; }
     
     // The following implements the rule from HTML 4 for what valid names are.
     // To get this right for all the XML cases, we probably have to improve this or move it
@@ -523,11 +543,47 @@ public:
     bool queryCommandState(const DOMString &command);
     bool queryCommandSupported(const DOMString &command);
     DOMString queryCommandValue(const DOMString &command);
+    
+    void addMarker(Range range, DocumentMarker::MarkerType type);
+    void removeMarker(Range range, DocumentMarker::MarkerType type);
+    void addMarker(NodeImpl *node, DocumentMarker marker);
+    void removeMarker(NodeImpl *node, DocumentMarker marker);
+    void removeAllMarkers(NodeImpl *node, ulong startOffset, long length);
+    void removeAllMarkers(NodeImpl *node);
+    void removeAllMarkers();
+    void shiftMarkers(NodeImpl *node, ulong startOffset, long delta);
+    QValueList<DocumentMarker> markersForNode(NodeImpl *node);
+    
+   /**
+    * designMode support
+    */
+    enum InheritedBool {
+        off=false,
+        on=true,
+        inherit
+    };
+    
+    void setDesignMode(InheritedBool value);
+    InheritedBool getDesignMode() const;
+    bool inDesignMode() const;
+    DocumentImpl *parentDocument() const;
+    DocumentImpl *topDocument() const;
+
+#ifdef KHTML_XSLT
+    void applyXSLTransform(ProcessingInstructionImpl* pi);
+    void setTransformSource(void* doc) { m_transformSource = doc; }
+    const void* transformSource() { return m_transformSource; }
+    DocumentImpl* transformSourceDocument() { return m_transformSourceDocument; }
+    void setTransformSourceDocument(DocumentImpl* doc);
+#endif
 
 #ifndef KHTML_NO_XBL
     // XBL methods
     XBL::XBLBindingManager* bindingManager() const { return m_bindingManager; }
 #endif
+
+    void incDOMTreeVersion() { ++m_domtree_version; }
+    unsigned int domTreeVersion() const { return m_domtree_version; }
 
 signals:
     void finishedParsing();
@@ -572,6 +628,8 @@ protected:
 
     NodeImpl *m_focusNode;
     NodeImpl *m_hoverNode;
+
+    unsigned int m_domtree_version;
     
     // ### replace me with something more efficient
     // in lookup and insertion.
@@ -616,6 +674,8 @@ protected:
     
     RenderArena* m_renderArena;
 
+    QPtrDict< QValueList<DocumentMarker> > m_markers;
+
 #if APPLE_CHANGES
     KWQAccObjectCache* m_accCache;
 #endif
@@ -630,11 +690,20 @@ protected:
     QTime m_startTime;
     bool m_overMinimumLayoutThreshold;
     
+#ifdef KHTML_XSLT
+    void* m_transformSource;
+    DocumentImpl* m_transformSourceDocument;
+#endif
+
 #ifndef KHTML_NO_XBL
     XBL::XBLBindingManager* m_bindingManager; // The access point through which documents and elements communicate with XBL.
 #endif
     
     QMap<QString, HTMLMapElementImpl *> m_imageMapsByName;
+
+    DOMString m_policyBaseURL;
+
+    QPtrDict<NodeImpl> m_disconnectedNodesWithEventListeners;
 
 #if APPLE_CHANGES
 public:
@@ -660,7 +729,21 @@ public:
     void setDecoder(khtml::Decoder *);
     khtml::Decoder *decoder() const { return m_decoder; }
 
+    void setDashboardRegionsDirty(bool f) { m_dashboardRegionsDirty = f; }
+    bool dashboardRegionsDirty() const { return m_dashboardRegionsDirty; }
+    bool hasDashboardRegions () const { return m_hasDashboardRegions; }
+    void setHasDashboardRegions (bool f) { m_hasDashboardRegions = f; }
+    const QValueList<khtml::DashboardRegionValue> & dashboardRegions() const;
+    void setDashboardRegions (const QValueList<khtml::DashboardRegionValue>& regions);
+    
+    void removeAllEventListenersFromAllNodes();
+
+    void registerDisconnectedNodeWithEventListeners(NodeImpl *node);
+    void unregisterDisconnectedNodeWithEventListeners(NodeImpl *node);
+
 private:
+    void removeAllDisconnectedNodeEventListeners();
+
     JSEditor *jsEditor();
 
     JSEditor *m_jsEditor;
@@ -681,6 +764,12 @@ private:
     bool m_accessKeyDictValid;
  
     bool m_createRenderers;
+    
+    InheritedBool m_designMode;
+    
+    QValueList<khtml::DashboardRegionValue> m_dashboardRegions;
+    bool m_hasDashboardRegions;
+    bool m_dashboardRegionsDirty;
 #endif
 };
 
@@ -688,7 +777,6 @@ class DocumentFragmentImpl : public NodeBaseImpl
 {
 public:
     DocumentFragmentImpl(DocumentPtr *doc);
-    DocumentFragmentImpl(const DocumentFragmentImpl &other);
 
     // DOM methods overridden from  parent classes
     virtual DOMString nodeName() const;
@@ -748,6 +836,7 @@ protected:
     DOMString m_systemId;
     DOMString m_subset;
 };
+
 
 }; //namespace
 #endif
