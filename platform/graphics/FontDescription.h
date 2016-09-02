@@ -2,7 +2,7 @@
  * Copyright (C) 2000 Lars Knoll (knoll@kde.org)
  *           (C) 2000 Antti Koivisto (koivisto@kde.org)
  *           (C) 2000 Dirk Mueller (mueller@kde.org)
- * Copyright (C) 2003, 2004, 2005, 2006, 2007, 2008 Apple Inc. All rights reserved.
+ * Copyright (C) 2003, 2004, 2005, 2006, 2007, 2008, 2013 Apple Inc. All rights reserved.
  * Copyright (C) 2007 Nicholas Shanks <webkit@nickshanks.com>
  *
  * This library is free software; you can redistribute it and/or
@@ -25,7 +25,6 @@
 #ifndef FontDescription_h
 #define FontDescription_h
 
-#include "FontFamily.h"
 #include "FontFeatureSettings.h"
 #include "FontOrientation.h"
 #include "FontRenderingMode.h"
@@ -77,7 +76,8 @@ public:
     enum LigaturesState { NormalLigaturesState, DisabledLigaturesState, EnabledLigaturesState };
 
     FontDescription()
-        : m_specifiedSize(0)
+        : m_families(1)
+        , m_specifiedSize(0)
         , m_computedSize(0)
         , m_orientation(Horizontal)
         , m_nonCJKGlyphOrientation(NonCJKGlyphOrientationVerticalRight)
@@ -103,9 +103,12 @@ public:
 
     bool operator==(const FontDescription&) const;
     bool operator!=(const FontDescription& other) const { return !(*this == other); }
-    
-    const FontFamily& family() const { return m_familyList; }
-    FontFamily& firstFamily() { return m_familyList; }
+
+    unsigned familyCount() const { return m_families.size(); }
+    const AtomicString& firstFamily() const { return familyAt(0); }
+    const AtomicString& familyAt(unsigned i) const { return m_families[i]; }
+    const Vector<AtomicString, 1>& families() const { return m_families; }
+
     float specifiedSize() const { return m_specifiedSize; }
     float computedSize() const { return m_computedSize; }
     FontItalic italic() const { return static_cast<FontItalic>(m_italic); }
@@ -118,7 +121,7 @@ public:
     GenericFamilyType genericFamily() const { return static_cast<GenericFamilyType>(m_genericFamily); }
     bool usePrinterFont() const { return m_usePrinterFont; }
     // only use fixed default size when there is only one font family, and that family is "monospace"
-    bool useFixedDefaultSize() const { return genericFamily() == MonospaceFamily && !family().next() && family().family() == monospaceFamily; }
+    bool useFixedDefaultSize() const { return genericFamily() == MonospaceFamily && familyCount() == 1 && firstFamily() == monospaceFamily; }
     FontRenderingMode renderingMode() const { return static_cast<FontRenderingMode>(m_renderingMode); }
     Kerning kerning() const { return static_cast<Kerning>(m_kerning); }
     LigaturesState commonLigaturesState() const { return static_cast<LigaturesState>(m_commonLigaturesState); }
@@ -127,7 +130,7 @@ public:
     unsigned keywordSize() const { return m_keywordSize; }
     FontSmoothingMode fontSmoothing() const { return static_cast<FontSmoothingMode>(m_fontSmoothing); }
     TextRenderingMode textRenderingMode() const { return static_cast<TextRenderingMode>(m_textRendering); }
-    UScriptCode script() const { return m_script; }
+    UScriptCode script() const { return static_cast<UScriptCode>(m_script); }
 
     FontTraitsMask traitsMask() const;
     bool isSpecifiedFont() const { return m_isSpecifiedFont; }
@@ -137,7 +140,9 @@ public:
     FontFeatureSettings* featureSettings() const { return m_featureSettings.get(); }
     FontDescription makeNormalFeatureSettings() const;
 
-    void setFamily(const FontFamily& family) { m_familyList = family; }
+    void setOneFamily(const AtomicString& family) { ASSERT(m_families.size() == 1); m_families[0] = family; }
+    void setFamilies(const Vector<AtomicString, 1>& families) { m_families = families; }
+    void adoptFamilies(Vector<AtomicString, 1>& families) { m_families.swap(families); }
     void setComputedSize(float s) { m_computedSize = clampToFloat(s); }
     void setSpecifiedSize(float s) { m_specifiedSize = clampToFloat(s); }
     void setItalic(FontItalic i) { m_italic = i; }
@@ -147,11 +152,7 @@ public:
     void setIsAbsoluteSize(bool s) { m_isAbsoluteSize = s; }
     void setWeight(FontWeight w) { m_weight = w; }
     void setGenericFamily(GenericFamilyType genericFamily) { m_genericFamily = genericFamily; }
-#if PLATFORM(CHROMIUM) && OS(DARWIN)
-    void setUsePrinterFont(bool) { }
-#else
     void setUsePrinterFont(bool p) { m_usePrinterFont = p; }
-#endif
     void setRenderingMode(FontRenderingMode mode) { m_renderingMode = mode; }
     void setKerning(Kerning kerning) { m_kerning = kerning; }
     void setCommonLigaturesState(LigaturesState commonLigaturesState) { m_commonLigaturesState = commonLigaturesState; }
@@ -167,17 +168,21 @@ public:
     void setScript(UScriptCode s) { m_script = s; }
     void setFeatureSettings(PassRefPtr<FontFeatureSettings> settings) { m_featureSettings = settings; }
 
+#if ENABLE(IOS_TEXT_AUTOSIZING)
+    bool familiesEqualForTextAutoSizing(const FontDescription& other) const;
+
     bool equalForTextAutoSizing(const FontDescription& other) const {
-        return m_familyList.equalForTextAutoSizing(other.m_familyList)
+        return familiesEqualForTextAutoSizing(other)
             && m_specifiedSize == other.m_specifiedSize
             && m_smallCaps == other.m_smallCaps
             && m_isAbsoluteSize == other.m_isAbsoluteSize
             && m_genericFamily == other.m_genericFamily
             && m_usePrinterFont == other.m_usePrinterFont;
     }
+#endif
 
 private:
-    FontFamily m_familyList; // The list of font families to be used.
+    Vector<AtomicString, 1> m_families;
     RefPtr<FontFeatureSettings> m_featureSettings;
 
     float m_specifiedSize;   // Specified CSS value. Independent of rendering issues such as integer
@@ -211,12 +216,12 @@ private:
     unsigned m_fontSmoothing : 2; // FontSmoothingMode
     unsigned m_textRendering : 2; // TextRenderingMode
     unsigned m_isSpecifiedFont : 1; // True if a web page specifies a non-generic font family as the first font family.
-    UScriptCode m_script; // Used to help choose an appropriate font for generic font families.
+    unsigned m_script : 7; // Used to help choose an appropriate font for generic font families.
 };
 
 inline bool FontDescription::operator==(const FontDescription& other) const
 {
-    return m_familyList == other.m_familyList
+    return m_families == other.m_families
         && m_specifiedSize == other.m_specifiedSize
         && m_computedSize == other.m_computedSize
         && m_italic == other.m_italic

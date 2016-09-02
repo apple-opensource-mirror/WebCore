@@ -24,13 +24,14 @@
 #include "FontDescription.h"
 #include "FontRenderingMode.h"
 #include "FontWidthVariant.h"
-#include "PlatformString.h"
 #include <wtf/Noncopyable.h>
+#include <wtf/text/WTFString.h>
 
 namespace WebCore {
 
     class FontPlatformData;
     class CachedFont;
+    class SharedBuffer;
 
     class CustomFontCache {
     public:

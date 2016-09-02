@@ -28,6 +28,14 @@
 
 namespace WebCore {
 
+enum ListModification {
+    ListModificationUnknown = 0,
+    ListModificationInsert = 1,
+    ListModificationReplace = 2,
+    ListModificationRemove = 3,
+    ListModificationAppend = 4
+};
+
 template<typename PropertyType>
 class SVGAnimatedListPropertyTearOff;
 
@@ -213,7 +221,10 @@ public:
             index = m_values->size();
 
         // Spec: If newItem is already in a list, it is removed from its previous list before it is inserted into this list.
-        processIncomingListItemValue(newItem, &index);
+        if (!processIncomingListItemValue(newItem, &index)) {
+            // Inserting the item before itself is a no-op.
+            return newItem;
+        }
 
         // Spec: Inserts a new item into the list at the specified position. The index of the item before which the new item is to be
         // inserted. The first item is number 0. If the index is equal to 0, then the new item is inserted at the front of the list.
@@ -243,7 +254,8 @@ public:
         ASSERT(m_values->size() == m_wrappers->size());
 
         // Spec: If newItem is already in a list, it is removed from its previous list before it is inserted into this list.
-        processIncomingListItemWrapper(newItem, &index);
+        if (!processIncomingListItemWrapper(newItem, &index))
+            return newItem.release();
 
         // Spec: Inserts a new item into the list at the specified position. The index of the item before which the new item is to be
         // inserted. The first item is number 0. If the index is equal to 0, then the new item is inserted at the front of the list.
@@ -277,7 +289,10 @@ public:
 
         // Spec: If newItem is already in a list, it is removed from its previous list before it is inserted into this list.
         // Spec: If the item is already in this list, note that the index of the item to replace is before the removal of the item.
-        processIncomingListItemValue(newItem, &index);
+        if (!processIncomingListItemValue(newItem, &index)) {
+            // Replacing the item with itself is a no-op.
+            return newItem;
+        }
 
         if (m_values->isEmpty()) {
             // 'newItem' already lived in our list, we removed it, and now we're empty, which means there's nothing to replace.
@@ -309,7 +324,8 @@ public:
 
         // Spec: If newItem is already in a list, it is removed from its previous list before it is inserted into this list.
         // Spec: If the item is already in this list, note that the index of the item to replace is before the removal of the item.
-        processIncomingListItemWrapper(newItem, &index);
+        if (!processIncomingListItemWrapper(newItem, &index))
+            return newItem.release();
 
         if (m_values->isEmpty()) {
             ASSERT(m_wrappers->isEmpty());
@@ -390,7 +406,7 @@ public:
         // Append the value at the end of the list.
         m_values->append(newItem);
 
-        commitChange();
+        commitChange(ListModificationAppend);
         return newItem;
     }
 
@@ -416,11 +432,9 @@ public:
         m_values->append(newItem->propertyReference());
         m_wrappers->append(newItem);
 
-        commitChange();
+        commitChange(ListModificationAppend);
         return newItem.release();
     }
-
-    virtual SVGPropertyRole role() const { return m_role; }
 
     PropertyType& values()
     {
@@ -450,8 +464,13 @@ protected:
     }
 
     virtual void commitChange() = 0;
-    virtual void processIncomingListItemValue(const ListItemType& newItem, unsigned* indexToModify) = 0;
-    virtual void processIncomingListItemWrapper(RefPtr<ListItemTearOff>& newItem, unsigned* indexToModify) = 0;
+    virtual void commitChange(ListModification)
+    {
+        commitChange();
+    }
+
+    virtual bool processIncomingListItemValue(const ListItemType& newItem, unsigned* indexToModify) = 0;
+    virtual bool processIncomingListItemWrapper(RefPtr<ListItemTearOff>& newItem, unsigned* indexToModify) = 0;
 
     SVGPropertyRole m_role;
     bool m_ownsValues;
