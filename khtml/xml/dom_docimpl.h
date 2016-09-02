@@ -43,30 +43,46 @@
 #include "decoder.h"
 #endif
 
+#include "htmlediting.h"
+
 class QPaintDevice;
 class QPaintDeviceMetrics;
 class KHTMLView;
 class KHTMLPart;
-class Tokenizer;
 class RenderArena;
 
 #if APPLE_CHANGES
 class KWQAccObjectCache;
 #endif
 
+// This amount of time must have elapsed before we will even consider scheduling a layout without a delay.
+const int cLayoutScheduleThreshold = 250;
+
+// This is the amount of time we will delay doing a layout whenever we are either still parsing, or 
+// when the minimum amount of time according to the |cLayoutScheduleThreshold| has not yet elapsed.
+const int cLayoutTimerDelay = 1000;
+
 namespace khtml {
     class CSSStyleSelector;
     class DocLoader;
-    class CSSStyleSelectorList;
+    class EditCommand;
     class RenderImage;
+    class Tokenizer;
+    class XMLHandler;
 }
 
-namespace DOM {
+#ifndef KHTML_NO_XBL
+namespace XBL {
+    class XBLBindingManager;
+}
+#endif
 
+namespace DOM {
     class AbstractViewImpl;
     class AttrImpl;
     class CDATASectionImpl;
     class CSSStyleSheetImpl;
+    class CSSMappedAttributeDeclarationImpl;
     class CommentImpl;
     class DocumentFragmentImpl;
     class DocumentImpl;
@@ -75,6 +91,7 @@ namespace DOM {
 #if APPLE_CHANGES
     class DOMImplementation;
 #endif
+    class EditingTextImpl;
     class ElementImpl;
     class EntityReferenceImpl;
     class EventImpl;
@@ -82,6 +99,9 @@ namespace DOM {
     class GenericRONamedNodeMapImpl;
     class HTMLDocumentImpl;
     class HTMLElementImpl;
+    class HTMLImageLoader;
+    class HTMLMapElementImpl;
+    class JSEditor;
     class NodeFilter;
     class NodeFilterImpl;
     class NodeIteratorImpl;
@@ -89,6 +109,7 @@ namespace DOM {
     class ProcessingInstructionImpl;
     class RangeImpl;
     class RegisteredEventListener;
+    class Selection;
     class StyleSheetImpl;
     class StyleSheetListImpl;
     class TextImpl;
@@ -147,7 +168,7 @@ public:
     DocumentTypeImpl *doctype() const;
 
     DOMImplementationImpl *implementation() const;
-    ElementImpl *documentElement() const;
+    virtual ElementImpl *documentElement() const;
     virtual ElementImpl *createElement ( const DOMString &tagName, int &exceptioncode );
     DocumentFragmentImpl *createDocumentFragment ();
     TextImpl *createTextNode ( const DOMString &data );
@@ -211,7 +232,9 @@ public:
 
     bool usesDescendantRules() { return m_usesDescendantRules; }
     void setUsesDescendantRules(bool b) { m_usesDescendantRules = b; }
-    
+    bool usesSiblingRules() { return m_usesSiblingRules; }
+    void setUsesSiblingRules(bool b) { m_usesSiblingRules = b; }\
+
     QString nextState();
 
     // Query all registered elements for their state
@@ -229,10 +252,14 @@ public:
     RangeImpl *createRange();
 
     NodeIteratorImpl *createNodeIterator(NodeImpl *root, unsigned long whatToShow,
-                                    NodeFilter &filter, bool entityReferenceExpansion, int &exceptioncode);
+        NodeFilterImpl *filter, bool expandEntityReferences, int &exceptioncode);
 
-    TreeWalkerImpl *createTreeWalker(Node root, unsigned long whatToShow, NodeFilter &filter,
-                            bool entityReferenceExpansion);
+    TreeWalkerImpl *createTreeWalker(NodeImpl *root, unsigned long whatToShow, 
+        NodeFilterImpl *filter, bool expandEntityReferences, int &exceptioncode);
+
+    // Special support for editing
+    CSSStyleDeclarationImpl *createCSSStyleDeclaration();
+    EditingTextImpl *createEditingTextNode(const DOMString &text);
 
     virtual void recalcStyle( StyleChange = NoChange );
     static QPtrList<DocumentImpl> * changedDocuments;
@@ -254,9 +281,8 @@ public:
     // to get visually ordered hebrew and arabic pages right
     void setVisuallyOrdered();
 
-    void setSelection(NodeImpl* s, int sp, NodeImpl* e, int ep);
-    void clearSelection();
-
+    void updateSelection();
+    
     void open();
     void close();
     void closeInternal ( bool checkTokenizer );
@@ -289,9 +315,10 @@ public:
     QString printStyleSheet() const { return m_printSheet; }
 
     CSSStyleSheetImpl* elementSheet();
-    virtual Tokenizer *createTokenizer();
-    Tokenizer *tokenizer() { return m_tokenizer; }
-
+    virtual khtml::Tokenizer *createTokenizer();
+    khtml::Tokenizer *tokenizer() { return m_tokenizer; }
+    virtual khtml::XMLHandler* createTokenHandler();
+    
     QPaintDeviceMetrics *paintDeviceMetrics() { return m_paintDeviceMetrics; }
     QPaintDevice *paintDevice() const { return m_paintDevice; }
     void setPaintDevice( QPaintDevice *dev );
@@ -319,12 +346,26 @@ public:
     void setHTMLMode( HTMLMode m ) { hMode = m; }
     HTMLMode htmlMode() const { return hMode; }
 
-    void setParsing(bool b) { m_bParsing = b; }
+    void setParsing(bool b);
     bool parsing() const { return m_bParsing; }
-
+    bool allDataReceived() const { return m_bAllDataReceived; }
+    int minimumLayoutDelay();
+    bool shouldScheduleLayout();
+    int elapsedTime() const;
+    
     void setTextColor( QColor color ) { m_textColor = color; }
     QColor textColor() const { return m_textColor; }
 
+    const QColor& linkColor() const { return m_linkColor; }
+    const QColor& visitedLinkColor() const { return m_visitedLinkColor; }
+    const QColor& activeLinkColor() const { return m_activeLinkColor; }
+    void setLinkColor(const QColor& c) { m_linkColor = c; }
+    void setVisitedLinkColor(const QColor& c) { m_visitedLinkColor = c; }
+    void setActiveLinkColor(const QColor& c) { m_activeLinkColor = c; }
+    void resetLinkColor();
+    void resetVisitedLinkColor();
+    void resetActiveLinkColor();
+    
     // internal
     NodeImpl *findElement( Id id );
 
@@ -360,7 +401,7 @@ public:
     QStringList availableStyleSheets() const;
 
     NodeImpl *focusNode() const { return m_focusNode; }
-    void setFocusNode(NodeImpl *newFocusNode);
+    bool setFocusNode(NodeImpl *newFocusNode);
 
     NodeImpl *hoverNode() const { return m_hoverNode; }
     void setHoverNode(NodeImpl *newHoverNode);
@@ -369,8 +410,8 @@ public:
     void setCSSTarget(NodeImpl* n);
     NodeImpl* getCSSTarget();
     
-    bool isDocumentChanged()	{ return m_docChanged; }
-    virtual void setDocumentChanged(bool);
+    void setDocumentChanged(bool);
+
     void attachNodeIterator(NodeIteratorImpl *ni);
     void detachNodeIterator(NodeIteratorImpl *ni);
     void notifyBeforeNodeRemoval(NodeImpl *n);
@@ -407,7 +448,7 @@ public:
     bool hasWindowEventListener(int id);
 
     EventListener *createHTMLEventListener(QString code);
-
+    
     /**
      * Searches through the document, starting from fromNode, for the next selectable element that comes after fromNode.
      * The order followed is as specified in section 17.11.1 of the HTML4 spec, which is elements with tab indexes
@@ -448,9 +489,9 @@ public:
      */
     void processHttpEquiv(const DOMString &equiv, const DOMString &content);
     
-    void dispatchImageLoadEventSoon(khtml::RenderImage *);
+    void dispatchImageLoadEventSoon(HTMLImageLoader*);
     void dispatchImageLoadEventsNow();
-    void removeImage(khtml::RenderImage *);
+    void removeImage(HTMLImageLoader*);
     virtual void timerEvent(QTimerEvent *);
     
     // Returns the owning element in the parent document.
@@ -468,10 +509,26 @@ public:
     void addElementById(const DOMString &elementId, ElementImpl *element);
     void removeElementById(const DOMString &elementId, ElementImpl *element);
 
+    void addImageMap(HTMLMapElementImpl *);
+    void removeImageMap(HTMLMapElementImpl *);
+    HTMLMapElementImpl *getImageMap(const DOMString &URL) const;
+
     HTMLElementImpl* body();
 
     DOMString toString() const;
     
+    bool execCommand(const DOMString &command, bool userInterface, const DOMString &value);
+    bool queryCommandEnabled(const DOMString &command);
+    bool queryCommandIndeterm(const DOMString &command);
+    bool queryCommandState(const DOMString &command);
+    bool queryCommandSupported(const DOMString &command);
+    DOMString queryCommandValue(const DOMString &command);
+
+#ifndef KHTML_NO_XBL
+    // XBL methods
+    XBL::XBLBindingManager* bindingManager() const { return m_bindingManager; }
+#endif
+
 signals:
     void finishedParsing();
 
@@ -481,7 +538,7 @@ protected:
     QStringList m_state;
 
     khtml::DocLoader *m_docLoader;
-    Tokenizer *m_tokenizer;
+    khtml::Tokenizer *m_tokenizer;
     QString m_url;
     QString m_baseURL;
     QString m_baseTarget;
@@ -539,16 +596,22 @@ protected:
     QPtrList<RegisteredEventListener> m_windowEventListeners;
     QPtrList<NodeImpl> m_maintainsState;
 
+    QColor m_linkColor;
+    QColor m_visitedLinkColor;
+    QColor m_activeLinkColor;
+
     DOMString m_preferredStylesheetSet;
 
     bool m_loadingSheet;
     bool visuallyOrdered;
     bool m_bParsing;
+    bool m_bAllDataReceived;
     bool m_docChanged;
     bool m_styleSelectorDirty;
     bool m_inStyleRecalc;
     bool m_usesDescendantRules;
-    
+    bool m_usesSiblingRules;
+
     DOMString m_title;
     
     RenderArena* m_renderArena;
@@ -557,14 +620,21 @@ protected:
     KWQAccObjectCache* m_accCache;
 #endif
     
-    QPtrList<khtml::RenderImage> m_imageLoadEventDispatchSoonList;
-    QPtrList<khtml::RenderImage> m_imageLoadEventDispatchingList;
+    QPtrList<HTMLImageLoader> m_imageLoadEventDispatchSoonList;
+    QPtrList<HTMLImageLoader> m_imageLoadEventDispatchingList;
     int m_imageLoadEventTimer;
 
     NodeImpl* m_cssTarget;
     
     bool m_processingLoadEvent;
     QTime m_startTime;
+    bool m_overMinimumLayoutThreshold;
+    
+#ifndef KHTML_NO_XBL
+    XBL::XBLBindingManager* m_bindingManager; // The access point through which documents and elements communicate with XBL.
+#endif
+    
+    QMap<QString, HTMLMapElementImpl *> m_imageMapsByName;
 
 #if APPLE_CHANGES
 public:
@@ -591,6 +661,12 @@ public:
     khtml::Decoder *decoder() const { return m_decoder; }
 
 private:
+    JSEditor *jsEditor();
+
+    JSEditor *m_jsEditor;
+    bool relinquishesEditingFocus(NodeImpl *node);
+    bool acceptsEditingFocus(NodeImpl *node);
+
     mutable DOMString m_domain;
     bool m_inPageCache;
     khtml::RenderObject *m_savedRenderer;
@@ -651,6 +727,8 @@ public:
 
     // Other methods (not part of DOM)
     void setName(const DOMString& n) { m_qualifiedName = n; }
+    void setPublicId(const DOMString& publicId) { m_publicId = publicId; }
+    void setSystemId(const DOMString& systemId) { m_systemId = systemId; }
     DOMImplementationImpl *implementation() const { return m_implementation; }
     void copyFrom(const DocumentTypeImpl&);
 

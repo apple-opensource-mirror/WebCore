@@ -45,7 +45,7 @@ CharacterDataImpl::CharacterDataImpl(DocumentPtr *doc)
 CharacterDataImpl::CharacterDataImpl(DocumentPtr *doc, const DOMString &_text)
     : NodeImpl(doc)
 {
-    str = _text.impl ? _text.impl : new DOMStringImpl(0, 0);
+    str = _text.impl ? _text.impl : new DOMStringImpl((QChar*)0, 0);
     str->ref();
 }
 
@@ -73,8 +73,7 @@ void CharacterDataImpl::setData( const DOMString &_data, int &exceptioncode )
     if(str) str->ref();
     if (m_render)
       (static_cast<RenderText*>(m_render))->setText(str);
-    setChanged(true);
-
+    
     dispatchModifiedEvent(oldStr);
     if(oldStr) oldStr->deref();
 }
@@ -109,9 +108,8 @@ void CharacterDataImpl::appendData( const DOMString &arg, int &exceptioncode )
     str->ref();
     str->append(arg.impl);
     if (m_render)
-      (static_cast<RenderText*>(m_render))->setText(str);
-    setChanged(true);
-
+      (static_cast<RenderText*>(m_render))->setTextWithOffset(str, oldStr->l, 0);
+    
     dispatchModifiedEvent(oldStr);
     oldStr->deref();
 }
@@ -128,9 +126,8 @@ void CharacterDataImpl::insertData( const unsigned long offset, const DOMString 
     str->ref();
     str->insert(arg.impl, offset);
     if (m_render)
-      (static_cast<RenderText*>(m_render))->setText(str);
-    setChanged(true);
-
+      (static_cast<RenderText*>(m_render))->setTextWithOffset(str, offset, 0);
+    
     dispatchModifiedEvent(oldStr);
     oldStr->deref();
 }
@@ -147,9 +144,8 @@ void CharacterDataImpl::deleteData( const unsigned long offset, const unsigned l
     str->ref();
     str->remove(offset,count);
     if (m_render)
-      (static_cast<RenderText*>(m_render))->setText(str);
-    setChanged(true);
-
+      (static_cast<RenderText*>(m_render))->setTextWithOffset(str, offset, count);
+    
     dispatchModifiedEvent(oldStr);
     oldStr->deref();
 }
@@ -173,9 +169,8 @@ void CharacterDataImpl::replaceData( const unsigned long offset, const unsigned 
     str->remove(offset,realCount);
     str->insert(arg.impl, offset);
     if (m_render)
-      (static_cast<RenderText*>(m_render))->setText(str);
-    setChanged(true);
-
+      (static_cast<RenderText*>(m_render))->setTextWithOffset(str, offset, count);
+    
     dispatchModifiedEvent(oldStr);
     oldStr->deref();
 }
@@ -183,6 +178,13 @@ void CharacterDataImpl::replaceData( const unsigned long offset, const unsigned 
 DOMString CharacterDataImpl::nodeValue() const
 {
     return str;
+}
+
+bool CharacterDataImpl::containsOnlyWhitespace(unsigned int from, unsigned int len) const
+{
+    if (str)
+        return str->containsOnlyWhitespace(from, len);
+    return true;
 }
 
 bool CharacterDataImpl::containsOnlyWhitespace() const
@@ -230,6 +232,29 @@ void CharacterDataImpl::checkCharDataOperation( const unsigned long offset, int 
         exceptioncode = DOMException::NO_MODIFICATION_ALLOWED_ERR;
         return;
     }
+}
+
+long CharacterDataImpl::maxOffset() const 
+{
+    return (long)length();
+}
+
+long CharacterDataImpl::caretMinOffset() const 
+{
+    RenderText *r = static_cast<RenderText *>(renderer());
+    return r && r->isText() ? r->caretMinOffset() : 0;
+}
+
+long CharacterDataImpl::caretMaxOffset() const 
+{
+    RenderText *r = static_cast<RenderText *>(renderer());
+    return r && r->isText() ? r->caretMaxOffset() : (long)length();
+}
+
+unsigned long CharacterDataImpl::caretMaxRenderedOffset() const 
+{
+    RenderText *r = static_cast<RenderText *>(renderer());
+    return r ? r->caretMaxRenderedOffset() : length();
 }
 
 #ifndef NDEBUG
@@ -344,7 +369,6 @@ TextImpl *TextImpl::splitText( const unsigned long offset, int &exceptioncode )
 
     if (m_render)
         (static_cast<RenderText*>(m_render))->setText(str);
-    setChanged(true);
     return newText;
 }
 
@@ -372,7 +396,7 @@ bool TextImpl::rendererIsNeeded(RenderStyle *style)
     if (!onlyWS) {
         return true;
     }
-    
+
     RenderObject *par = parentNode()->renderer();
     
     if (par->isTable() || par->isTableRow() || par->isTableSection()) {
@@ -499,5 +523,24 @@ DOMString CDATASectionImpl::toString() const
     return DOMString("<![CDATA[") + nodeValue() + "]]>";
 }
 
+// ---------------------------------------------------------------------------
 
+EditingTextImpl::EditingTextImpl(DocumentPtr *impl, const DOMString &text)
+    : TextImpl(impl, text)
+{
+}
+
+EditingTextImpl::EditingTextImpl(DocumentPtr *impl)
+    : TextImpl(impl)
+{
+}
+
+EditingTextImpl::~EditingTextImpl()
+{
+}
+
+bool EditingTextImpl::rendererIsNeeded(RenderStyle *style)
+{
+    return true;
+}
 

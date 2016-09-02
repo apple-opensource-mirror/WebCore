@@ -24,6 +24,10 @@
 
 #include "render_object.h"
 
+namespace DOM {
+    class Position;
+};
+
 namespace khtml
 {
 
@@ -56,6 +60,8 @@ public:
     virtual void removeLeftoverAnonymousBoxes();
 
     void updatePseudoChild(RenderStyle::PseudoId type, RenderObject* child);
+
+    virtual DOM::Position positionForCoordinates(int x, int y);
 
 private:
     void setFirstChild(RenderObject *first) { m_first = first; }

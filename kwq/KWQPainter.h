@@ -37,6 +37,8 @@
 #include "KWQString.h"
 #include "KWQFontMetrics.h"
 
+#include <ApplicationServices/ApplicationServices.h>
+
 class QFont;
 class QPixmap;
 class QWidget;
@@ -84,9 +86,12 @@ public:
 
     void drawPixmap(const QPoint &, const QPixmap &);
     void drawPixmap(const QPoint &, const QPixmap &, const QRect &);
+    void drawPixmap(const QPoint &, const QPixmap &, const QRect &, const QString &);
     void drawPixmap( int x, int y, const QPixmap &,
-			    int sx=0, int sy=0, int sw=-1, int sh=-1 );
-    void drawTiledPixmap(int, int, int, int, const QPixmap &, int sx=0, int sy=0);
+			    int sx=0, int sy=0, int sw=-1, int sh=-1, int compositeOperator=-1, CGContextRef context=0);
+    void drawPixmap( int x, int y, int w, int h, const QPixmap &,
+			    int sx=0, int sy=0, int sw=-1, int sh=-1, int compositeOperator=-1, CGContextRef context=0);
+    void drawTiledPixmap(int, int, int, int, const QPixmap &, int sx=0, int sy=0, CGContextRef context=0);
 
     void addClip(const QRect &);
 
@@ -94,7 +99,8 @@ public:
     void setRasterOp(RasterOp);
 
     void drawText(int x, int y, int, int, int alignmentFlags, const QString &);
-    void drawHighlightForText(int x, int y, const QChar *, int length, int from, int to, int toAdd,
+    void drawHighlightForText(int x, int minX, int maxX, int y, int h, 
+                  const QChar *, int length, int from, int to, int toAdd,
                   const QColor& backgroundColor, QPainter::TextDirection d, bool visuallyOrdered,
                   int letterSpacing, int wordSpacing, bool smallCaps);
     void drawText(int x, int y, const QChar *, int length, int from, int to, int toAdd,
@@ -121,6 +127,13 @@ public:
     void clearFocusRing();
     void setDrawsFocusRing(bool flag) { _drawsFocusRing = flag; }
     
+    CGContextRef currentContext();
+    
+    static int compositeOperatorFromString (QString aString);
+    static int getCompositeOperation(CGContextRef context);
+    static void setCompositeOperation (CGContextRef context, QString operation);
+    static void setCompositeOperation (CGContextRef context, int operation);
+
 private:
     // no copying or assignment
     QPainter(const QPainter &);
@@ -134,7 +147,7 @@ private:
     
     void _drawPoints(const QPointArray &_points, bool winding, int index, int _npoints, bool fill);
 
-    void _updateRenderer(NSString **families);
+    void _updateRenderer();
 
     QPainterPrivate *data;
     bool _isForPrinting;

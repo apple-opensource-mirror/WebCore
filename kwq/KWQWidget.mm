@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003 Apple Computer, Inc.  All rights reserved.
+ * Copyright (C) 2004 Apple Computer, Inc.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -28,8 +28,8 @@
 #import "KWQExceptions.h"
 #import "KWQKHTMLPart.h"
 #import "KWQLogging.h"
-#import "KWQView.h"
 #import "KWQWindowWidget.h"
+#import "KWQFoundationExtras.h"
 #import "WebCoreBridge.h"
 #import "WebCoreFrameView.h"
 #import "khtmlview.h"
@@ -45,8 +45,7 @@ using khtml::RenderWidget;
     emulate most QWidgets using NSViews.
 */
 
-
-class QWidgetPrivate
+class KWQWidgetPrivate
 {
 public:
     QStyle *style;
@@ -56,35 +55,26 @@ public:
     bool visible;
 };
 
-QWidget::QWidget() 
-    : data(new QWidgetPrivate)
+QWidget::QWidget() : data(new KWQWidgetPrivate)
 {
-    data->view = nil;
-
-    KWQ_BLOCK_EXCEPTIONS;
-    data->view = [[KWQView alloc] initWithWidget:this];
-    KWQ_UNBLOCK_EXCEPTIONS;
-
     static QStyle defaultStyle;
     data->style = &defaultStyle;
-
+    data->view = nil;
     data->visible = true;
 }
 
-QWidget::QWidget(NSView *view)
-    : data(new QWidgetPrivate)
+QWidget::QWidget(NSView *view) : data(new KWQWidgetPrivate)
 {
-    data->view = [view retain];
-
     static QStyle defaultStyle;
     data->style = &defaultStyle;
+    data->view = KWQRetain(view);
     data->visible = true;
 }
 
 QWidget::~QWidget() 
 {
     KWQ_BLOCK_EXCEPTIONS;
-    [data->view release];
+    KWQRelease(data->view);
     KWQ_UNBLOCK_EXCEPTIONS;
 
     delete data;
@@ -394,12 +384,6 @@ bool QWidget::event(QEvent *)
     return false;
 }
 
-bool QWidget::focusNextPrevChild(bool)
-{
-    ERROR("not yet implemented");
-    return true;
-}
-
 bool QWidget::hasMouseTracking() const
 {
     return true;
@@ -432,9 +416,12 @@ void QWidget::hide()
 void QWidget::setFrameGeometry(const QRect &rect)
 {
     KWQ_BLOCK_EXCEPTIONS;
-    [getOuterView() setNeedsDisplay: YES];
-    [getOuterView() setFrame:rect];
-    [getOuterView() setNeedsDisplay: YES];
+    NSView *v = getOuterView();
+    NSRect f = rect;
+    if (!NSEqualRects(f, [v frame])) {
+        [v setFrame:f];
+        [v setNeedsDisplay: NO];
+    }
     KWQ_UNBLOCK_EXCEPTIONS;
 }
 
@@ -456,13 +443,10 @@ NSView *QWidget::getView() const
 
 void QWidget::setView(NSView *view)
 {
-    if (view == data->view) {
-        return;
-    }
-    
     KWQ_BLOCK_EXCEPTIONS;
-    [data->view release];
-    data->view = [view retain];
+    KWQRetain(view);
+    KWQRelease(data->view);
+    data->view = view;
     KWQ_UNBLOCK_EXCEPTIONS;
 }
 
@@ -555,4 +539,9 @@ void QWidget::sendConsumedMouseUp()
 			      // FIXME: should send real state and button
 			      0, 0);
     KWQ_UNBLOCK_EXCEPTIONS;
+}
+
+void QWidget::setIsSelected(bool isSelected)
+{
+    [KWQKHTMLPart::bridgeForWidget(this) setIsSelected:isSelected forView:getView()];
 }

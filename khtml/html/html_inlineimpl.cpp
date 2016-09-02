@@ -210,28 +210,33 @@ void HTMLAnchorElementImpl::defaultEventHandler(EventImpl *evt)
 }
 
 
-void HTMLAnchorElementImpl::parseAttribute(AttributeImpl *attr)
+void HTMLAnchorElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
 {
     switch(attr->id())
     {
     case ATTR_HREF:
-        m_hasAnchor = attr->val() != 0;
+        m_hasAnchor = !attr->isNull();
         break;
     case ATTR_TARGET:
-        m_hasTarget = attr->val() != 0;
+        m_hasTarget = !attr->isNull();
         break;
     case ATTR_NAME:
     case ATTR_TITLE:
     case ATTR_REL:
 	break;
     default:
-        HTMLElementImpl::parseAttribute(attr);
+        HTMLElementImpl::parseHTMLAttribute(attr);
     }
 }
 
 void HTMLAnchorElementImpl::accessKeyAction()
 {
     click();
+}
+
+bool HTMLAnchorElementImpl::isURLAttribute(AttributeImpl *attr) const
+{
+    return attr->id() == ATTR_HREF;
 }
 
 // -------------------------------------------------------------------------
@@ -249,27 +254,35 @@ NodeImpl::Id HTMLBRElementImpl::id() const
     return ID_BR;
 }
 
-void HTMLBRElementImpl::parseAttribute(AttributeImpl *attr)
+bool HTMLBRElementImpl::mapToEntry(NodeImpl::Id attr, MappedAttributeEntry& result) const
 {
-    switch(attr->id())
+    if (attr == ATTR_CLEAR) {
+        result = eUniversal;
+        return false;
+    }
+    
+    return HTMLElementImpl::mapToEntry(attr, result);
+}
+
+void HTMLBRElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
+{
+    switch (attr->id())
     {
     case ATTR_CLEAR:
     {
         DOMString str = attr->value();
-        // If the string is empty, then remove the clear property. 
+        // If the string is empty, then don't add the clear property. 
         // <br clear> and <br clear=""> are just treated like <br> by Gecko,
         // Mac IE, etc. -dwh
-        if (str.isEmpty())
-            removeCSSProperty(CSS_PROP_CLEAR);
-        else {
-            if (strcasecmp (str,"all")==0) 
+        if (!str.isEmpty()) {
+            if (strcasecmp(str,"all") == 0) 
                 str = "both";
-            addCSSProperty(CSS_PROP_CLEAR, str);
+            addCSSProperty(attr, CSS_PROP_CLEAR, str);
         }
         break;
     }
     default:
-        HTMLElementImpl::parseAttribute(attr);
+        HTMLElementImpl::parseHTMLAttribute(attr);
     }
 }
 
@@ -340,7 +353,23 @@ static bool parseFontSizeNumber(const DOMString &s, int &size)
     return true;
 }
 
-void HTMLFontElementImpl::parseAttribute(AttributeImpl *attr)
+bool HTMLFontElementImpl::mapToEntry(NodeImpl::Id attr, MappedAttributeEntry& result) const
+{
+    switch(attr)
+    {
+        case ATTR_SIZE:
+        case ATTR_COLOR:
+        case ATTR_FACE:
+            result = eUniversal;
+            return false;
+        default:
+            break;
+    }
+    
+    return HTMLElementImpl::mapToEntry(attr, result);
+}
+
+void HTMLFontElementImpl::parseHTMLAttribute(HTMLAttributeImpl *attr)
 {
     switch(attr->id())
     {
@@ -363,19 +392,17 @@ void HTMLFontElementImpl::parseAttribute(AttributeImpl *attr)
                 else
                     size = CSS_VAL_X_SMALL;
             }
-            addCSSProperty(CSS_PROP_FONT_SIZE, size);
+            addCSSProperty(attr, CSS_PROP_FONT_SIZE, size);
         }
         break;
     }
     case ATTR_COLOR:
-        addHTMLColor(CSS_PROP_COLOR, attr->value());
+        addHTMLColor(attr, CSS_PROP_COLOR, attr->value());
         break;
     case ATTR_FACE:
-        addCSSProperty(CSS_PROP_FONT_FAMILY, attr->value());
+        addCSSProperty(attr, CSS_PROP_FONT_FAMILY, attr->value());
         break;
     default:
-        HTMLElementImpl::parseAttribute(attr);
+        HTMLElementImpl::parseHTMLAttribute(attr);
     }
 }
-
-

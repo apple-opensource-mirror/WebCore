@@ -2,7 +2,7 @@
 /*
  *  This file is part of the KDE libraries
  *  Copyright (C) 2000 Harri Porten (porten@kde.org)
- *  Copyright (C) 2004 Apple Computer, Inc.
+ *  Copyright (C) 2003 Apple Computer, Inc.
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Lesser General Public
@@ -53,9 +53,20 @@
 
 #include "khtmlview.h"
 #include "khtml_part.h"
+#include "dom/dom_string.h"
+#include "dom/dom_node.h"
+#include "editing/htmlediting.h"
 #include "xml/dom2_eventsimpl.h"
 #include "xml/dom_docimpl.h"
+#include "xml/dom_position.h"
+#include "xml/dom_selection.h"
 #include "html/html_documentimpl.h"
+
+using DOM::DocumentImpl;
+using DOM::DOMString;
+using DOM::Node;
+using DOM::Position;
+using khtml::TypingCommand;
 
 using namespace KJS;
 
@@ -67,7 +78,7 @@ namespace KJS {
     friend class HistoryFunc;
   public:
     History(ExecState *exec, KHTMLPart *p)
-      : ObjectImp(exec->interpreter()->builtinObjectPrototype()), part(p) { }
+      : ObjectImp(exec->lexicalInterpreter()->builtinObjectPrototype()), part(p) { }
     virtual Value get(ExecState *exec, const Identifier &propertyName) const;
     Value getValueProperty(ExecState *exec, int token) const;
     virtual const ClassInfo* classInfo() const { return &info; }
@@ -81,7 +92,7 @@ namespace KJS {
   class FrameArray : public ObjectImp {
   public:
     FrameArray(ExecState *exec, KHTMLPart *p)
-      : ObjectImp(exec->interpreter()->builtinObjectPrototype()), part(p) { }
+      : ObjectImp(exec->lexicalInterpreter()->builtinObjectPrototype()), part(p) { }
     virtual Value get(ExecState *exec, const Identifier &propertyName) const;
     virtual UString toString(ExecState *exec) const;
   private:
@@ -124,7 +135,7 @@ const ClassInfo Screen::info = { "Screen", 0, &ScreenTable, 0 };
 
 // We set the object prototype so that toString is implemented
 Screen::Screen(ExecState *exec)
-  : ObjectImp(exec->interpreter()->builtinObjectPrototype()) {}
+  : ObjectImp(exec->lexicalInterpreter()->builtinObjectPrototype()) {}
 
 Value Screen::get(ExecState *exec, const Identifier &p) const
 {
@@ -177,7 +188,7 @@ Value Screen::getValueProperty(ExecState *exec, int token) const
 const ClassInfo Window::info = { "Window", 0, &WindowTable, 0 };
 
 /*
-@begin WindowTable 90
+@begin WindowTable 91
   closed	Window::Closed		DontDelete|ReadOnly
   crypto	Window::Crypto		DontDelete|ReadOnly
   defaultStatus	Window::DefaultStatus	DontDelete
@@ -197,12 +208,10 @@ const ClassInfo Window::info = { "Window", 0, &WindowTable, 0 };
   innerWidth	Window::InnerWidth	DontDelete|ReadOnly
   length	Window::Length		DontDelete|ReadOnly
   location	Window::_Location	DontDelete
-  locationbar	Window::Locationbar	DontDelete
   name		Window::Name		DontDelete
   navigator	Window::_Navigator	DontDelete|ReadOnly
   clientInformation	Window::ClientInformation	DontDelete|ReadOnly
   konqueror	Window::_Konqueror	DontDelete|ReadOnly
-  menubar	Window::Menubar		DontDelete|ReadOnly
   offscreenBuffering	Window::OffscreenBuffering	DontDelete|ReadOnly
   opener	Window::Opener		DontDelete|ReadOnly
   outerHeight	Window::OuterHeight	DontDelete|ReadOnly
@@ -216,8 +225,6 @@ const ClassInfo Window::info = { "Window", 0, &WindowTable, 0 };
   screenLeft	Window::ScreenLeft	DontDelete|ReadOnly
   screenTop	Window::ScreenTop	DontDelete|ReadOnly
   scrollbars	Window::Scrollbars	DontDelete|ReadOnly
-  statusbar	Window::Statusbar	DontDelete|ReadOnly
-  toolbar	Window::Toolbar		DontDelete|ReadOnly
   scroll	Window::Scroll		DontDelete|Function 2
   scrollBy	Window::ScrollBy	DontDelete|Function 2
   scrollTo	Window::ScrollTo	DontDelete|Function 2
@@ -274,6 +281,7 @@ const ClassInfo Window::info = { "Window", 0, &WindowTable, 0 };
   onreset	Window::Onreset		DontDelete
   onresize	Window::Onresize	DontDelete
   onscroll      Window::Onscroll        DontDelete
+  onsearch      Window::Onsearch        DontDelete
   onselect	Window::Onselect	DontDelete
   onsubmit	Window::Onsubmit	DontDelete
   onunload	Window::Onunload	DontDelete
@@ -282,19 +290,7 @@ const ClassInfo Window::info = { "Window", 0, &WindowTable, 0 };
 IMPLEMENT_PROTOFUNC(WindowFunc)
 
 Window::Window(KHTMLPart *p)
-  : ObjectImp(/*no proto*/)
-  , m_part(p)
-  , screen(0)
-  , history(0)
-  , frames(0)
-  , loc(0)
-  , m_locationbar(0)
-  , m_menubar(0)
-  , m_personalbar(0)
-  , m_scrollbars(0)
-  , m_statusbar(0)
-  , m_toolbar(0)
-  , m_evt(0)
+  : ObjectImp(/*no proto*/), m_part(p), screen(0), history(0), frames(0), loc(0), m_selection(0), m_evt(0)
 {
   winq = new WindowQObject(this);
   //kdDebug(6070) << "Window::Window this=" << this << " part=" << m_part << " " << m_part->name() << endl;
@@ -326,7 +322,7 @@ Window *Window::retrieveWindow(KHTMLPart *p)
 
 Window *Window::retrieveActive(ExecState *exec)
 {
-  ValueImp *imp = exec->interpreter()->globalObject().imp();
+  ValueImp *imp = exec->dynamicInterpreter()->globalObject().imp();
   assert( imp );
 #ifndef QWS
   assert( dynamic_cast<KJS::Window*>(imp) );
@@ -354,46 +350,11 @@ Location *Window::location() const
   return loc;
 }
 
-BarInfo *Window::locationbar(ExecState *exec) const
+Selection *Window::selection() const
 {
-  if (!m_locationbar)
-    const_cast<Window*>(this)->m_locationbar = new BarInfo(exec, m_part, BarInfo::Locationbar);
-  return m_locationbar;
-}
-
-BarInfo *Window::menubar(ExecState *exec) const
-{
-  if (!m_menubar)
-    const_cast<Window*>(this)->m_menubar = new BarInfo(exec, m_part, BarInfo::Menubar);
-  return m_menubar;
-}
-
-BarInfo *Window::personalbar(ExecState *exec) const
-{
-  if (!m_personalbar)
-    const_cast<Window*>(this)->m_personalbar = new BarInfo(exec, m_part, BarInfo::Personalbar);
-  return m_personalbar;
-}
-
-BarInfo *Window::statusbar(ExecState *exec) const
-{
-  if (!m_statusbar)
-    const_cast<Window*>(this)->m_statusbar = new BarInfo(exec, m_part, BarInfo::Statusbar);
-  return m_statusbar;
-}
-
-BarInfo *Window::toolbar(ExecState *exec) const
-{
-  if (!m_toolbar)
-    const_cast<Window*>(this)->m_toolbar = new BarInfo(exec, m_part, BarInfo::Toolbar);
-  return m_toolbar;
-}
-
-BarInfo *Window::scrollbars(ExecState *exec) const
-{
-  if (!m_scrollbars)
-    const_cast<Window*>(this)->m_scrollbars = new BarInfo(exec, m_part, BarInfo::Scrollbars);
-  return m_scrollbars;
+  if (!m_selection)
+    const_cast<Window*>(this)->m_selection = new Selection(m_part);
+  return m_selection;
 }
 
 // reference our special objects during garbage collection
@@ -409,18 +370,8 @@ void Window::mark()
   //kdDebug(6070) << "Window::mark " << this << " marking loc=" << loc << endl;
   if (loc && !loc->marked())
     loc->mark();
-  if (m_locationbar && !m_locationbar->marked())
-    m_locationbar->mark();
-  if (m_menubar && !m_menubar->marked())
-    m_menubar->mark();
-  if (m_personalbar && !m_personalbar->marked())
-    m_personalbar->mark();
-  if (m_scrollbars && !m_scrollbars->marked())
-    m_scrollbars->mark();
-  if (m_statusbar && !m_statusbar->marked())
-    m_statusbar->mark();
-  if (m_toolbar && !m_toolbar->marked())
-    m_toolbar->mark();
+  if (m_selection && !m_selection->marked())
+    m_selection->mark();
 }
 
 bool Window::hasProperty(ExecState * /*exec*/, const Identifier &/*p*/) const
@@ -542,10 +493,6 @@ Value Window::get(ExecState *exec, const Identifier &p) const
     case _Konqueror:
       return Value(new Konqueror(m_part));
 #endif
-    case Locationbar:
-      return Value(locationbar(exec));
-    case Menubar:
-      return Value(menubar(exec));
     case OffscreenBuffering:
       return Boolean(true);
     case Opener:
@@ -575,7 +522,7 @@ Value Window::get(ExecState *exec, const Identifier &p) const
     case Parent:
       return Value(retrieve(m_part->parentPart() ? m_part->parentPart() : (KHTMLPart*)m_part));
     case Personalbar:
-      return Value(personalbar(exec));
+      return Undefined(); // ###
     case ScreenLeft:
     case ScreenX: {
       if (!m_part->view())
@@ -603,11 +550,7 @@ Value Window::get(ExecState *exec, const Identifier &p) const
       return Number(m_part->view()->contentsY());
     }
     case Scrollbars:
-      return Value(scrollbars(exec));
-    case Statusbar:
-      return Value(statusbar(exec));
-    case Toolbar:
-      return Value(toolbar(exec));
+      return Undefined(); // ###
     case Self:
     case _Window:
       return Value(retrieve(m_part));
@@ -628,10 +571,6 @@ Value Window::get(ExecState *exec, const Identifier &p) const
       return Value(new XMLHttpRequestConstructorImp(exec, m_part->document()));
     case XMLSerializer:
       return Value(new XMLSerializerConstructorImp(exec));
-    case Focus:
-    case Blur:
-    case Close:
-	return lookupOrCreateFunction<WindowFunc>(exec,p,this,entry->value,entry->params,entry->attr);
     case Alert:
     case Confirm:
     case Prompt:
@@ -639,6 +578,9 @@ Value Window::get(ExecState *exec, const Identifier &p) const
 #if APPLE_CHANGES
     case Print:
 #endif
+    case Focus:
+    case Blur:
+    case Close:
     case Scroll: // compatibility
     case ScrollBy:
     case ScrollTo:
@@ -646,6 +588,7 @@ Value Window::get(ExecState *exec, const Identifier &p) const
     case MoveTo:
     case ResizeBy:
     case ResizeTo:
+	return lookupOrCreateFunction<WindowFunc>(exec,p,this,entry->value,entry->params,entry->attr);
     case CaptureEvents:
     case ReleaseEvents:
     case AddEventListener:
@@ -764,6 +707,13 @@ Value Window::get(ExecState *exec, const Identifier &p) const
             return getListener(exec,DOM::EventImpl::SCROLL_EVENT);
         else
             return Undefined();
+#if APPLE_CHANGES
+    case Onsearch:
+        if (isSafeScript(exec))
+            return getListener(exec,DOM::EventImpl::SEARCH_EVENT);
+        else
+            return Undefined();
+#endif
     case Onselect:
       if (isSafeScript(exec))
         return getListener(exec,DOM::EventImpl::SELECT_EVENT);
@@ -811,22 +761,6 @@ Value Window::get(ExecState *exec, const Identifier &p) const
     }
   }
 
-  // give access to functions (and variables ?) from parent frameset
-  if (m_part->parentPart())
-  {
-    Object parentObject = Object::dynamicCast( retrieve(m_part->parentPart()) );
-    if ( !parentObject.isNull() )
-    {
-      Value ret = parentObject.get(exec,p);
-      if (ret.type() != UndefinedType ) {
-#ifdef KJS_VERBOSE
-        kdDebug(6070) << "Window::get property " << p.qstring() << " found in parent part" << endl;
-#endif
-        return ret;
-      }
-    }
-  }
-
   // This isn't necessarily a bug. Some code uses if(!window.blah) window.blah=1
   // But it can also mean something isn't loaded or implemented, hence the WARNING to help grepping.
 #ifdef KJS_VERBOSE
@@ -868,14 +802,16 @@ void Window::put(ExecState* exec, const Identifier &propertyName, const Value &v
       KHTMLPart* p = Window::retrieveActive(exec)->m_part;
       if (p) {
         QString dstUrl = p->htmlDocument().completeURL(value.toString(exec).string()).string();
-        if (!dstUrl.startsWith("javascript:", false) || isSafeScript(exec))
+        if (dstUrl.find("javascript:", 0, false) || isSafeScript(exec))
         {
-          bool userGesture = static_cast<ScriptInterpreter *>(exec->interpreter())->wasRunByUserGesture();
+          bool userGesture = static_cast<ScriptInterpreter *>(exec->dynamicInterpreter())->wasRunByUserGesture();
 #if APPLE_CHANGES
           // We want a new history item if this JS was called via a user gesture
-          m_part->scheduleLocationChange(dstUrl, !userGesture, userGesture);
+          m_part->scheduleRedirection(0, dstUrl, !userGesture, userGesture);
 #else
-          m_part->scheduleLocationChange(dstUrl, false /*don't lock history*/, userGesture);
+          m_part->scheduleRedirection(0,
+                                      dstUrl,
+                                      false /*don't lock history*/, userGesture);
 #endif
         }
       }
@@ -965,6 +901,12 @@ void Window::put(ExecState* exec, const Identifier &propertyName, const Value &v
       if (isSafeScript(exec))
         setListener(exec,DOM::EventImpl::SCROLL_EVENT,value);
       return;
+#if APPLE_CHANGES
+    case Onsearch:
+        if (isSafeScript(exec))
+            setListener(exec,DOM::EventImpl::SEARCH_EVENT,value);
+        return;
+#endif
     case Onselect:
       if (isSafeScript(exec))
         setListener(exec,DOM::EventImpl::SELECT_EVENT,value);
@@ -1054,7 +996,7 @@ bool Window::isSafeScript(ExecState *exec) const
     kdDebug(6070) << "Window::isSafeScript: accessing deleted part !" << endl;
     return false;
   }
-  KHTMLPart *activePart = static_cast<KJS::ScriptInterpreter *>( exec->interpreter() )->part();
+  KHTMLPart *activePart = static_cast<KJS::ScriptInterpreter *>( exec->dynamicInterpreter() )->part();
   if (!activePart) {
     kdDebug(6070) << "Window::isSafeScript: current interpreter's part is 0L!" << endl;
     return false;
@@ -1105,6 +1047,10 @@ bool Window::isSafeScript(ExecState *exec) const
   if (Interpreter::shouldPrintExceptions()) {
       printf("Unsafe JavaScript attempt to access frame with URL %s from frame with URL %s. Domains must match.\n", 
              thisDocument->URL().latin1(), actDocument->URL().latin1());
+      QString message;
+      message.sprintf("Unsafe JavaScript attempt to access frame with URL %s from frame with URL %s. Domains must match.\n", 
+                      thisDocument->URL().latin1(), actDocument->URL().latin1());
+      KWQ(m_part)->addMessageToConsole(message, 1, QString()); //fixme: provide a real line number and sourceurl
   }
 #endif
   
@@ -1132,7 +1078,7 @@ Value Window::getListener(ExecState *exec, int eventId) const
     return Undefined();
 
   DOM::EventListener *listener = doc->getHTMLWindowEventListener(eventId);
-  if (listener)
+  if (listener && static_cast<JSEventListener*>(listener)->listenerObjImp())
     return static_cast<JSEventListener*>(listener)->listenerObj();
   else
     return Null();
@@ -1263,7 +1209,7 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
     } else if ( policy == 3 ) // smart
     {
       // window.open disabled unless from a key/mouse event
-      if (static_cast<ScriptInterpreter *>(exec->interpreter())->wasRunByUserGesture())
+      if (static_cast<ScriptInterpreter *>(exec->dynamicInterpreter())->wasRunByUserGesture())
 #if !APPLE_CHANGES
         policy = 0;
 #else
@@ -1318,37 +1264,61 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
 
 	    QRect screen = QApplication::desktop()->screenGeometry(scnum);
             if (key == "left" || key == "screenx") {
-              winargs.x = (int)val.toFloat() + screen.x();
-	      if (winargs.x < screen.x() || winargs.x > screen.right())
-		  winargs.x = screen.x(); // only safe choice until size is determined
+              bool ok;
+              double d = val.toDouble(&ok);
+              if (d != 0 || ok) {
+                d += screen.x();
+                if (d < screen.x() || d > screen.right())
+		  d = screen.x(); // only safe choice until size is determined
+                winargs.x = (int)d;
 #if APPLE_CHANGES
-	      winargs.xSet = true;
+	        winargs.xSet = true;
 #endif
+              }
             } else if (key == "top" || key == "screeny") {
-              winargs.y = (int)val.toFloat() + screen.y();
-	      if (winargs.y < screen.y() || winargs.y > screen.bottom())
-		  winargs.y = screen.y(); // only safe choice until size is determined
+              bool ok;
+              double d = val.toDouble(&ok);
+              if (d != 0 || ok) {
+                d += screen.y();
+                if (d < screen.y() || d > screen.bottom())
+		  d = screen.y(); // only safe choice until size is determined
+                winargs.y = (int)d;
 #if APPLE_CHANGES
-	      winargs.ySet = true;
+	        winargs.ySet = true;
 #endif
+              }
             } else if (key == "height") {
-              winargs.height = (int)val.toFloat() + 2*qApp->style().pixelMetric( QStyle::PM_DefaultFrameWidth ) + 2;
-	      if (winargs.height > screen.height())  // should actually check workspace
-		  winargs.height = screen.height();
-              if (winargs.height < 100)
-		  winargs.height = 100;
-#if APPLE_CHANGES
-	      winargs.heightSet = true;
+              bool ok;
+              double d = val.toDouble(&ok);
+              if (d != 0 || ok) {
+#if !APPLE_CHANGES
+                d += 2*qApp->style().pixelMetric( QStyle::PM_DefaultFrameWidth ) + 2;
 #endif
+	        if (d > screen.height())  // should actually check workspace
+		  d = screen.height();
+                if (d < 100)
+		  d = 100;
+                winargs.height = (int)d;
+#if APPLE_CHANGES
+	        winargs.heightSet = true;
+#endif
+              }
             } else if (key == "width") {
-              winargs.width = (int)val.toFloat() + 2*qApp->style().pixelMetric( QStyle::PM_DefaultFrameWidth ) + 2;
-	      if (winargs.width > screen.width())    // should actually check workspace
-		  winargs.width = screen.width();
-              if (winargs.width < 100)
-		  winargs.width = 100;
-#if APPLE_CHANGES
-	      winargs.widthSet = true;
+              bool ok;
+              double d = val.toDouble(&ok);
+              if (d != 0 || ok) {
+#if !APPLE_CHANGES
+                d += 2*qApp->style().pixelMetric( QStyle::PM_DefaultFrameWidth ) + 2;
 #endif
+	        if (d > screen.width())    // should actually check workspace
+		  d = screen.width();
+                if (d < 100)
+		  d = 100;
+                winargs.width = (int)d;
+#if APPLE_CHANGES
+	        winargs.widthSet = true;
+#endif
+              }
             } else {
               goto boolargs;
 	    }
@@ -1394,12 +1364,8 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
 	  // FIXME: referrer?
           while ( part->parentPart() )
               part = part->parentPart();
-
-          const Window* window = Window::retrieveWindow(part);
-          if (!url.url().startsWith("javascript:", false) || (window && window->isSafeScript(exec))) {
-            bool userGesture = static_cast<ScriptInterpreter *>(exec->interpreter())->wasRunByUserGesture();
-            part->scheduleLocationChange(url.url(), false/*don't lock history*/, userGesture);
-          }
+          bool userGesture = static_cast<ScriptInterpreter *>(exec->dynamicInterpreter())->wasRunByUserGesture();
+          part->scheduleRedirection(0, url.url(), false/*don't lock history*/, userGesture);
           return Window::retrieve(part);
       }
       if ( uargs.frameName == "_parent" )
@@ -1407,12 +1373,8 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
 	  // FIXME: referrer?
           if ( part->parentPart() )
               part = part->parentPart();
-
-          const Window* window = Window::retrieveWindow(part);
-          if (!url.url().startsWith("javascript:", false) || (window && window->isSafeScript(exec))) {
-            bool userGesture = static_cast<ScriptInterpreter *>(exec->interpreter())->wasRunByUserGesture();
-            part->scheduleLocationChange(url.url(), false/*don't lock history*/, userGesture);
-          }
+          bool userGesture = static_cast<ScriptInterpreter *>(exec->dynamicInterpreter())->wasRunByUserGesture();
+          part->scheduleRedirection(0, url.url(), false/*don't lock history*/, userGesture);
           return Window::retrieve(part);
       }
       uargs.serviceType = "text/html";
@@ -1426,7 +1388,7 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
         khtmlpart->setOpener(part);
         khtmlpart->setOpenedByJS(true);
         if (khtmlpart->document().isNull()) {
-          part->docImpl()->baseURL() == 0 ? khtmlpart->begin() : khtmlpart->begin(part->docImpl()->baseURL());
+          khtmlpart->begin();
           khtmlpart->write("<HTML><BODY>");
           khtmlpart->end();
 
@@ -1440,12 +1402,9 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
         }
 #if APPLE_CHANGES
         if (!url.isEmpty()) {
-          const Window* window = Window::retrieveWindow(khtmlpart);
-          if (!url.url().startsWith("javascript:", false) || (window && window->isSafeScript(exec))) {
-            bool userGesture = static_cast<ScriptInterpreter *>(exec->interpreter())->wasRunByUserGesture();
-            // FIXME: Need to pass referrer here.
-            khtmlpart->scheduleLocationChange(url.url(), false, userGesture);
-          } 
+          bool userGesture = static_cast<ScriptInterpreter *>(exec->dynamicInterpreter())->wasRunByUserGesture();
+          // FIXME: Need to pass referrer here.
+          khtmlpart->scheduleRedirection(0, url.url(), false, userGesture);
 	}
 #else
         uargs.serviceType = QString::null;
@@ -1462,22 +1421,22 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
   }
 #if APPLE_CHANGES
   case Window::Print:
-    KWQ(part)->print();
+    part->print();
     return Undefined();
 #endif
   case Window::ScrollBy:
     window->updateLayout();
-    if(args.size() == 2 && widget)
+    if(args.size() >= 2 && widget)
       widget->scrollBy(args[0].toInt32(exec), args[1].toInt32(exec));
     return Undefined();
   case Window::Scroll:
   case Window::ScrollTo:
     window->updateLayout();
-    if(args.size() == 2 && widget)
+    if(args.size() >= 2 && widget)
       widget->setContentsPos(args[0].toInt32(exec), args[1].toInt32(exec));
     return Undefined();
   case Window::MoveBy:
-    if(args.size() == 2 && widget)
+    if(args.size() >= 2 && widget)
     {
       QWidget * tl = widget->topLevelWidget();
 	  QRect sg = QApplication::desktop()->screenGeometry(QApplication::desktop()->screenNumber(tl));
@@ -1490,7 +1449,7 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
     }
     return Undefined();
   case Window::MoveTo:
-    if(args.size() == 2 && widget)
+    if(args.size() >= 2 && widget)
     {
       QWidget * tl = widget->topLevelWidget();
 	  QRect sg = QApplication::desktop()->screenGeometry(QApplication::desktop()->screenNumber(tl));
@@ -1503,7 +1462,7 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
     }
     return Undefined();
   case Window::ResizeBy:
-    if(args.size() == 2 && widget)
+    if(args.size() >= 2 && widget)
     {
       QWidget * tl = widget->topLevelWidget();
       QSize dest = tl->size() + QSize( args[0].toInt32(exec), args[1].toInt32(exec) );
@@ -1521,7 +1480,7 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
     }
     return Undefined();
   case Window::ResizeTo:
-    if(args.size() == 2 && widget)
+    if(args.size() >= 2 && widget)
     {
       QWidget * tl = widget->topLevelWidget();
       QSize dest = QSize( args[0].toInt32(exec), args[1].toInt32(exec) );
@@ -1541,7 +1500,7 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
   case Window::SetTimeout:
     if (!window->isSafeScript(exec))
         return Undefined();
-    if (args.size() == 2 && v.isA(StringType)) {
+    if (args.size() >= 2 && v.isA(StringType)) {
       int i = args[1].toInt32(exec);
       int r = (const_cast<Window*>(window))->installTimeout(s, i, true /*single shot*/);
       return Number(r);
@@ -1594,7 +1553,7 @@ Value WindowFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
   case Window::GetSelection:
     if (!window->isSafeScript(exec))
         return Undefined();
-    return String(part->selectedText());
+    return Value(window->selection());
   case Window::Blur:
 #if APPLE_CHANGES
     KWQ(part)->unfocusWindow();
@@ -1718,19 +1677,17 @@ void ScheduledAction::execute(Window *window)
 	Interpreter::unlock();
 	if ( exec->hadException() ) {
 #if APPLE_CHANGES
+          Interpreter::lock();
+          char *message = exec->exception().toObject(exec).get(exec, messagePropertyName).toString(exec).ascii();
+          int lineNumber =  exec->exception().toObject(exec).get(exec, "line").toInt32(exec);
+          Interpreter::unlock();
 	  if (Interpreter::shouldPrintExceptions()) {
-	    Interpreter::lock();
-	    char *message = exec->exception().toObject(exec).get(exec, messagePropertyName).toString(exec).ascii();
-	    Interpreter::unlock();
 	    printf("(timer):%s\n", message);
 	  }
+          KWQ(window->m_part)->addMessageToConsole(message, lineNumber, QString());
 #endif
 	  exec->clearException();
 	}
-
-	// Update our document's rendering following the execution of the timeout callback.
-	DOM::DocumentImpl *doc = static_cast<DOM::DocumentImpl*>(window->m_part->document().handle());
-	doc->updateRendering();
       }
     }
   }
@@ -1738,6 +1695,10 @@ void ScheduledAction::execute(Window *window)
     window->m_part->executeScript(code);
   }
 
+  // Update our document's rendering following the execution of the timeout callback.
+  DOM::DocumentImpl *doc = static_cast<DOM::DocumentImpl*>(window->m_part->document().handle());
+  doc->updateRendering();
+  
   interpreter->setProcessingTimerCallback(false);
 }
 
@@ -2066,17 +2027,13 @@ void Location::put(ExecState *exec, const Identifier &p, const Value &v, int att
     ObjectImp::put(exec, p, v, attr);
     return;
   }
-
-  const Window* window = Window::retrieveWindow(m_part);
-  if (!url.url().startsWith("javascript:", false) || (window && window->isSafeScript(exec))) {
-    bool userGesture = static_cast<ScriptInterpreter *>(exec->interpreter())->wasRunByUserGesture();
+  bool userGesture = static_cast<ScriptInterpreter *>(exec->dynamicInterpreter())->wasRunByUserGesture();
 #if APPLE_CHANGES
-    // We want a new history item if this JS was called via a user gesture
-    m_part->scheduleLocationChange(url.url(), !userGesture, userGesture);
+  // We want a new history item if this JS was called via a user gesture
+  m_part->scheduleRedirection(0, url.url(), !userGesture, userGesture);
 #else
-    m_part->scheduleLocationChange(url.url(), false /*don't lock history*/, userGesture);
+  m_part->scheduleRedirection(0, url.url(), false /*don't lock history*/, userGesture);
 #endif
-  }
 }
 
 Value Location::toPrimitive(ExecState *exec, Type) const
@@ -2113,21 +2070,15 @@ Value LocationFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
       QString str = args[0].toString(exec).qstring();
       KHTMLPart* p = Window::retrieveActive(exec)->part();
       if ( p ) {
-        const Window* window = Window::retrieveWindow(part);
-        if (!str.startsWith("javascript:", false) || (window && window->isSafeScript(exec))) {
-          bool userGesture = static_cast<ScriptInterpreter *>(exec->interpreter())->wasRunByUserGesture();
-          part->scheduleLocationChange(p->htmlDocument().completeURL(str).string(), true /*lock history*/, userGesture);
-        }
+	bool userGesture = static_cast<ScriptInterpreter *>(exec->dynamicInterpreter())->wasRunByUserGesture();
+        part->scheduleRedirection(0, p->htmlDocument().completeURL(str).string(), true /*lock history*/, userGesture);
       }
       break;
     }
     case Location::Reload:
     {
-      const Window* window = Window::retrieveWindow(part);
-     if (!part->url().url().startsWith("javascript:", false) || (window && window->isSafeScript(exec))) {
-        bool userGesture = static_cast<ScriptInterpreter *>(exec->interpreter())->wasRunByUserGesture();
-        part->scheduleLocationChange(part->url().url(), true/*lock history*/, userGesture);
-      }
+      bool userGesture = static_cast<ScriptInterpreter *>(exec->dynamicInterpreter())->wasRunByUserGesture();
+      part->scheduleRedirection(0, part->url().url(), true/*lock history*/, userGesture);
       break;
     }
     case Location::ToString:
@@ -2138,67 +2089,197 @@ Value LocationFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
   return Undefined();
 }
 
-////////////////////// BarInfo Object ////////////////////////
+////////////////////// Selection Object ////////////////////////
 
-const ClassInfo BarInfo::info = { "BarInfo", 0, 0, 0 };
+const ClassInfo Selection::info = { "Selection", 0, 0, 0 };
 /*
-@begin BarInfoTable 1
-  visible                BarInfo::Visible		         DontDelete|ReadOnly
+@begin SelectionTable 19
+  anchorNode                Selection::AnchorNode		         DontDelete|ReadOnly
+  anchorOffset              Selection::AnchorOffset	             DontDelete|ReadOnly
+  focusNode                 Selection::FocusNode		         DontDelete|ReadOnly
+  focusOffset               Selection::FocusOffset		         DontDelete|ReadOnly
+  baseNode                  Selection::AnchorNode		         DontDelete|ReadOnly
+  baseOffset                Selection::AnchorOffset              DontDelete|ReadOnly
+  extentNode                Selection::FocusNode                 DontDelete|ReadOnly
+  extentOffset              Selection::FocusOffset		         DontDelete|ReadOnly
+  isCollapsed               Selection::IsCollapsed		         DontDelete|ReadOnly
+  type                      Selection::_Type                     DontDelete|ReadOnly
+  [[==]]	                Selection::EqualEqual	             DontDelete|ReadOnly
+  toString                  Selection::ToString                  DontDelete|Function 0
+  collapse                  Selection::Collapse                  DontDelete|Function 2
+  collapseToEnd             Selection::CollapseToEnd             DontDelete|Function 0
+  collapseToStart           Selection::CollapseToStart           DontDelete|Function 0
+  empty                     Selection::Empty                     DontDelete|Function 0
+  setBaseAndExtent          Selection::SetBaseAndExtent          DontDelete|Function 4
+  setPosition               Selection::SetPosition               DontDelete|Function 2
+  modify                    Selection::Modify                    DontDelete|Function 3
 @end
 */
-BarInfo::BarInfo(ExecState *exec, KHTMLPart *p, Type barType) 
-  : ObjectImp(exec->interpreter()->builtinObjectPrototype())
-  , m_part(p)
-  , m_type(barType)
+IMPLEMENT_PROTOFUNC(SelectionFunc)
+Selection::Selection(KHTMLPart *p) : m_part(p)
 {
+  //kdDebug(6070) << "Selection::Selection " << this << " m_part=" << (void*)m_part << endl;
 }
 
-BarInfo::~BarInfo()
+Selection::~Selection()
 {
+  //kdDebug(6070) << "Selection::~Selection " << this << " m_part=" << (void*)m_part << endl;
 }
 
-Value BarInfo::get(ExecState *exec, const Identifier &p) const
+Value Selection::get(ExecState *exec, const Identifier &p) const
 {
+#ifdef KJS_VERBOSE
+  kdDebug(6070) << "Selection::get " << p.qstring() << " m_part=" << (void*)m_part << endl;
+#endif
+
   if (m_part.isNull())
     return Undefined();
   
-  const HashEntry *entry = Lookup::findEntry(&BarInfoTable, p);
-  if (entry && entry->value == Visible) {
-    switch (m_type) {
-    case Locationbar:
-#if APPLE_CHANGES
-      return Boolean(KWQ(m_part)->locationbarVisible());
-#endif
-    case Menubar: 
-#if APPLE_CHANGES
-      return Boolean(KWQ(m_part)->locationbarVisible());
-#endif
-    case Personalbar:
-#if APPLE_CHANGES
-      return Boolean(KWQ(m_part)->personalbarVisible());
-#endif
-    case Scrollbars: 
-#if APPLE_CHANGES
-      return Boolean(KWQ(m_part)->scrollbarsVisible());
-#endif
-    case Statusbar:
-#if APPLE_CHANGES
-      return Boolean(KWQ(m_part)->statusbarVisible());
-#endif
-    case Toolbar:
-#if APPLE_CHANGES
-      return Boolean(KWQ(m_part)->toolbarVisible());
-#endif
-    default:
-      return Boolean(false);
+  const Window* window = Window::retrieveWindow(m_part);
+  if (!window || !window->isSafeScript(exec))
+      return Undefined();
+
+  DocumentImpl *docimpl = m_part->xmlDocImpl();
+  if (docimpl)
+    docimpl->updateLayout();
+
+  KURL url = m_part->url();
+  const HashEntry *entry = Lookup::findEntry(&SelectionTable, p);
+  if (entry)
+    switch (entry->value) {
+        case AnchorNode:
+        case BaseNode:
+            return getDOMNode(exec, Node(m_part->selection().base().node()));
+        case AnchorOffset:
+        case BaseOffset:
+            return Number(m_part->selection().base().offset());
+        case FocusNode:
+        case ExtentNode:
+            return getDOMNode(exec, Node(m_part->selection().extent().node()));
+        case FocusOffset:
+        case ExtentOffset:
+            return Number(m_part->selection().extent().offset());
+        case IsCollapsed:
+            return Boolean(m_part->selection().state() == DOM::Selection::CARET);
+        case _Type: {
+            switch (m_part->selection().state()) {
+                case DOM::Selection::NONE:
+                    return String("None");
+                case DOM::Selection::CARET:
+                    return String("Caret");
+                case DOM::Selection::RANGE:
+                    return String("Range");
+            }
+        }
+        case EqualEqual:
+            return String(toString(exec));
+        case ToString:
+          return lookupOrCreateFunction<SelectionFunc>(exec,p,this,entry->value,entry->params,entry->attr);
     }
-  }
-  
-  return Undefined();
+    // Look for overrides
+    ValueImp * val = ObjectImp::getDirect(p);
+    if (val)
+        return Value(val);
+    if (entry)
+        switch (entry->value) {
+            case Collapse:
+            case CollapseToEnd:
+            case CollapseToStart:
+            case Empty:
+            case SetBaseAndExtent:
+            case SetPosition:
+            case Modify:
+                return lookupOrCreateFunction<SelectionFunc>(exec,p,this,entry->value,entry->params,entry->attr);
+        }
+
+    return Undefined();
 }
 
-void BarInfo::put(ExecState *exec, const Identifier &p, const Value &v, int attr)
+void Selection::put(ExecState *exec, const Identifier &p, const Value &v, int attr)
 {
+}
+
+Value Selection::toPrimitive(ExecState *exec, Type) const
+{
+  return String(toString(exec));
+}
+
+UString Selection::toString(ExecState *) const
+{
+    if (m_part->selection().state() != DOM::Selection::RANGE)
+        return UString("");
+    return UString(m_part->selection().toRange().toString());
+}
+
+Value SelectionFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
+{
+    if (!thisObj.inherits(&Selection::info)) {
+        Object err = Error::create(exec,TypeError);
+        exec->setException(err);
+        return err;
+    }
+    Selection *selection = static_cast<Selection *>(thisObj.imp());
+    KHTMLPart *part = selection->part();
+    if (part) {
+        DocumentImpl *docimpl = part->xmlDocImpl();
+        if (docimpl)
+            docimpl->updateLayout();
+            
+        switch (id) {
+            case Selection::Collapse:
+                TypingCommand::closeTyping(part->lastEditCommand());
+                part->setSelection(DOM::Selection(Position(KJS::toNode(args[0]).handle(), args[1].toInt32(exec))));
+                break;
+            case Selection::CollapseToEnd:
+                TypingCommand::closeTyping(part->lastEditCommand());
+                part->setSelection(DOM::Selection(part->selection().end()));
+                break;
+            case Selection::CollapseToStart:
+                TypingCommand::closeTyping(part->lastEditCommand());
+                part->setSelection(DOM::Selection(part->selection().start()));
+                break;
+            case Selection::Empty:
+                TypingCommand::closeTyping(part->lastEditCommand());
+                part->clearSelection();
+                break;
+            case Selection::SetBaseAndExtent: {
+                TypingCommand::closeTyping(part->lastEditCommand());
+                Position base(KJS::toNode(args[0]).handle(), args[1].toInt32(exec));
+                Position extent(KJS::toNode(args[2]).handle(), args[3].toInt32(exec));
+                part->setSelection(DOM::Selection(base, extent));
+                break;
+            }
+            case Selection::SetPosition:
+                TypingCommand::closeTyping(part->lastEditCommand());
+                part->setSelection(DOM::Selection(Position(KJS::toNode(args[0]).handle(), args[1].toInt32(exec))));
+                break;
+            case Selection::Modify: {
+                TypingCommand::closeTyping(part->lastEditCommand());
+                DOM::Selection s(part->selection());
+                DOM::Selection::EAlter alter = DOM::Selection::MOVE;
+                if (args[0].toString(exec).string().lower() == "extend")
+                    alter = DOM::Selection::EXTEND;
+                DOMString directionString = args[1].toString(exec).string().lower();
+                DOM::Selection::EDirection direction = DOM::Selection::FORWARD;
+                if (directionString == "backward")
+                    direction = DOM::Selection::BACKWARD;
+                else if (directionString == "left")
+                    direction = DOM::Selection::LEFT;
+                if (directionString == "right")
+                    direction = DOM::Selection::RIGHT;
+                DOM::Selection::ETextGranularity granularity = DOM::Selection::CHARACTER;
+                DOMString granularityString = args[2].toString(exec).string().lower();
+                if (granularityString == "word")
+                    granularity = DOM::Selection::WORD;
+                else if (granularityString == "line")
+                    granularity = DOM::Selection::LINE;
+                s.modify(alter, direction, granularity);
+                part->setSelection(s);
+            }
+        }
+    }
+
+    return Undefined();
 }
 
 ////////////////////// History Object ////////////////////////
@@ -2259,11 +2340,6 @@ Value HistoryFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
   }
   History *history = static_cast<History *>(thisObj.imp());
 
-  Value v = args[0];
-  Number n;
-  if(!v.isNull())
-    n = v.toInteger(exec);
-
   int steps;
   switch (id) {
   case History::Back:
@@ -2273,7 +2349,7 @@ Value HistoryFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
     steps = 1;
     break;
   case History::Go:
-    steps = n.intValue();
+    steps = args[0].toInt32(exec);
     break;
   default:
     return Undefined();

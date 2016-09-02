@@ -24,6 +24,7 @@
  */
 
 #import <Foundation/Foundation.h>
+#import <AppKit/NSDragging.h>       // for NSDragOperation typedef
 
 #import <WebCore/WebCoreKeyboardAccess.h>
 
@@ -51,7 +52,15 @@ typedef khtml::RenderPart KHTMLRenderPart;
 
 #endif
 
+@class DOMCSSStyleDeclaration;
+@class DOMDocument;
+@class DOMDocumentFragment;
+@class DOMElement;
+@class DOMHTMLElement;
+@class DOMNode;
+@class DOMRange;
 @class WebCoreSettings;
+@class WebScriptObject;
 
 @protocol WebCoreDOMTreeCopier;
 @protocol WebCoreRenderTreeCopier;
@@ -59,10 +68,8 @@ typedef khtml::RenderPart KHTMLRenderPart;
 @protocol WebCoreResourceLoader;
 @protocol WebCoreFileButton;
 @protocol WebCoreFileButtonDelegate;
-@protocol WebDOMDocument;
-@protocol WebDOMNode;
-@protocol WebDOMElement;
 
+extern NSString *WebCoreElementDOMNodeKey;
 extern NSString *WebCoreElementFrameKey;
 extern NSString *WebCoreElementImageAltStringKey;
 extern NSString *WebCoreElementImageKey;
@@ -82,6 +89,26 @@ typedef enum {
     WebCoreDevicePrinter
 } WebCoreDeviceType;
 
+typedef enum {
+    WebSelectByMoving,
+    WebSelectByExtending
+} WebSelectionAlteration;
+
+typedef enum {
+    WebSelectForward,
+    WebSelectBackward,
+    WebSelectRight,
+    WebSelectLeft
+} WebSelectionDirection;
+
+typedef enum {
+    WebSelectByCharacter,
+    WebSelectByWord,
+    WebSelectByLine,
+    WebSelectByParagraph
+} WebSelectionGranularity;
+
+
 // WebCoreBridge objects are used by WebCore to abstract away operations that need
 // to be implemented by library clients, for example WebKit. The objects are also
 // used in the opposite direction, for simple access to WebCore functions without dealing
@@ -96,9 +123,10 @@ typedef enum {
     KWQKHTMLPart *_part;
     KHTMLRenderPart *_renderPart;
     RenderArena *_renderPartArena;
-    BOOL _drawSelectionOnly;
     BOOL _shouldCreateRenderers;
 }
+
++ (WebCoreBridge *)bridgeForDOMDocument:(DOMDocument *)document;
 
 - (void)initializeSettings:(WebCoreSettings *)settings;
 
@@ -133,8 +161,6 @@ typedef enum {
 
 - (NSURL *)URL;
 - (NSString *)referrer;
-- (NSString *)domain;
-- (WebCoreBridge *)opener;
 
 - (void)installInFrame:(NSView *)view;
 - (void)removeFromFrame;
@@ -180,15 +206,17 @@ typedef enum {
 - (NSString *)renderTreeAsExternalRepresentation;
 
 - (NSDictionary *)elementAtPoint:(NSPoint)point;
-- (id <WebDOMElement>)elementWithName:(NSString *)name inForm:(id <WebDOMElement>)form;
-- (id <WebDOMElement>)elementForView:(NSView *)view;
-- (BOOL)elementDoesAutoComplete:(id <WebDOMElement>)element;
-- (BOOL)elementIsPassword:(id <WebDOMElement>)element;
-- (id <WebDOMElement>)formForElement:(id <WebDOMElement>)element;
-- (id <WebDOMElement>)currentForm;
-- (NSArray *)controlsInForm:(id <WebDOMElement>)form;
-- (NSString *)searchForLabels:(NSArray *)labels beforeElement:(id <WebDOMElement>)element;
-- (NSString *)matchLabels:(NSArray *)labels againstElement:(id <WebDOMElement>)element;
+- (NSURL *)URLWithRelativeString:(NSString *)string;
+
+- (DOMElement *)elementWithName:(NSString *)name inForm:(DOMElement *)form;
+- (DOMElement *)elementForView:(NSView *)view;
+- (BOOL)elementDoesAutoComplete:(DOMElement *)element;
+- (BOOL)elementIsPassword:(DOMElement *)element;
+- (DOMElement *)formForElement:(DOMElement *)element;
+- (DOMElement *)currentForm;
+- (NSArray *)controlsInForm:(DOMElement *)form;
+- (NSString *)searchForLabels:(NSArray *)labels beforeElement:(DOMElement *)element;
+- (NSString *)matchLabels:(NSArray *)labels againstElement:(DOMElement *)element;
 
 - (BOOL)searchFor:(NSString *)string direction:(BOOL)forward caseSensitive:(BOOL)caseFlag wrap:(BOOL)wrapFlag;
 - (void)jumpToSelection;
@@ -199,12 +227,22 @@ typedef enum {
 
 - (NSString *)stringByEvaluatingJavaScriptFromString:(NSString *)string;
 
-- (id <WebDOMDocument>)DOMDocument;
+- (DOMDocument *)DOMDocument;
+- (DOMHTMLElement *)frameElement;
 
-- (void)setSelectionFrom:(id <WebDOMNode>)start startOffset:(int)startOffset to:(id <WebDOMNode>)end endOffset:(int) endOffset;
+- (void)setSelectionFrom:(DOMNode *)start startOffset:(int)startOffset to:(DOMNode *)end endOffset:(int) endOffset;
 
-- (NSString *)selectedString;
+- (BOOL)isSelectionEditable;
+
+- (BOOL)haveSelection;
+
 - (NSAttributedString *)selectedAttributedString;
+- (NSString *)selectedString;
+
+- (NSString *)stringForRange:(DOMRange *)range;
+
+- (NSString *)markupStringFromNode:(DOMNode *)node nodes:(NSArray **)nodes;
+- (NSString *)markupStringFromRange:(DOMRange *)range nodes:(NSArray **)nodes;
 
 - (void)selectAll;
 - (void)deselectAll;
@@ -214,12 +252,16 @@ typedef enum {
 - (NSRect)visibleSelectionRect;
 - (NSImage *)selectionImage;
 
-- (id <WebDOMNode>)selectionStart;
+- (DOMNode *)selectionStart;
 - (int)selectionStartOffset;
-- (id <WebDOMNode>)selectionEnd;
+- (DOMNode *)selectionEnd;
 - (int)selectionEndOffset;
+- (void)setSelectedDOMRange:(DOMRange *)range affinity:(NSSelectionAffinity)selectionAffinity;
+- (DOMRange *)selectedDOMRange;
+- (NSSelectionAffinity)selectionAffinity;
 
-- (NSAttributedString *)attributedStringFrom:(id <WebDOMNode>)startNode startOffset:(int)startOffset to:(id <WebDOMNode>)endNode endOffset:(int)endOffset;
+- (NSAttributedString *)attributedStringFrom:(DOMNode *)startNode startOffset:(int)startOffset to:(DOMNode *)endNode endOffset:(int)endOffset;
+- (NSFont *)renderedFontForNode:(DOMNode *)node;
 
 + (NSString *)stringWithData:(NSData *)data textEncoding:(CFStringEncoding)textEncoding;
 + (NSString *)stringWithData:(NSData *)data textEncodingName:(NSString *)textEncodingName;
@@ -231,13 +273,59 @@ typedef enum {
 
 - (int)numPendingOrLoadingRequests;
 
+- (void)setDrawsBackground:(BOOL)drawsBackround;
+
 - (NSColor *)bodyBackgroundColor;
+- (NSColor *)selectionColor;
 
 - (void)adjustViewSize;
 
 + (void)updateAllViews;
 
 - (id)accessibilityTree;
+
+- (void)undoEditing:(id)arg;
+- (void)redoEditing:(id)arg;
+
+- (DOMRange *)selectedDOMRangeWithGranularity:(WebSelectionGranularity)granularity;
+- (DOMRange *)rangeByAlteringCurrentSelection:(WebSelectionAlteration)alteration direction:(WebSelectionDirection)direction granularity:(WebSelectionGranularity)granularity;
+- (void)alterCurrentSelection:(WebSelectionAlteration)alteration direction:(WebSelectionDirection)direction granularity:(WebSelectionGranularity)granularity;
+
+- (DOMDocumentFragment *)documentFragmentWithMarkupString:(NSString *)markupString baseURLString:(NSString *)baseURLString;
+- (DOMDocumentFragment *)documentFragmentWithText:(NSString *)text;
+
+- (void)replaceSelectionWithFragment:(DOMDocumentFragment *)fragment selectReplacement:(BOOL)selectReplacement;
+- (void)replaceSelectionWithNode:(DOMNode *)node selectReplacement:(BOOL)selectReplacement;
+- (void)replaceSelectionWithMarkupString:(NSString *)markupString baseURLString:(NSString *)baseURLString selectReplacement:(BOOL)selectReplacement;
+- (void)replaceSelectionWithText:(NSString *)text selectReplacement:(BOOL)selectReplacement;
+
+- (void)insertText:(NSString *)text;
+- (void)insertNewline;
+
+- (void)setSelectionToDragCaret;
+- (void)moveSelectionToDragCaret:(DOMDocumentFragment *)selectionFragment;
+- (void)moveDragCaretToPoint:(NSPoint)point;
+- (void)removeDragCaret;
+- (DOMRange *)dragCaretDOMRange;
+- (DOMRange *)editableDOMRangeForPoint:(NSPoint)point;
+
+- (void)deleteSelection;
+- (void)deleteKeyPressed;
+- (void)applyStyle:(DOMCSSStyleDeclaration *)style;
+- (NSFont *)fontForCurrentPosition;
+- (void)ensureCaretVisible;
+
+- (WebScriptObject *)windowScriptObject;
+
+- (NSDragOperation)dragOperationForDraggingInfo:(id <NSDraggingInfo>)info;
+- (void)dragExitedWithDraggingInfo:(id <NSDraggingInfo>)info;
+- (BOOL)concludeDragForDraggingInfo:(id <NSDraggingInfo>)info;
+- (void)dragSourceMovedTo:(NSPoint)windowLoc;
+- (void)dragSourceEndedAt:(NSPoint)windowLoc operation:(NSDragOperation)operation;
+
+- (BOOL)tryDHTMLCut;
+- (BOOL)tryDHTMLCopy;
+- (BOOL)tryDHTMLPaste;
 
 @end
 
@@ -253,8 +341,8 @@ typedef enum {
 - (void)frameDetached;
 - (NSView *)documentView;
 
-- (void)loadURL:(NSURL *)URL referrer:(NSString *)referrer reload:(BOOL)reload onLoadEvent:(BOOL)onLoad target:(NSString *)target triggeringEvent:(NSEvent *)event form:(NSObject <WebDOMElement> *)form formValues:(NSDictionary *)values;
-- (void)postWithURL:(NSURL *)URL referrer:(NSString *)referrer target:(NSString *)target data:(NSData *)data contentType:(NSString *)contentType triggeringEvent:(NSEvent *)event form:(NSObject <WebDOMElement> *)form formValues:(NSDictionary *)values;
+- (void)loadURL:(NSURL *)URL referrer:(NSString *)referrer reload:(BOOL)reload onLoadEvent:(BOOL)onLoad target:(NSString *)target triggeringEvent:(NSEvent *)event form:(DOMElement *)form formValues:(NSDictionary *)values;
+- (void)postWithURL:(NSURL *)URL referrer:(NSString *)referrer target:(NSString *)target data:(NSData *)data contentType:(NSString *)contentType triggeringEvent:(NSEvent *)event form:(DOMElement *)form formValues:(NSDictionary *)values;
 
 - (WebCoreBridge *)createWindowWithURL:(NSURL *)URL frameName:(NSString *)name;
 - (void)showWindow;
@@ -294,6 +382,7 @@ typedef enum {
 - (void)runJavaScriptAlertPanelWithMessage:(NSString *)message;
 - (BOOL)runJavaScriptConfirmPanelWithMessage:(NSString *)message;
 - (BOOL)runJavaScriptTextInputPanelWithPrompt:(NSString *)prompt defaultText:(NSString *)defaultText returningText:(NSString **)result;
+- (void)addMessageToConsole:(NSDictionary *)message;
 
 - (id <WebCoreResourceHandle>)startLoadingResource:(id <WebCoreResourceLoader>)loader withURL:(NSURL *)URL customHeaders:(NSDictionary *)customHeaders;
 - (id <WebCoreResourceHandle>)startLoadingResource:(id <WebCoreResourceLoader>)loader withURL:(NSURL *)URL customHeaders:(NSDictionary *)customHeaders postData:(NSData *)data;
@@ -343,13 +432,13 @@ typedef enum {
 
 - (NSString *)MIMETypeForPath:(NSString *)path;
 
-- (void)handleMouseDragged:(NSEvent *)event;
+- (void)allowDHTMLDrag:(BOOL *)flagDHTML UADrag:(BOOL *)flagUA;
+- (BOOL)startDraggingImage:(NSImage *)dragImage at:(NSPoint)dragLoc operation:(NSDragOperation)op event:(NSEvent *)event sourceIsDHTML:(BOOL)flag DHTMLWroteData:(BOOL)dhtmlWroteData;
 - (void)handleAutoscrollForMouseDragged:(NSEvent *)event;
 - (BOOL)mayStartDragWithMouseDragged:(NSEvent *)event;
 
 - (int)historyLength;
 - (void)goBackOrForward:(int)distance;
-- (BOOL)canGoBackOrForward:(int)distance;
 
 - (void)controlTextDidBeginEditing:(NSNotification *)obj;
 - (void)controlTextDidEndEditing:(NSNotification *)obj;
@@ -375,6 +464,22 @@ typedef enum {
 - (void)print;
 
 - (jobject)pollForAppletInView:(NSView *)view;
+
+- (NSUndoManager *)undoManager;
+- (void)issueCutCommand;
+- (void)issueCopyCommand;
+- (void)issuePasteCommand;
+- (void)respondToChangedSelection;
+- (void)respondToChangedContents;
+- (BOOL)interceptEditingKeyEvent:(NSEvent *)event;
+- (void)setIsSelected:(BOOL)isSelected forView:(NSView *)view;
+- (BOOL)isEditable;
+- (BOOL)shouldBeginEditing:(DOMRange *)range;
+- (BOOL)shouldEndEditing:(DOMRange *)range;
+
+- (NSString *)overrideMediaType;
+
+- (void)windowObjectCleared;
 
 @end
 

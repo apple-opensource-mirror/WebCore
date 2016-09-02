@@ -603,7 +603,7 @@ bool RenderPart::partLoadingErrorNotify(khtml::ChildFrame *, const KURL& , const
     return false;
 }
 
-short RenderPart::intrinsicWidth() const
+int RenderPart::intrinsicWidth() const
 {
   // KDE may need a non-zero width here, although this will mess up pages (e.g., thinker.org).
 #if APPLE_CHANGES
@@ -702,11 +702,11 @@ void RenderPartObject::updateWidget()
           embedOrObject = (HTMLElementImpl *)embed;
           DOMString attribute = embedOrObject->getAttribute(ATTR_WIDTH);
           if (!attribute.isEmpty()) {
-              o->addCSSLength(CSS_PROP_WIDTH, attribute);
+              o->setAttribute(ATTR_WIDTH, attribute);
           }
           attribute = embedOrObject->getAttribute(ATTR_HEIGHT);
           if (!attribute.isEmpty()) {
-              o->addCSSLength(CSS_PROP_HEIGHT, attribute);
+              o->setAttribute(ATTR_HEIGHT, attribute);
           }
           url = embed->url;
           serviceType = embed->serviceType;
@@ -923,7 +923,7 @@ void RenderPartObject::layout( )
     KHTMLAssert( minMaxKnown() );
 
 #if !APPLE_CHANGES
-    short m_oldwidth = m_width;
+    int m_oldwidth = m_width;
     int m_oldheight = m_height;
 #endif
 
@@ -998,7 +998,7 @@ void RenderPart::updateWidgetPositions()
         
         QScrollView *view = static_cast<QScrollView *>(m_widget);
         if (view && view->inherits("KHTMLView"))
-            static_cast<KHTMLView*>(view)->scheduleRelayout();
+            static_cast<KHTMLView*>(view)->layout();
     }
 }
 #endif

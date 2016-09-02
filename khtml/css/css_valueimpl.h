@@ -19,7 +19,7 @@
  * the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 02111-1307, USA.
  *
- * $Id: css_valueimpl.h,v 1.21 2003/12/13 00:23:54 hyatt Exp $
+ * $Id: css_valueimpl.h,v 1.29 2004/06/04 23:27:37 hyatt Exp $
  */
 #ifndef _CSS_css_valueimpl_h_
 #define _CSS_css_valueimpl_h_
@@ -56,30 +56,33 @@ public:
 
     unsigned long length() const;
     CSSRuleImpl *parentRule() const;
-    DOM::DOMString removeProperty( int propertyID, bool NonCSSHints = false );
-    bool setProperty ( int propertyId, const DOM::DOMString &value, bool important = false, bool nonCSSHint = false);
-    void setProperty ( int propertyId, int value, bool important = false, bool nonCSSHint = false);
+    virtual DOM::DOMString removeProperty(int propertyID, bool notifyChanged = true);
+    virtual bool setProperty(int propertyId, const DOM::DOMString &value, bool important = false, bool notifyChanged = true);
+    virtual void setProperty(int propertyId, int value, bool important = false, bool notifyChanged = true);
     // this treats integers as pixels!
     // needed for conversion of html attributes
-    void setLengthProperty(int id, const DOM::DOMString &value, bool important, bool nonCSSHint = true, bool multiLength = false);
+    virtual void setLengthProperty(int id, const DOM::DOMString &value, bool important,bool multiLength = false);
+    virtual void setStringProperty(int propertyId, const DOM::DOMString &value, DOM::CSSPrimitiveValue::UnitTypes, bool important = false); // parsed string value
+    virtual void setImageProperty(int propertyId, const DOM::DOMString &URL, bool important = false);
 
     // add a whole, unparsed property
-    void setProperty ( const DOMString &propertyString);
-    DOM::DOMString item ( unsigned long index );
+    virtual void setProperty ( const DOMString &propertyString);
+    virtual DOM::DOMString item ( unsigned long index );
 
     virtual DOM::DOMString cssText() const;
-    void setCssText(DOM::DOMString str);
+    virtual void setCssText(const DOM::DOMString& str);
 
     virtual bool isStyleDeclaration() { return true; }
 
     virtual bool parseString( const DOMString &string, bool = false );
 
-    CSSValueImpl *getPropertyCSSValue( int propertyID ) const;
-    DOMString getPropertyValue( int propertyID ) const;
-    bool getPropertyPriority( int propertyID ) const;
+    virtual CSSValueImpl *getPropertyCSSValue( int propertyID ) const;
+    virtual DOMString getPropertyValue( int propertyID ) const;
+    virtual bool getPropertyPriority( int propertyID ) const;
 
     QPtrList<CSSProperty> *values() { return m_lstValues; }
     void setNode(NodeImpl *_node) { m_node = _node; }
+    NodeImpl* node() const { return m_node; }
 
     void setChanged();
 
@@ -290,10 +293,9 @@ public:
     CSSImageValueImpl();
     virtual ~CSSImageValueImpl();
 
-    khtml::CachedImage *image();
+    khtml::CachedImage *image(khtml::DocLoader* loader);
 
 protected:
-    khtml::DocLoader* m_loader;
     khtml::CachedImage* m_image;
     bool m_accessedImage;
 };
@@ -304,6 +306,8 @@ public:
     FontFamilyValueImpl( const QString &string);
     const QString &fontName() const { return parsedFontName; }
     int genericFamilyType() const { return _genericFamilyType; }
+
+    virtual DOM::DOMString cssText() const;
 
     QString parsedFontName;
 private:
@@ -347,7 +351,29 @@ public:
     CSSPrimitiveValueImpl* blur;
     CSSPrimitiveValueImpl* color;
 };
+
+// Used by box-flex-group-transition
+class FlexGroupTransitionValueImpl : public CSSValueImpl
+{
+public:
+    FlexGroupTransitionValueImpl();
+    FlexGroupTransitionValueImpl(unsigned int _group1, 
+                                 unsigned int _group2,
+                                 CSSPrimitiveValueImpl* _length);
+    virtual ~FlexGroupTransitionValueImpl();
     
+    virtual unsigned short cssValueType() const { return CSSValue::CSS_CUSTOM; }
+    
+    virtual DOM::DOMString cssText() const;
+    
+    bool isAuto() const { return autoValue; }
+
+    bool autoValue;
+    unsigned int group1;
+    unsigned int group2;
+    CSSPrimitiveValueImpl* length;
+};
+
 // ------------------------------------------------------------------------------
 
 // another helper class
@@ -358,14 +384,12 @@ public:
     {
 	m_id = -1;
 	m_bImportant = false;
-	nonCSSHint = false;
-        m_value = 0;
+	m_value = 0;
     }
     CSSProperty(const CSSProperty& o)
     {
         m_id = o.m_id;
         m_bImportant = o.m_bImportant;
-        nonCSSHint = o.nonCSSHint;
         m_value = o.m_value;
         if (m_value) m_value->ref();
     }
@@ -381,16 +405,21 @@ public:
 	}
     }
 
-    CSSValueImpl *value() { return m_value; }
-
+    int id() const { return m_id; }
+    bool isImportant() const { return m_bImportant; }
+    
+    CSSValueImpl *value() const { return m_value; }
+    
     DOM::DOMString cssText() const;
 
     // make sure the following fits in 4 bytes.
-    int  m_id 		: 29;
-    bool m_bImportant 	: 1;
-    bool nonCSSHint 	: 1;
+    int  m_id;
+    bool m_bImportant;
 protected:
     CSSValueImpl *m_value;
+
+private:
+    CSSProperty &operator=(const CSSProperty&);
 };
 
 

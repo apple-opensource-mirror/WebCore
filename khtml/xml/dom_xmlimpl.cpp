@@ -401,7 +401,7 @@ void ProcessingInstructionImpl::checkStyleSheet()
         QXmlAttributes attrs = attrReader.readAttrs(attrsOk);
         if (!attrsOk)
             return;
-        if (attrs.value("type") != "text/css")
+        if (attrs.value("type") != "text/css" && !attrs.value("type").isEmpty())
             return;
 
         DOMString href = attrs.value("href");
@@ -456,7 +456,7 @@ void ProcessingInstructionImpl::setStyleSheet(const DOM::DOMString &url, const D
 {
     if (m_sheet)
 	m_sheet->deref();
-    m_sheet = new CSSStyleSheetImpl(getDocument(), url);
+    m_sheet = new CSSStyleSheetImpl(this, url);
     m_sheet->ref();
     m_sheet->parseString(sheet);
     if (m_cachedSheet)

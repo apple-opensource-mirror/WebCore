@@ -43,8 +43,8 @@ class RenderFlow : public RenderBox
 {
 public:
     RenderFlow(DOM::NodeImpl* node)
-      : RenderBox(node)
-    { m_continuation = 0; m_firstLineBox = 0; m_lastLineBox = 0; }
+      : RenderBox(node), m_lineHeight(-1)
+    { m_continuation = 0; m_firstLineBox = 0; m_lastLineBox = 0;}
 
     virtual RenderFlow* continuation() const { return m_continuation; }
     void setContinuation(RenderFlow* c) { m_continuation = c; }
@@ -56,18 +56,24 @@ public:
 
     static RenderFlow* createAnonymousFlow(DOM::DocumentImpl* doc, RenderStyle* style);
 
+    void extractLineBox(InlineFlowBox* lineBox);
+    void attachLineBox(InlineFlowBox* lineBox);
+    void removeLineBox(InlineFlowBox* lineBox);
     void deleteLineBoxes();
     virtual void detach();
 
+    virtual void dirtyLinesFromChangedChild(RenderObject* child);
+    
+    virtual short lineHeight(bool firstLine, bool isRootLineBox=false) const;
+    
     InlineFlowBox* firstLineBox() const { return m_firstLineBox; }
     InlineFlowBox* lastLineBox() const { return m_lastLineBox; }
 
-    virtual InlineBox* createInlineBox(bool makePlaceHolderBox, bool isRootLineBox);
-
-    void paintLineBoxBackgroundBorder(QPainter *p, int _x, int _y,
-                        int _w, int _h, int _tx, int _ty, PaintAction paintAction);
-    void paintLineBoxDecorations(QPainter *p, int _x, int _y,
-                                 int _w, int _h, int _tx, int _ty, PaintAction paintAction);
+    virtual InlineBox* createInlineBox(bool makePlaceHolderBox, bool isRootLineBox, bool isOnlyRun=false);
+    virtual void dirtyLineBoxes(bool fullLayout, bool isRootLineBox = false);
+    
+    void paintLineBoxBackgroundBorder(PaintInfo& i, int _tx, int _ty);
+    void paintLineBoxDecorations(PaintInfo& i, int _tx, int _ty, bool paintedChildren = false);
 
     virtual QRect getAbsoluteRepaintRect();
     
@@ -75,6 +81,8 @@ public:
     virtual int rightmostPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
     virtual int leftmostPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
     
+    virtual void caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height);
+
 protected:
     // An inline can be split with blocks occurring in between the inline content.
     // When this occurs we need a pointer to our next object.  We can basically be
@@ -87,6 +95,8 @@ protected:
     // For inline flows, each box represents a portion of that inline.
     InlineFlowBox* m_firstLineBox;
     InlineFlowBox* m_lastLineBox;
+    
+    mutable short m_lineHeight;
 };
 
     

@@ -110,6 +110,8 @@ protected:
     virtual bool isRenderButton() const { return false; }
     virtual bool isEditable() const { return false; }
 
+    AlignmentFlags textAlignment() const;
+
     QPoint m_mousePos;
     int m_state;
     int m_button;
@@ -261,6 +263,11 @@ public:
 public slots:
     void slotReturnPressed();
     void slotTextChanged(const QString &string);
+#if APPLE_CHANGES
+    void slotPerformSearch();
+public:
+    void addSearchResult();
+#endif
 
 protected:
     virtual void handleFocusOut();
@@ -296,8 +303,7 @@ public:
     virtual void setStyle(RenderStyle* _style);
     
 protected:
-    virtual void paintBoxDecorations(QPainter *p,int, int _y,
-                                     int, int _h, int _tx, int _ty);
+    virtual void paintBoxDecorations(PaintInfo& i, int _tx, int _ty);
     void paintBorderMinusLegend(QPainter *p, int _tx, int _ty, int w,
                                 int h, const RenderStyle *style, int lx, int lw);
     RenderObject* findLegend();
@@ -485,6 +491,25 @@ protected:
 };
 
 // -------------------------------------------------------------------------
+
+#if APPLE_CHANGES
+class RenderSlider : public RenderFormElement
+{
+public:
+    RenderSlider(DOM::HTMLInputElementImpl *element);
+    
+    DOM::HTMLInputElementImpl* element() const
+    { return static_cast<DOM::HTMLInputElementImpl*>(RenderObject::element()); }
+
+    virtual const char *renderName() const { return "RenderSlider"; }
+    virtual bool canHaveIntrinsicMargins() const { return true; }
+    virtual void calcMinMaxWidth();
+    virtual void updateFromElement();
+
+protected slots:
+    void slotSliderValueChanged();
+};
+#endif
 
 }; //namespace
 

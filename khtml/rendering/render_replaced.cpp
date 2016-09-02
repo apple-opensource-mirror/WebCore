@@ -22,9 +22,10 @@
  *
  */
 #include "render_replaced.h"
-#include "render_canvas.h"
 
 #include "render_arena.h"
+#include "render_canvas.h"
+#include "render_line.h"
 
 #include <assert.h>
 #include <qwidget.h>
@@ -37,6 +38,7 @@
 #include "xml/dom2_eventsimpl.h"
 #include "khtml_part.h"
 #include "xml/dom_docimpl.h" // ### remove dependency
+#include "xml/dom_position.h"
 #include <kdebug.h>
 
 using namespace khtml;
@@ -53,29 +55,28 @@ RenderReplaced::RenderReplaced(DOM::NodeImpl* node)
     m_intrinsicHeight = 150;
 }
 
-void RenderReplaced::paint(QPainter *p, int _x, int _y, int _w, int _h,
-                           int _tx, int _ty, PaintAction paintAction)
+bool RenderReplaced::shouldPaint(PaintInfo& i, int& _tx, int& _ty)
 {
-    if (paintAction != PaintActionForeground && paintAction != PaintActionOutline && paintAction != PaintActionSelection)
-        return;
+    if (i.phase != PaintActionForeground && i.phase != PaintActionOutline && i.phase != PaintActionSelection)
+        return false;
+
+    if (!shouldPaintWithinRoot(i))
+        return false;
         
     // if we're invisible or haven't received a layout yet, then just bail.
-    if (style()->visibility() != VISIBLE || m_y <=  -500000)  return;
+    if (style()->visibility() != VISIBLE || m_y <=  -500000)  return false;
 
-    _tx += m_x;
-    _ty += m_y;
+    int tx = _tx + m_x;
+    int ty = _ty + m_y;
 
     // Early exit if the element touches the edges.
-    int os = 2*maximalOutlineSize(paintAction);
-    if((_tx >= _x + _w + os) || (_tx + m_width <= _x - os))
-        return;
-    if((_ty >= _y + _h + os) || (_ty + m_height <= _y - os))
-        return;
+    int os = 2*maximalOutlineSize(i.phase);
+    if ((tx >= i.r.x() + i.r.width() + os) || (tx + m_width <= i.r.x() - os))
+        return false;
+    if ((ty >= i.r.y() + i.r.height() + os) || (ty + m_height <= i.r.y() - os))
+        return false;
 
-    if(shouldPaintBackgroundOrBorder() && paintAction != PaintActionOutline) 
-        paintBoxDecorations(p, _x, _y, _w, _h, _tx, _ty);
-
-    paintObject(p, _x, _y, _w, _h, _tx, _ty, paintAction);
+    return true;
 }
 
 void RenderReplaced::calcMinMaxWidth()
@@ -113,6 +114,52 @@ bool RenderReplaced::canHaveChildren() const
     return false;
 }
 
+long RenderReplaced::caretMinOffset() const 
+{ 
+    return 0; 
+}
+
+// Returns 1 since a replaced element can have the caret positioned 
+// at its beginning (0), or at its end (1).
+long RenderReplaced::caretMaxOffset() const 
+{ 
+    return 1; 
+}
+
+unsigned long RenderReplaced::caretMaxRenderedOffset() const
+{
+    return 1; 
+}
+
+Position RenderReplaced::positionForCoordinates(int _x, int _y)
+{
+    InlineBox *box = inlineBoxWrapper();
+    if (!box)
+        return Position(element(), 0);
+
+    RootInlineBox *root = box->root();
+
+    int absx, absy;
+    containingBlock()->absolutePosition(absx, absy);
+
+    int top = absy + root->topOverflow();
+    int bottom = root->nextRootBox() ? absy + root->nextRootBox()->topOverflow() : absy + root->bottomOverflow();
+
+    if (_y < top)
+        return Position(element(), caretMinOffset()); // coordinates are above
+    
+    if (_y >= bottom)
+        return Position(element(), caretMaxOffset()); // coordinates are below
+    
+    if (element()) {
+        if (_x <= absx + xPos() + (width() / 2))
+            return Position(element(), 0);
+        return Position(element(), 1);
+    }
+
+    return RenderBox::positionForCoordinates(_x, _y);
+}
+
 // -----------------------------------------------------------------------------
 
 RenderWidget::RenderWidget(DOM::NodeImpl* node)
@@ -143,6 +190,11 @@ void RenderWidget::detach()
     }
 
     RenderArena* arena = renderArena();
+    if (m_inlineBoxWrapper) {
+        if (!documentBeingDestroyed())
+            m_inlineBoxWrapper->remove();
+        m_inlineBoxWrapper->detach(arena);
+    }
     setNode(0);
     deref(arena);
 }
@@ -260,11 +312,18 @@ void RenderWidget::setStyle(RenderStyle *_style)
     }
 }
 
-void RenderWidget::paintObject(QPainter *p, int x, int y, int width, int height, int _tx, int _ty,
-                               PaintAction paintAction)
+void RenderWidget::paint(PaintInfo& i, int _tx, int _ty)
 {
+    if (!shouldPaint(i, _tx, _ty)) return;
+
+    _tx += m_x;
+    _ty += m_y;
+    
+    if (shouldPaintBackgroundOrBorder() && i.phase != PaintActionOutline) 
+        paintBoxDecorations(i, _tx, _ty);
+
 #if APPLE_CHANGES
-    if (!m_widget || !m_view || paintAction != PaintActionForeground ||
+    if (!m_widget || !m_view || i.phase != PaintActionForeground ||
         style()->visibility() != VISIBLE)
         return;
 
@@ -278,10 +337,10 @@ void RenderWidget::paintObject(QPainter *p, int x, int y, int width, int height,
     
     // Tell the widget to paint now.  This is the only time the widget is allowed
     // to paint itself.  That way it will composite properly with z-indexed layers.
-    m_widget->paint(p, QRect(x, y, width, height));
+    m_widget->paint(i.p, i.r);
     
 #else
-    if (!m_widget || !m_view || paintAction != PaintActionForeground)
+    if (!m_widget || !m_view || i.phase != PaintActionForeground)
         return;
     
     if (style()->visibility() != VISIBLE) {
@@ -315,8 +374,8 @@ void RenderWidget::paintObject(QPainter *p, int x, int y, int width, int height,
 	    }
 // 	    qDebug("calculated yNew=%d", yNew);
 	}
-	yNew = QMIN( yNew, yPos + m_height - childh );
-	yNew = QMAX( yNew, yPos );
+	yNew = kMin( yNew, yPos + m_height - childh );
+	yNew = kMax( yNew, yPos );
 	if ( yNew != childy || xNew != childx ) {
 	    if ( vw->contentsHeight() < yNew - yPos + childh )
 		vw->resizeContents( vw->contentsWidth(), yNew - yPos + childh );
@@ -461,8 +520,17 @@ void RenderWidget::updateWidgetPositions()
     width = m_width - borderLeft() - borderRight() - paddingLeft() - paddingRight();
     height = m_height - borderTop() - borderBottom() - paddingTop() - paddingBottom();
     QRect newBounds(x,y,width,height);
-    if (newBounds != m_widget->frameGeometry()) {
+    QRect oldBounds(m_widget->frameGeometry());
+    if (newBounds != oldBounds) {
         // The widget changed positions.  Update the frame geometry.
+        if (checkForRepaintDuringLayout()) {
+            RenderCanvas* c = canvas();
+            if (!c->printingMode()) {
+                c->repaintViewRectangle(oldBounds);
+                c->repaintViewRectangle(newBounds);
+            }
+        }
+
         RenderArena *arena = ref();
         element()->ref();
         m_widget->setFrameGeometry(newBounds);
@@ -471,5 +539,13 @@ void RenderWidget::updateWidgetPositions()
     }
 }
 #endif
+
+void RenderWidget::setSelectionState(SelectionState s) 
+{
+    if (m_selectionState != s) {
+        m_selectionState = s;
+        m_widget->setIsSelected(m_selectionState != SelectionNone);
+    }
+}
 
 #include "render_replaced.moc"

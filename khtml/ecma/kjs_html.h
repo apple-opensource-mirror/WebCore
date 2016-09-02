@@ -33,7 +33,7 @@
 
 #include <qguardedptr.h>
 
-class DOM::HTMLElement;
+class HTMLElement;
 
 namespace KJS {
 
@@ -47,7 +47,7 @@ namespace KJS {
     virtual const ClassInfo* classInfo() const { return &info; }
     static const ClassInfo info;
     enum { Title, Referrer, Domain, URL, Body, Location, Cookie,
-           Images, Applets, Links, Forms, Anchors, Scripts, All, Clear, Open, Close,
+           Images, Applets, Embeds, Links, Forms, Anchors, Scripts, All, Clear, Open, Close,
            Write, WriteLn, GetElementsByName, CaptureEvents, ReleaseEvents,
            BgColor, FgColor, AlinkColor, LinkColor, VlinkColor, LastModified, Height, Width, Dir, DesignMode };
     DOM::Document toDocument() const { return static_cast<DOM::Document>( node ); }
@@ -72,7 +72,7 @@ namespace KJS {
       button_info, label_info, fieldSet_info, legend_info, ul_info, ol_info,
       dl_info, dir_info, menu_info, li_info, div_info, p_info, heading_info,
       blockQuote_info, q_info, pre_info, br_info, baseFont_info, font_info,
-      hr_info, mod_info, a_info, img_info, object_info, param_info,
+      hr_info, mod_info, a_info, canvas_info, img_info, object_info, param_info,
       applet_info, map_info, area_info, script_info, table_info,
       caption_info, col_info, tablesection_info, tr_info,
       tablecell_info, frameSet_info, frame_info, iFrame_info, marquee_info;
@@ -146,9 +146,10 @@ namespace KJS {
            IFrameFrameBorder, IFrameSrc, IFrameName, IFrameHeight,
            IFrameMarginHeight, IFrameMarginWidth, IFrameScrolling, IFrameWidth, IFrameContentDocument,
            MarqueeStart, MarqueeStop,
+           GetContext,
            ElementInnerHTML, ElementTitle, ElementId, ElementDir, ElementLang,
            ElementClassName, ElementInnerText, ElementDocument, ElementChildren, ElementContentEditable,
-           ElementIsContentEditable};
+           ElementIsContentEditable, ElementOuterHTML, ElementOuterText};
 
     DOM::HTMLElement toElement() const { return static_cast<DOM::HTMLElement>(node); }
   };
@@ -226,11 +227,45 @@ namespace KJS {
     virtual const ClassInfo* classInfo() const { return &info; }
     static const ClassInfo info;
     enum { Src, Complete, OnLoad };
+    
+    khtml::CachedImage* image() { return img; }
+    
   private:
     UString src;
     QGuardedPtr<DOM::DocumentImpl> doc;
     khtml::CachedImage* img;
     JSEventListener *onLoadListener;
+  };
+
+  ////////////////////// Context2D Object ////////////////////////
+
+  class Context2D : public DOMObject {
+  friend class Context2DFunction;
+  public:
+    Context2D(const DOM::HTMLElement &e);
+    ~Context2D();
+    virtual Value tryGet(ExecState *exec, const Identifier &propertyName) const;
+    Value getValueProperty(ExecState *exec, int token) const;
+    virtual void tryPut(ExecState *exec, const Identifier &propertyName, const Value& value, int attr = None);
+    void putValue(ExecState *exec, int token, const Value& value, int /*attr*/);
+    virtual bool toBoolean(ExecState *) const { return true; }
+    virtual const ClassInfo* classInfo() const { return &info; }
+    static const ClassInfo info;
+
+    enum { 
+        Save, Restore,
+        Scale, Rotate, Translate,
+        BeginPath, ClosePath, 
+        SetStrokeColor, SetFillColor, SetLineWidth, SetLineCap, SetLineJoin, SetMiterLimit, 
+        FillPath, StrokePath, 
+        MoveToPoint, AddLineToPoint, AddQuadraticCurveToPoint, AddBezierCurveToPoint, AddArcToPoint, AddArc, AddRect, Clip,
+        ClearRect, FillRect, StrokeRect,
+        DrawImage, DrawImageFromRect,
+        SetShadow, ClearShadow,
+        SetAlpha, SetCompositeOperation};
+
+    DOM::HTMLElementImpl *_element;
+    unsigned int _needsFlushRasterCache;
   };
 
   Value getHTMLCollection(ExecState *exec, const DOM::HTMLCollection &c);

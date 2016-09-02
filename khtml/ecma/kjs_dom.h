@@ -60,9 +60,11 @@ namespace KJS {
            CloneNode, Normalize, IsSupported, AddEventListener, RemoveEventListener,
            DispatchEvent, Contains,
            OnAbort, OnBlur, OnChange, OnClick, OnContextMenu, OnDblClick, OnDragDrop, OnError,
-           OnFocus, OnKeyDown, OnKeyPress, OnKeyUp, OnLoad, OnMouseDown,
+           OnDragEnter, OnDragOver, OnDragLeave, OnDrop, OnDragStart, OnDrag, OnDragEnd,
+           OnBeforeCut, OnCut, OnBeforeCopy, OnCopy, OnBeforePaste, OnPaste, OnSelectStart,
+           OnFocus, OnInput, OnKeyDown, OnKeyPress, OnKeyUp, OnLoad, OnMouseDown,
            OnMouseMove, OnMouseOut, OnMouseOver, OnMouseUp, OnMove, OnReset,
-           OnResize, OnScroll, OnSelect, OnSubmit, OnUnload,
+           OnResize, OnScroll, OnSearch, OnSelect, OnSubmit, OnUnload,
            OffsetLeft, OffsetTop, OffsetWidth, OffsetHeight, OffsetParent,
            ClientWidth, ClientHeight, ScrollLeft, ScrollTop, ScrollWidth, ScrollHeight };
 
@@ -122,7 +124,9 @@ namespace KJS {
            CreateAttributeNS, GetElementsByTagNameNS, GetElementById,
            CreateRange, CreateNodeIterator, CreateTreeWalker, DefaultView,
            CreateEvent, StyleSheets, PreferredStylesheetSet, 
-           SelectedStylesheetSet, GetOverrideStyle, ReadyState };
+           SelectedStylesheetSet, GetOverrideStyle, ReadyState, 
+           ExecCommand, QueryCommandEnabled, QueryCommandIndeterm, QueryCommandState, 
+           QueryCommandSupported, QueryCommandValue };
   };
 
   class DOMAttr : public DOMNode {

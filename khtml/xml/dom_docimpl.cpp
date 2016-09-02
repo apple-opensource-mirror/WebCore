@@ -28,12 +28,16 @@
 #include "xml/dom_textimpl.h"
 #include "xml/dom_xmlimpl.h"
 #include "xml/dom2_rangeimpl.h"
+#include "xml/dom_selection.h"
 #include "xml/dom2_eventsimpl.h"
 #include "xml/xml_tokenizer.h"
+
+#include "xml_namespace_table.h"
 
 #include "css/csshelper.h"
 #include "css/cssstyleselector.h"
 #include "css/css_stylesheetimpl.h"
+#include "css/css_valueimpl.h"
 #include "misc/htmlhashes.h"
 #include "misc/helper.h"
 #include "ecma/kjs_proxy.h"
@@ -70,14 +74,24 @@
 
 #include "cssvalues.h"
 
+#include "jsediting.h"
+
 #include <kio/job.h>
+
+#ifndef KHTML_NO_XBL
+#include "xbl/xbl_binding_manager.h"
+using XBL::XBLBindingManager;
+#endif
 
 #if APPLE_CHANGES
 #include "KWQAccObjectCache.h"
+#include "KWQLogging.h"
 #endif
 
 using namespace DOM;
 using namespace khtml;
+
+//#define INSTRUMENT_LAYOUT_SCHEDULING 1
 
 DOMImplementationImpl *DOMImplementationImpl::m_instance = 0;
 
@@ -227,7 +241,10 @@ QPtrList<DocumentImpl> * DocumentImpl::changedDocuments = 0;
 // KHTMLView might be 0
 DocumentImpl::DocumentImpl(DOMImplementationImpl *_implementation, KHTMLView *v)
     : NodeBaseImpl( new DocumentPtr() )
-    , m_imageLoadEventTimer(0)
+      , m_imageLoadEventTimer(0)
+#ifndef KHTML_NO_XBL
+      , m_bindingManager(new XBLBindingManager(this))
+#endif
 #if APPLE_CHANGES
     , m_finishedParsing(this, SIGNAL(finishedParsing()))
     , m_inPageCache(false), m_savedRenderer(0)
@@ -257,6 +274,7 @@ DocumentImpl::DocumentImpl(DOMImplementationImpl *_implementation, KHTMLView *v)
     visuallyOrdered = false;
     m_loadingSheet = false;
     m_bParsing = false;
+    m_bAllDataReceived = false;
     m_docChanged = false;
     m_sheet = 0;
     m_elemSheet = 0;
@@ -271,7 +289,8 @@ DocumentImpl::DocumentImpl(DOMImplementationImpl *_implementation, KHTMLView *v)
     m_doctype->ref();
 
     m_implementation = _implementation;
-    m_implementation->ref();
+    if (m_implementation)
+        m_implementation->ref();
     pMode = Strict;
     hMode = XHtml;
     m_textColor = Qt::black;
@@ -281,12 +300,6 @@ DocumentImpl::DocumentImpl(DOMImplementationImpl *_implementation, KHTMLView *v)
     m_attrNames = 0;
     m_attrNameAlloc = 0;
     m_attrNameCount = 0;
-    m_namespaceURIAlloc = 4;
-    m_namespaceURICount = 1;
-    QString xhtml(XHTML_NAMESPACE);
-    m_namespaceURIs = new DOMStringImpl* [m_namespaceURIAlloc];
-    m_namespaceURIs[0] = new DOMStringImpl(xhtml.unicode(), xhtml.length());
-    m_namespaceURIs[0]->ref();
     m_focusNode = 0;
     m_hoverNode = 0;
     m_defaultView = new AbstractViewImpl(this);
@@ -298,7 +311,8 @@ DocumentImpl::DocumentImpl(DOMImplementationImpl *_implementation, KHTMLView *v)
     m_styleSelectorDirty = false;
     m_inStyleRecalc = false;
     m_usesDescendantRules = false;
-    
+    m_usesSiblingRules = false;
+
     m_styleSelector = new CSSStyleSelector( this, m_usersheet, m_styleSheets, m_url,
                                             !inCompatMode() );
     m_windowEventListeners.setAutoDelete(true);
@@ -307,9 +321,16 @@ DocumentImpl::DocumentImpl(DOMImplementationImpl *_implementation, KHTMLView *v)
 
     m_cssTarget = 0;
     m_accessKeyDictValid = false;
-    
+
+    resetLinkColor();
+    resetVisitedLinkColor();
+    resetActiveLinkColor();
+
     m_processingLoadEvent = false;
     m_startTime.restart();
+    m_overMinimumLayoutThreshold = false;
+    
+    m_jsEditor = 0;
 }
 
 DocumentImpl::~DocumentImpl()
@@ -332,7 +353,8 @@ DocumentImpl::~DocumentImpl()
     if (m_elemSheet )  m_elemSheet->deref();
     if (m_doctype)
         m_doctype->deref();
-    m_implementation->deref();
+    if (m_implementation)
+        m_implementation->deref();
     delete m_paintDeviceMetrics;
 
     if (m_elementNames) {
@@ -345,9 +367,6 @@ DocumentImpl::~DocumentImpl()
             m_attrNames[id]->deref();
         delete [] m_attrNames;
     }
-    for (unsigned short id = 0; id < m_namespaceURICount; ++id)
-        m_namespaceURIs[id]->deref();
-    delete [] m_namespaceURIs;
     m_defaultView->deref();
     m_styleSheets->deref();
 
@@ -361,6 +380,10 @@ DocumentImpl::~DocumentImpl()
         m_renderArena = 0;
     }
 
+#ifndef KHTML_NO_XBL
+    delete m_bindingManager;
+#endif
+
 #if APPLE_CHANGES
     if (m_accCache){
         delete m_accCache;
@@ -372,8 +395,27 @@ DocumentImpl::~DocumentImpl()
         m_decoder->deref();
         m_decoder = 0;
     }
+    
+    if (m_jsEditor) {
+        delete m_jsEditor;
+        m_jsEditor = 0;
+    }
 }
 
+void DocumentImpl::resetLinkColor()
+{
+    m_linkColor = QColor(0, 0, 238);
+}
+
+void DocumentImpl::resetVisitedLinkColor()
+{
+    m_visitedLinkColor = QColor(85, 26, 139);    
+}
+
+void DocumentImpl::resetActiveLinkColor()
+{
+    m_activeLinkColor.setNamedColor(QString("red"));
+}
 
 DocumentTypeImpl *DocumentImpl::doctype() const
 {
@@ -425,12 +467,26 @@ ProcessingInstructionImpl *DocumentImpl::createProcessingInstruction ( const DOM
 
 Attr DocumentImpl::createAttribute( NodeImpl::Id id )
 {
-    return new AttrImpl(0, docPtr(), new AttributeImpl(id, DOMString("").implementation()));
+    // Assume this is an HTML attribute, since createAttribute isn't namespace-aware.  There's no harm to XML
+    // documents if we're wrong.
+    return new AttrImpl(0, docPtr(), new HTMLAttributeImpl(id, DOMString("").implementation()));
 }
 
 EntityReferenceImpl *DocumentImpl::createEntityReference ( const DOMString &name )
 {
     return new EntityReferenceImpl(docPtr(), name.implementation());
+}
+
+EditingTextImpl *DocumentImpl::createEditingTextNode(const DOMString &text)
+{
+    return new EditingTextImpl(docPtr(), text);
+}
+
+CSSStyleDeclarationImpl *DocumentImpl::createCSSStyleDeclaration()
+{
+    QPtrList<CSSProperty> *propList = new QPtrList<CSSProperty>;
+    propList->setAutoDelete(true);
+    return new CSSStyleDeclarationImpl(0, propList);
 }
 
 NodeImpl *DocumentImpl::importNode(NodeImpl *importedNode, bool deep, int &exceptioncode)
@@ -927,23 +983,24 @@ RangeImpl *DocumentImpl::createRange()
     return new RangeImpl( docPtr() );
 }
 
-NodeIteratorImpl *DocumentImpl::createNodeIterator(NodeImpl *root, unsigned long whatToShow,
-                                                   NodeFilter &filter, bool entityReferenceExpansion,
-                                                   int &exceptioncode)
+NodeIteratorImpl *DocumentImpl::createNodeIterator(NodeImpl *root, unsigned long whatToShow, 
+    NodeFilterImpl *filter, bool expandEntityReferences, int &exceptioncode)
 {
     if (!root) {
         exceptioncode = DOMException::NOT_SUPPORTED_ERR;
         return 0;
     }
-
-    return new NodeIteratorImpl(root,whatToShow,filter,entityReferenceExpansion);
+    return new NodeIteratorImpl(root, whatToShow, filter, expandEntityReferences);
 }
 
-TreeWalkerImpl *DocumentImpl::createTreeWalker(Node /*root*/, unsigned long /*whatToShow*/, NodeFilter &/*filter*/,
-                                bool /*entityReferenceExpansion*/)
+TreeWalkerImpl *DocumentImpl::createTreeWalker(NodeImpl *root, unsigned long whatToShow, 
+    NodeFilterImpl *filter, bool expandEntityReferences, int &exceptioncode)
 {
-    // ###
-    return new TreeWalkerImpl;
+    if (!root) {
+        exceptioncode = DOMException::NOT_SUPPORTED_ERR;
+        return 0;
+    }
+    return new TreeWalkerImpl(root, whatToShow, filter, expandEntityReferences);
 }
 
 void DocumentImpl::setDocumentChanged(bool b)
@@ -976,7 +1033,7 @@ void DocumentImpl::recalcStyle( StyleChange change )
     if ( change == Force ) {
         RenderStyle* oldStyle = m_render->style();
         if ( oldStyle ) oldStyle->ref();
-        RenderStyle* _style = new RenderStyle();
+        RenderStyle* _style = new (m_renderArena) RenderStyle();
         _style->setDisplay(BLOCK);
         _style->setVisuallyOrdered( visuallyOrdered );
         // ### make the font stuff _really_ work!!!!
@@ -987,7 +1044,7 @@ void DocumentImpl::recalcStyle( StyleChange change )
 	fontDef.italic = f.italic();
 	fontDef.weight = f.weight();
 #if APPLE_CHANGES
-        bool printing = m_paintDevice->devType() == QInternal::Printer;
+        bool printing = m_paintDevice && (m_paintDevice->devType() == QInternal::Printer);
         fontDef.usePrinterFont = printing;
 #endif
         if (m_view) {
@@ -1020,7 +1077,7 @@ void DocumentImpl::recalcStyle( StyleChange change )
             change = ch;
 
         if (oldStyle)
-            oldStyle->deref();
+            oldStyle->deref(m_renderArena);
     }
 
     NodeImpl *n;
@@ -1065,11 +1122,9 @@ void DocumentImpl::updateDocumentsRendering()
     if (!changedDocuments)
         return;
 
-    while ( !changedDocuments->isEmpty() ) {
-        changedDocuments->first();
-        DocumentImpl* it = changedDocuments->take();
-        if (it->isDocumentChanged())
-            it->updateRendering();
+    while (DocumentImpl* doc = changedDocuments->take()) {
+        doc->m_docChanged = false;
+        doc->updateRendering();
     }
 }
 
@@ -1170,21 +1225,31 @@ void DocumentImpl::setVisuallyOrdered()
         m_render->style()->setVisuallyOrdered(true);
 }
 
-void DocumentImpl::setSelection(NodeImpl* s, int sp, NodeImpl* e, int ep)
+void DocumentImpl::updateSelection()
 {
-    if ( m_render )
-        static_cast<RenderCanvas*>(m_render)->setSelection(s->renderer(),sp,e->renderer(),ep);
-}
-
-void DocumentImpl::clearSelection()
-{
-    if ( m_render )
-        static_cast<RenderCanvas*>(m_render)->clearSelection();
+    if (!m_render)
+        return;
+    
+    RenderCanvas *canvas = static_cast<RenderCanvas*>(m_render);
+    Selection s = part()->selection();
+    if (s.isEmpty() || s.state() == Selection::CARET) {
+        canvas->clearSelection();
+    }
+    else {
+        RenderObject *startRenderer = s.start().node() ? s.start().node()->renderer() : 0;
+        RenderObject *endRenderer = s.end().node() ? s.end().node()->renderer() : 0;
+        static_cast<RenderCanvas*>(m_render)->setSelection(startRenderer, s.start().offset(), endRenderer, s.end().offset());
+    }
 }
 
 Tokenizer *DocumentImpl::createTokenizer()
 {
     return new XMLTokenizer(docPtr(),m_view);
+}
+
+XMLHandler* DocumentImpl::createTokenHandler()
+{
+    return new XMLHandler(docPtr(), m_view);
 }
 
 void DocumentImpl::setPaintDevice( QPaintDevice *dev )
@@ -1209,8 +1274,9 @@ void DocumentImpl::open(  )
     connect(m_tokenizer,SIGNAL(finishedParsing()),this,SIGNAL(finishedParsing()));
     m_tokenizer->begin();
 
-    if (m_view && m_view->part()->jScript())
-        m_view->part()->jScript()->setSourceFile(m_url,"");
+    if (m_view && m_view->part()->jScript()) {
+        m_view->part()->jScript()->setSourceFile(m_url,""); //fixme
+    }
 }
 
 HTMLElementImpl* DocumentImpl::body()
@@ -1234,8 +1300,7 @@ HTMLElementImpl* DocumentImpl::body()
 void DocumentImpl::close()
 {
     // First fire the onload.
-    bool changingLocation = part() && (part()->d->m_scheduledRedirection == locationChangeScheduled || part()->d->m_scheduledRedirection == locationChangeScheduledDuringLoad);
-    bool doload = !parsing() && m_tokenizer && !m_processingLoadEvent && !changingLocation;
+    bool doload = !parsing() && m_tokenizer && !m_processingLoadEvent;
     
     bool wasNotRedirecting = !part() || part()->d->m_scheduledRedirection == noRedirectionScheduled || part()->d->m_scheduledRedirection == historyNavigationScheduled;
     
@@ -1247,6 +1312,10 @@ void DocumentImpl::close()
         m_tokenizer = 0;
         dispatchImageLoadEventsNow();
         body()->dispatchWindowEvent(EventImpl::LOAD_EVENT, false, false);
+#ifdef INSTRUMENT_LAYOUT_SCHEDULING
+        if (!ownerElement())
+            printf("onload fired at %d\n", elapsedTime());
+#endif
     }
     m_processingLoadEvent = false;
     
@@ -1256,18 +1325,13 @@ void DocumentImpl::close()
     
     bool isRedirectingSoon = view() && view()->part()->d->m_scheduledRedirection != noRedirectionScheduled && view()->part()->d->m_scheduledRedirection != historyNavigationScheduled && view()->part()->d->m_delayRedirect == 0;
     
-    if (doload && wasNotRedirecting && isRedirectingSoon && m_startTime.elapsed() < 1000) {
-        static int redirectCount = 0;
-        if (redirectCount++ % 4) {
-            // When redirecting over and over (e.g., i-bench), to avoid the appearance of complete inactivity,
-            // paint every fourth page.
-            // Just bail out. During the onload we were shifted to another page.
-            // i-Bench does this. When this happens don't bother painting or laying out.        
-            delete m_tokenizer;
-            m_tokenizer = 0;
-            view()->unscheduleRelayout();
-            return;
-        }
+    if (doload && wasNotRedirecting && isRedirectingSoon && m_startTime.elapsed() < cLayoutTimerDelay) {
+	// Just bail out. During the onload we were shifted to another page.
+	// i-Bench does this. When this happens don't bother painting or laying out.        
+	delete m_tokenizer;
+	m_tokenizer = 0;
+	view()->unscheduleRelayout();
+	return;
     }
     
     // The initial layout happens here.
@@ -1276,12 +1340,14 @@ void DocumentImpl::close()
     // Now do our painting/layout, but only if we aren't in a subframe or if we're in a subframe
     // that has been sized already.  Otherwise, our view size would be incorrect, so doing any 
     // layout/painting now would be pointless.
-    if (doload && (!ownerElement() || (ownerElement()->renderer() && !ownerElement()->renderer()->needsLayout()))) {
-        updateRendering();
-        
-        // Always do a layout after loading if needed.
-        if (renderer() && (!renderer()->firstChild() || renderer()->needsLayout()))
-            view()->layout();
+    if (doload) {
+        if (!ownerElement() || (ownerElement()->renderer() && !ownerElement()->renderer()->needsLayout())) {
+            updateRendering();
+            
+            // Always do a layout after loading if needed.
+            if (view() && renderer() && (!renderer()->firstChild() || renderer()->needsLayout()))
+                view()->layout();
+        }
 #if APPLE_CHANGES
         if (renderer() && KWQAccObjectCache::accessibilityEnabled())
             getOrCreateAccObjectCache()->postNotification(renderer(), "AXLoadComplete");
@@ -1308,6 +1374,39 @@ void DocumentImpl::closeInternal( bool checkTokenizer )
         m_view->part()->checkEmitLoadEvent();
 }
 
+void DocumentImpl::setParsing(bool b)
+{
+    m_bParsing = b;
+#ifdef INSTRUMENT_LAYOUT_SCHEDULING
+    if (!ownerElement() && !m_bParsing)
+        printf("Parsing turned off at %d\n", elapsedTime());
+#endif
+}
+
+bool DocumentImpl::shouldScheduleLayout()
+{
+    return renderer() && haveStylesheetsLoaded();
+}
+
+int DocumentImpl::minimumLayoutDelay()
+{
+    if (allDataReceived() && m_overMinimumLayoutThreshold)
+        return 0;
+    
+    int elapsed = m_startTime.elapsed();
+    m_overMinimumLayoutThreshold = elapsed > cLayoutScheduleThreshold;
+    
+    if (!allDataReceived()) // Always want the nearest multiple of the timer delay.
+        return cLayoutTimerDelay - elapsed % cLayoutTimerDelay;
+    // We'll want to schedule the timer to fire at the minimum layout threshold.
+    return kMax(0, cLayoutScheduleThreshold - elapsed);
+}
+
+int DocumentImpl::elapsedTime() const
+{
+    return m_startTime.elapsed();
+}
+
 void DocumentImpl::write( const DOMString &text )
 {
     write(text.string());
@@ -1331,10 +1430,41 @@ void DocumentImpl::writeln( const DOMString &text )
     write(DOMString("\n"));
 }
 
-void DocumentImpl::finishParsing (  )
+void DocumentImpl::finishParsing()
 {
-    if(m_tokenizer)
+    // Let the tokenizer go through as much data as it can.  There will be three possible outcomes after
+    // finish() is called:
+    // (1) All remaining data is parsed, document isn't loaded yet
+    // (2) All remaining data is parsed, document is loaded, tokenizer gets deleted
+    // (3) Data is still remaining to be parsed.
+    if (m_tokenizer)
         m_tokenizer->finish();
+
+    // Don't say we've really received all the data until we've given the tokenizer
+    // a chance to try to eat as much of the data as it can.
+    m_bAllDataReceived = true;
+
+    if (m_tokenizer) {
+        // Update layout *now* if possible.  If we don't have a tokenizer any more, we already updated
+        // layout because of the onload firing.
+        
+#ifdef INSTRUMENT_LAYOUT_SCHEDULING
+        if (!ownerElement())
+            printf("Received all data and parsed as much as possible at time: %d with delay until next layout of %d\n", elapsedTime(), minimumLayoutDelay());
+#endif
+
+        // We can update layout if:
+        // (a) we're an XML document or we're an HTML document and our body has been parsed (ensuring we'll have
+        // the background ready to paint)
+        // (b) our stylesheets are all loaded
+        // (c) we're over the minimum layout threshold
+        // (d) we are an iframe in a document that has flowed us already or we aren't an iframe at all
+        // (e) we actually need a layout
+        if ((!isHTMLDocument() || body()) && haveStylesheetsLoaded() && !minimumLayoutDelay() &&
+            (!ownerElement() || (ownerElement()->renderer() && !ownerElement()->renderer()->needsLayout())) &&
+            renderer() && renderer()->needsLayout())
+            updateLayout();
+    }
 }
 
 void DocumentImpl::clear()
@@ -1815,33 +1945,14 @@ NodeImpl::Id DocumentImpl::attrId(DOMStringImpl* _namespaceURI, DOMStringImpl *_
     }
 
     // now lets find out the namespace
+    Q_UINT16 ns = noNamespace;
     if (_namespaceURI) {
         DOMString nsU(_namespaceURI);
-        bool found = false;
-        // ### yeah, this is lame. use a dictionary / map instead
-        for (unsigned short ns = 0; ns < m_namespaceURICount; ++ns)
-            if (nsU == DOMString(m_namespaceURIs[ns])) {
-                id |= ns << 16;
-                found = true;
-                break;
-            }
-
-        if (!found && !readonly) {
-            // something new, add it
-            if (m_namespaceURICount >= m_namespaceURIAlloc) {
-                m_namespaceURIAlloc += 32;
-                DOMStringImpl **newURIs = new DOMStringImpl* [m_namespaceURIAlloc];
-                for (unsigned short i = 0; i < m_namespaceURICount; i++)
-                    newURIs[i] = m_namespaceURIs[i];
-                delete [] m_namespaceURIs;
-                m_namespaceURIs = newURIs;
-            }
-            m_namespaceURIs[m_namespaceURICount++] = _namespaceURI;
-            _namespaceURI->ref();
-            id |= m_namespaceURICount << 16;
-        }
+        int nsID = XmlNamespaceTable::getNamespaceID(nsU, readonly);
+        if (nsID != -1)
+            ns = (Q_UINT16)nsID;
     }
-
+    
     // Look in the m_attrNames array for the name
     // ### yeah, this is lame. use a dictionary / map instead
     DOMString nme(n.string());
@@ -1849,7 +1960,7 @@ NodeImpl::Id DocumentImpl::attrId(DOMStringImpl* _namespaceURI, DOMStringImpl *_
     if (htmlMode() != XHtml) nme = nme.upper();
     for (id = 0; id < m_attrNameCount; id++)
         if (DOMString(m_attrNames[id]) == nme)
-            return ATTR_LAST_ATTR+id;
+            return makeId(ns, ATTR_LAST_ATTR+id);
 
     // unknown
     if (readonly) return 0;
@@ -1872,14 +1983,14 @@ NodeImpl::Id DocumentImpl::attrId(DOMStringImpl* _namespaceURI, DOMStringImpl *_
     m_attrNames[id] = nme.implementation();
     m_attrNames[id]->ref();
 
-    return ATTR_LAST_ATTR+id;
+    return makeId(ns, ATTR_LAST_ATTR+id);
 }
 
 DOMString DocumentImpl::attrName(NodeImpl::Id _id) const
 {
     DOMString result;
-    if (_id >= ATTR_LAST_ATTR)
-        result = m_attrNames[_id-ATTR_LAST_ATTR];
+    if (localNamePart(_id) >= ATTR_LAST_ATTR)
+        result = m_attrNames[localNamePart(_id)-ATTR_LAST_ATTR];
     else
         result = getAttrName(_id);
 
@@ -1914,31 +2025,12 @@ NodeImpl::Id DocumentImpl::tagId(DOMStringImpl* _namespaceURI, DOMStringImpl *_n
     }
 
     // now lets find out the namespace
+    Q_UINT16 ns = noNamespace;
     if (_namespaceURI) {
         DOMString nsU(_namespaceURI);
-        bool found = false;
-        // ### yeah, this is lame. use a dictionary / map instead
-        for (unsigned short ns = 0; ns < m_namespaceURICount; ++ns)
-            if (nsU == DOMString(m_namespaceURIs[ns])) {
-                id |= ns << 16;
-                found = true;
-                break;
-            }
-
-        if (!found && !readonly) {
-            // something new, add it
-            if (m_namespaceURICount >= m_namespaceURIAlloc) {
-                m_namespaceURIAlloc += 32;
-                DOMStringImpl **newURIs = new DOMStringImpl* [m_namespaceURIAlloc];
-                for (unsigned short i = 0; i < m_namespaceURICount; i++)
-                    newURIs[i] = m_namespaceURIs[i];
-                delete [] m_namespaceURIs;
-                m_namespaceURIs = newURIs;
-            }
-            m_namespaceURIs[m_namespaceURICount++] = _namespaceURI;
-            _namespaceURI->ref();
-            id |= m_namespaceURICount << 16;
-        }
+        int nsID = XmlNamespaceTable::getNamespaceID(nsU, readonly);
+        if (nsID != -1)
+            ns = (Q_UINT16)nsID;
     }
 
     // Look in the m_elementNames array for the name
@@ -1948,7 +2040,7 @@ NodeImpl::Id DocumentImpl::tagId(DOMStringImpl* _namespaceURI, DOMStringImpl *_n
     if (htmlMode() != XHtml) nme = nme.upper();
     for (id = 0; id < m_elementNameCount; id++)
         if (DOMString(m_elementNames[id]) == nme)
-            return ID_LAST_TAG+id;
+            return makeId(ns, ID_LAST_TAG+id);
 
     // unknown
     if (readonly) return 0;
@@ -1971,13 +2063,13 @@ NodeImpl::Id DocumentImpl::tagId(DOMStringImpl* _namespaceURI, DOMStringImpl *_n
     m_elementNames[id] = nme.implementation();
     m_elementNames[id]->ref();
 
-    return ID_LAST_TAG+id;
+    return makeId(ns, ID_LAST_TAG+id);
 }
 
 DOMString DocumentImpl::tagName(NodeImpl::Id _id) const
 {
-    if (_id >= ID_LAST_TAG)
-        return m_elementNames[_id-ID_LAST_TAG];
+    if (localNamePart(_id) >= ID_LAST_TAG)
+        return m_elementNames[localNamePart(_id)-ID_LAST_TAG];
     else {
         // ### put them in a cache
         if (getDocument()->htmlMode() == DocumentImpl::XHtml)
@@ -1991,13 +2083,13 @@ DOMString DocumentImpl::tagName(NodeImpl::Id _id) const
 DOMStringImpl* DocumentImpl::namespaceURI(NodeImpl::Id _id) const
 {
     if (_id < ID_LAST_TAG)
-        return htmlMode() == XHtml ? m_namespaceURIs[0] : 0;
+        return htmlMode() == XHtml ? XmlNamespaceTable::getNamespaceURI(xhtmlNamespace).implementation() : 0;
 
     unsigned short ns = _id >> 16;
 
     if (!ns) return 0;
 
-    return m_namespaceURIs[ns-1];
+    return XmlNamespaceTable::getNamespaceURI(ns).implementation();
 }
 
 StyleSheetListImpl* DocumentImpl::styleSheets()
@@ -2014,16 +2106,18 @@ DocumentImpl::preferredStylesheetSet()
 DOMString 
 DocumentImpl::selectedStylesheetSet()
 {
-  return view()->part()->d->m_sheetUsed;
+  return view() ? view()->part()->d->m_sheetUsed : DOMString();
 }
 
 void 
 DocumentImpl::setSelectedStylesheetSet(const DOMString& aString)
 {
-  view()->part()->d->m_sheetUsed = aString.string();
-  updateStyleSelector();
-  if (renderer())
-    renderer()->repaint();
+  if (view()) {
+    view()->part()->d->m_sheetUsed = aString.string();
+    updateStyleSelector();
+    if (renderer())
+      renderer()->repaint();
+  }
 }
 
 // This method is called whenever a top-level stylesheet has finished loading.
@@ -2048,8 +2142,19 @@ void DocumentImpl::updateStyleSelector()
 
     m_styleSelectorDirty = true;
 #endif
-    if (renderer())
+
+#ifdef INSTRUMENT_LAYOUT_SCHEDULING
+    if (!ownerElement())
+        printf("Dirtying renderer from stylesheet load at time %d\n", elapsedTime());
+#endif
+
+    if (renderer()) {
         renderer()->setNeedsLayoutAndMinMaxRecalc();
+        if (allDataReceived() && view()->haveDelayedLayoutScheduled()) {
+            view()->unscheduleRelayout();
+            view()->scheduleRelayout();
+        }
+    }
 }
 
 
@@ -2141,12 +2246,7 @@ void DocumentImpl::recalcStyleSelector()
                     sheet = 0;
             }
         }
-        else if (n->isHTMLElement() && n->id() == ID_BODY) {
-                // <BODY> element (doesn't contain styles as such but vlink="..." and friends
-                // are treated as style declarations)
-            sheet = static_cast<HTMLBodyElementImpl*>(n)->sheet();
-        }
-            
+
         if (sheet) {
             sheet->ref();
             m_styleSheets->styleSheets.append(sheet);
@@ -2185,57 +2285,125 @@ void DocumentImpl::setHoverNode(NodeImpl* newHoverNode)
     }    
 }
 
-void DocumentImpl::setFocusNode(NodeImpl *newFocusNode)
+#if APPLE_CHANGES
+
+bool DocumentImpl::relinquishesEditingFocus(NodeImpl *node)
+{
+    assert(node);
+    assert(node->isContentEditable());
+
+    if (!part())
+        return true;
+    
+    NodeImpl *rootImpl = node->rootEditableElement();
+    Node root(rootImpl);
+    Range range(root, 0, root, rootImpl->childNodeCount());
+    return part()->shouldEndEditing(range);
+}
+
+bool DocumentImpl::acceptsEditingFocus(NodeImpl *node)
+{
+    assert(node);
+    assert(node->isContentEditable());
+
+    if (!part())
+        return true;
+
+    NodeImpl *rootImpl = node->rootEditableElement();
+    Node root(rootImpl);
+    Range range(root, 0, root, rootImpl->childNodeCount());
+    return part()->shouldBeginEditing(range);
+}
+
+#endif
+
+bool DocumentImpl::setFocusNode(NodeImpl *newFocusNode)
 {    
     // Make sure newFocusNode is actually in this document
     if (newFocusNode && (newFocusNode->getDocument() != this))
-        return;
+        return true;
 
-    if (m_focusNode != newFocusNode) {
-        NodeImpl *oldFocusNode = m_focusNode;
+    if (m_focusNode == newFocusNode)
+        return true;
+
+#if APPLE_CHANGES
+    if (m_focusNode && m_focusNode->isContentEditable() && !relinquishesEditingFocus(m_focusNode))
+        return false;
+#endif     
+       
+    bool focusChangeBlocked = false;
+    NodeImpl *oldFocusNode = m_focusNode;
+    m_focusNode = 0;
+
+    // Remove focus from the existing focus node (if any)
+    if (oldFocusNode) {
+        // This goes hand in hand with the Qt focus setting below.
+        if (!newFocusNode && getDocument()->view()) {
+            getDocument()->view()->setFocus();
+        }
+
+        if (oldFocusNode->active())
+            oldFocusNode->setActive(false);
+
+        oldFocusNode->setFocus(false);
+        oldFocusNode->dispatchHTMLEvent(EventImpl::BLUR_EVENT, false, false);
+        if (m_focusNode != 0) {
+            // handler shifted focus
+            focusChangeBlocked = true;
+            newFocusNode = 0;
+        }
+        oldFocusNode->dispatchUIEvent(EventImpl::DOMFOCUSOUT_EVENT);
+        if (m_focusNode != 0) {
+            // handler shifted focus
+            focusChangeBlocked = true;
+            newFocusNode = 0;
+        }
+        if ((oldFocusNode == this) && oldFocusNode->hasOneRef()) {
+            oldFocusNode->deref(); // deletes this
+            return true;
+        }
+        else {
+            oldFocusNode->deref();
+        }
+    }
+
+    if (newFocusNode) {
+#if APPLE_CHANGES            
+        if (newFocusNode->isContentEditable() && !acceptsEditingFocus(newFocusNode)) {
+            // delegate blocks focus change
+            focusChangeBlocked = true;
+            goto SetFocusNodeDone;
+        }
+#endif
         // Set focus on the new node
         m_focusNode = newFocusNode;
-        // Remove focus from the existing focus node (if any)
-        if (oldFocusNode) {
-            // This goes hand in hand with the Qt focus setting below.
-            if (!m_focusNode && getDocument()->view()) {
+        m_focusNode->ref();
+        m_focusNode->dispatchHTMLEvent(EventImpl::FOCUS_EVENT, false, false);
+        if (m_focusNode != newFocusNode) {
+            // handler shifted focus
+            focusChangeBlocked = true;
+            goto SetFocusNodeDone;
+        }
+        m_focusNode->dispatchUIEvent(EventImpl::DOMFOCUSIN_EVENT);
+        if (m_focusNode != newFocusNode) { 
+            // handler shifted focus
+            focusChangeBlocked = true;
+            goto SetFocusNodeDone;
+        }
+        m_focusNode->setFocus();
+        // eww, I suck. set the qt focus correctly
+        // ### find a better place in the code for this
+        if (getDocument()->view()) {
+            if (!m_focusNode->renderer() || !m_focusNode->renderer()->isWidget())
                 getDocument()->view()->setFocus();
-            }
-
-            if (oldFocusNode->active())
-                oldFocusNode->setActive(false);
-
-            oldFocusNode->setFocus(false);
-	    oldFocusNode->dispatchHTMLEvent(EventImpl::BLUR_EVENT,false,false);
-	    oldFocusNode->dispatchUIEvent(EventImpl::DOMFOCUSOUT_EVENT);
-            if ((oldFocusNode == this) && oldFocusNode->hasOneRef()) {
-                oldFocusNode->deref(); // deletes this
-                return;
-            }
-	    else {
-                oldFocusNode->deref();
-            }
+            else if (static_cast<RenderWidget*>(m_focusNode->renderer())->widget())
+                static_cast<RenderWidget*>(m_focusNode->renderer())->widget()->setFocus();
         }
-
-        if (m_focusNode) {
-            m_focusNode->ref();
-            m_focusNode->dispatchHTMLEvent(EventImpl::FOCUS_EVENT,false,false);
-            if (m_focusNode != newFocusNode) return;
-            m_focusNode->dispatchUIEvent(EventImpl::DOMFOCUSIN_EVENT);
-            if (m_focusNode != newFocusNode) return;
-            m_focusNode->setFocus();
-            // eww, I suck. set the qt focus correctly
-            // ### find a better place in the code for this
-            if (getDocument()->view()) {
-                if (!m_focusNode->renderer() || !m_focusNode->renderer()->isWidget())
-                    getDocument()->view()->setFocus();
-                else if (static_cast<RenderWidget*>(m_focusNode->renderer())->widget())
-                    static_cast<RenderWidget*>(m_focusNode->renderer())->widget()->setFocus();
-            }
-        }
-
-        updateRendering();
     }
+
+SetFocusNodeDone:
+    updateRendering();
+    return !focusChangeBlocked;
 }
 
 void DocumentImpl::setCSSTarget(NodeImpl* n)
@@ -2399,10 +2567,14 @@ bool DocumentImpl::hasWindowEventListener(int id)
 
 EventListener *DocumentImpl::createHTMLEventListener(QString code)
 {
-    return view()->part()->createHTMLEventListener(code);
+    if (part()) {
+	return part()->createHTMLEventListener(code);
+    } else {
+	return NULL;
+    }
 }
 
-void DocumentImpl::dispatchImageLoadEventSoon(RenderImage *image)
+void DocumentImpl::dispatchImageLoadEventSoon(HTMLImageLoader *image)
 {
     m_imageLoadEventDispatchSoonList.append(image);
     if (!m_imageLoadEventTimer) {
@@ -2410,7 +2582,7 @@ void DocumentImpl::dispatchImageLoadEventSoon(RenderImage *image)
     }
 }
 
-void DocumentImpl::removeImage(RenderImage *image)
+void DocumentImpl::removeImage(HTMLImageLoader* image)
 {
     // Remove instances of this image from both lists.
     // Use loops because we allow multiple instances to get into the lists.
@@ -2431,11 +2603,11 @@ void DocumentImpl::dispatchImageLoadEventsNow()
     
     m_imageLoadEventDispatchingList = m_imageLoadEventDispatchSoonList;
     m_imageLoadEventDispatchSoonList.clear();
-    for (QPtrListIterator<RenderImage> it(m_imageLoadEventDispatchingList); it.current(); ) {
-        RenderImage *image = it.current();
+    for (QPtrListIterator<HTMLImageLoader> it(m_imageLoadEventDispatchingList); it.current(); ) {
+        HTMLImageLoader* image = it.current();
         // Must advance iterator *before* dispatching call.
         // Otherwise, it might be advanced automatically if dispatching the call had a side effect
-        // of destroying the current RenderImage, and then we would advance past the *next* item,
+        // of destroying the current HTMLImageLoader, and then we would advance past the *next* item,
         // missing one altogether.
         ++it;
         image->dispatchLoadEvent();
@@ -2521,6 +2693,42 @@ bool DocumentImpl::isValidName(const DOMString &name)
             return false;
     }
     return true;
+}
+
+void DocumentImpl::addImageMap(HTMLMapElementImpl *imageMap)
+{
+    // Add the image map, unless there's already another with that name.
+    // "First map wins" is the rule other browsers seem to implement.
+    QString name = imageMap->getName().string();
+    if (!m_imageMapsByName.contains(name))
+        m_imageMapsByName.insert(name, imageMap);
+}
+
+void DocumentImpl::removeImageMap(HTMLMapElementImpl *imageMap)
+{
+    // Remove the image map by name.
+    // But don't remove some other image map that just happens to have the same name.
+    QString name = imageMap->getName().string();
+    QMapIterator<QString, HTMLMapElementImpl *> it = m_imageMapsByName.find(name);
+    if (it != m_imageMapsByName.end() && *it == imageMap)
+        m_imageMapsByName.remove(it);
+}
+
+HTMLMapElementImpl *DocumentImpl::getImageMap(const DOMString &URL) const
+{
+    if (URL.isNull()) {
+        return 0;
+    }
+
+    QString s = URL.string();
+    int hashPos = s.find('#');
+    if (hashPos >= 0)
+        s = s.mid(hashPos + 1);
+
+    QMapConstIterator<QString, HTMLMapElementImpl *> it = m_imageMapsByName.find(s);
+    if (it == m_imageMapsByName.end())
+        return 0;
+    return *it;
 }
 
 #if APPLE_CHANGES
@@ -2619,6 +2827,46 @@ DOMString DocumentImpl::toString() const
 #endif // APPLE_CHANGES
 
 // ----------------------------------------------------------------------------
+// Support for Javascript execCommand, and related methods
+
+JSEditor *DocumentImpl::jsEditor()
+{
+    if (!m_jsEditor)
+        m_jsEditor = new JSEditor(this);
+    return m_jsEditor;
+}
+
+bool DocumentImpl::execCommand(const DOMString &command, bool userInterface, const DOMString &value)
+{
+    return jsEditor()->execCommand(command, userInterface, value);
+}
+
+bool DocumentImpl::queryCommandEnabled(const DOMString &command)
+{
+    return jsEditor()->queryCommandEnabled(command);
+}
+
+bool DocumentImpl::queryCommandIndeterm(const DOMString &command)
+{
+    return jsEditor()->queryCommandIndeterm(command);
+}
+
+bool DocumentImpl::queryCommandState(const DOMString &command)
+{
+    return jsEditor()->queryCommandState(command);
+}
+
+bool DocumentImpl::queryCommandSupported(const DOMString &command)
+{
+    return jsEditor()->queryCommandSupported(command);
+}
+
+DOMString DocumentImpl::queryCommandValue(const DOMString &command)
+{
+    return jsEditor()->queryCommandValue(command);
+}
+
+// ----------------------------------------------------------------------------
 
 DocumentFragmentImpl::DocumentFragmentImpl(DocumentPtr *doc) : NodeBaseImpl(doc)
 {
@@ -2685,7 +2933,8 @@ DocumentTypeImpl::DocumentTypeImpl(DOMImplementationImpl *implementation, Docume
     : NodeImpl(doc), m_implementation(implementation),
       m_qualifiedName(qualifiedName), m_publicId(publicId), m_systemId(systemId)
 {
-    m_implementation->ref();
+    if (m_implementation)
+        m_implementation->ref();
 
     m_entities = 0;
     m_notations = 0;
@@ -2696,7 +2945,8 @@ DocumentTypeImpl::DocumentTypeImpl(DOMImplementationImpl *implementation, Docume
 
 DocumentTypeImpl::~DocumentTypeImpl()
 {
-    m_implementation->deref();
+    if (m_implementation)
+        m_implementation->deref();
     if (m_entities)
         m_entities->deref();
     if (m_notations)
@@ -2713,8 +2963,13 @@ void DocumentTypeImpl::copyFrom(const DocumentTypeImpl& other)
 
 DOMString DocumentTypeImpl::toString() const
 {
-    DOMString result = "<!DOCTYPE";
-    result += m_qualifiedName;
+    DOMString result;
+    if (m_qualifiedName.isEmpty()) {
+        return "";
+    } else {
+        result = "<!DOCTYPE ";
+        result += m_qualifiedName;
+    }
     if (!m_publicId.isEmpty()) {
 	result += " PUBLIC \"";
 	result += m_publicId;
@@ -2726,15 +2981,12 @@ DOMString DocumentTypeImpl::toString() const
 	result += m_systemId;
 	result += "\"";
     }
-
     if (!m_subset.isEmpty()) {
 	result += " [";
 	result += m_subset;
 	result += "]";
     }
-
     result += ">";
-
     return result;
 }
 

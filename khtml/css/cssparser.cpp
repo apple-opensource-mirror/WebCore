@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2003 Lars Knoll (knoll@kde.org)
  *
- * $Id: cssparser.cpp,v 1.55 2003/12/10 21:14:01 hyatt Exp $
+ * $Id: cssparser.cpp,v 1.74 2004/06/16 06:29:25 mjs Exp $
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -99,8 +99,10 @@ CSSParser::CSSParser( bool strictParsing )
     rule = 0;
     id = 0;
     important = false;
-    nonCSSHint = false;
     inParseShortHand = false;
+    
+    defaultNamespace = anyNamespace;
+    
     yy_start = 1;
 
 #if YYDEBUG > 0
@@ -125,10 +127,17 @@ CSSParser::~CSSParser()
 
 }
 
+void ParseString::lower()
+{
+    for (int i = 0; i < length; i++)
+        string[i] = QChar(string[i]).lower().unicode();
+}
+
 void CSSParser::parseSheet( CSSStyleSheetImpl *sheet, const DOMString &string )
 {
     styleElement = sheet;
-
+    defaultNamespace = anyNamespace; // Reset the default namespace.
+    
     int length = string.length() + 3;
     data = (unsigned short *)malloc( length *sizeof( unsigned short ) );
     memcpy( data, string.unicode(), string.length()*sizeof( unsigned short) );
@@ -187,11 +196,11 @@ CSSRuleImpl *CSSParser::parseRule( DOM::CSSStyleSheetImpl *sheet, const DOM::DOM
 }
 
 bool CSSParser::parseValue( DOM::CSSStyleDeclarationImpl *declaration, int _id, const DOM::DOMString &string,
-			    bool _important, bool _nonCSSHint )
+			    bool _important)
 {
 #ifdef CSS_DEBUG
     kdDebug( 6080 ) << "CSSParser::parseValue: id=" << _id << " important=" << _important
-		    << " nonCSSHint=" << _nonCSSHint << " value='" << string.string() << "'" << endl;
+		    << " value='" << string.string() << "'" << endl;
 #endif
 
     styleElement = declaration->stylesheet();
@@ -214,8 +223,7 @@ bool CSSParser::parseValue( DOM::CSSStyleDeclarationImpl *declaration, int _id, 
 
     id = _id;
     important = _important;
-    nonCSSHint = _nonCSSHint;
-
+    
     CSSParser *old = currentParser;
     currentParser = this;
     cssyyparse( this );
@@ -228,7 +236,7 @@ bool CSSParser::parseValue( DOM::CSSStyleDeclarationImpl *declaration, int _id, 
     if ( numParsedProperties ) {
 	ok = true;
 	for ( int i = 0; i < numParsedProperties; i++ ) {
-	    declaration->removeProperty(parsedProperties[i]->m_id, nonCSSHint);
+	    declaration->removeProperty(parsedProperties[i]->m_id);
 	    declaration->values()->append( parsedProperties[i] );
 	}
 	numParsedProperties = 0;
@@ -237,12 +245,10 @@ bool CSSParser::parseValue( DOM::CSSStyleDeclarationImpl *declaration, int _id, 
     return ok;
 }
 
-bool CSSParser::parseDeclaration( DOM::CSSStyleDeclarationImpl *declaration, const DOM::DOMString &string,
-				  bool _nonCSSHint )
+bool CSSParser::parseDeclaration( DOM::CSSStyleDeclarationImpl *declaration, const DOM::DOMString &string )
 {
 #ifdef CSS_DEBUG
-    kdDebug( 6080 ) << "CSSParser::parseDeclaration: nonCSSHint=" << nonCSSHint
-		    << " value='" << string.string() << "'" << endl;
+    kdDebug( 6080 ) << "CSSParser::parseDeclaration:value='" << string.string() << "'" << endl;
 #endif
 
     styleElement = declaration->stylesheet();
@@ -263,8 +269,6 @@ bool CSSParser::parseDeclaration( DOM::CSSStyleDeclarationImpl *declaration, con
     yytext = yy_c_buf_p = data;
     yy_hold_char = *yy_c_buf_p;
 
-    nonCSSHint = _nonCSSHint;
-
     CSSParser *old = currentParser;
     currentParser = this;
     cssyyparse( this );
@@ -277,7 +281,7 @@ bool CSSParser::parseDeclaration( DOM::CSSStyleDeclarationImpl *declaration, con
     if ( numParsedProperties ) {
 	ok = true;
 	for ( int i = 0; i < numParsedProperties; i++ ) {
-	    declaration->removeProperty(parsedProperties[i]->m_id, false);
+	    declaration->removeProperty(parsedProperties[i]->m_id);
 	    declaration->values()->append( parsedProperties[i] );
 	}
 	numParsedProperties = 0;
@@ -292,7 +296,6 @@ void CSSParser::addProperty( int propId, CSSValueImpl *value, bool important )
     prop->m_id = propId;
     prop->setValue( value );
     prop->m_bImportant = important;
-    prop->nonCSSHint = nonCSSHint;
 
     if ( numParsedProperties >= maxParsedProperties ) {
 	maxParsedProperties += 32;
@@ -510,9 +513,9 @@ bool CSSParser::parseValue( int propId, bool important )
 	    valid_primitive = true;
 	break;
 
-    case CSS_PROP_OVERFLOW:             // visible | hidden | scroll | auto | inherit
+    case CSS_PROP_OVERFLOW:             // visible | hidden | scroll | auto | marquee | overlay | inherit
 	if (id == CSS_VAL_VISIBLE || id == CSS_VAL_HIDDEN || id == CSS_VAL_SCROLL || id == CSS_VAL_AUTO ||
-            id == CSS_VAL_MARQUEE)
+            id == CSS_VAL_MARQUEE || id == CSS_VAL_OVERLAY)
 	    valid_primitive = true;
 	break;
 
@@ -696,7 +699,7 @@ bool CSSParser::parseValue( int propId, bool important )
 
     case CSS_PROP_BACKGROUND_POSITION_X:
     case CSS_PROP_BACKGROUND_POSITION_Y:
-	valid_primitive = validUnit( value, FPercent|FLength, strict&(!nonCSSHint) );
+	valid_primitive = validUnit( value, FPercent|FLength, strict );
 	break;
 
     case CSS_PROP_BORDER_SPACING: {
@@ -718,7 +721,7 @@ bool CSSParser::parseValue( int propId, bool important )
     }
     case CSS_PROP__KHTML_BORDER_HORIZONTAL_SPACING:
     case CSS_PROP__KHTML_BORDER_VERTICAL_SPACING:
-        valid_primitive = validUnit(value, FLength|FNonNeg, strict&(!nonCSSHint));
+        valid_primitive = validUnit(value, FLength|FNonNeg, strict);
         break;
     case CSS_PROP_SCROLLBAR_FACE_COLOR:         // IE5.5
     case CSS_PROP_SCROLLBAR_SHADOW_COLOR:       // IE5.5
@@ -748,7 +751,7 @@ bool CSSParser::parseValue( int propId, bool important )
             valid_primitive = true; // Always allow this, even when strict parsing is on,
                                     // since we use this in our UA sheets.
 	else if ( id >= CSS_VAL_AQUA && id <= CSS_VAL_WINDOWTEXT || id == CSS_VAL_MENU ||
-	     (id >= CSS_VAL_GREY && id < CSS_VAL__KHTML_TEXT && (nonCSSHint|!strict)) ) {
+	     (id >= CSS_VAL_GREY && id < CSS_VAL__KHTML_TEXT && !strict) ) {
 	    valid_primitive = true;
 	} else {
 	    parsedValue = parseColor();
@@ -801,7 +804,7 @@ bool CSSParser::parseValue( int propId, bool important )
 	if (id == CSS_VAL_THIN || id == CSS_VAL_MEDIUM || id == CSS_VAL_THICK)
 	    valid_primitive = true;
         else
-            valid_primitive = ( validUnit( value, FLength, strict&(!nonCSSHint) ) );
+            valid_primitive = ( validUnit( value, FLength, strict ) );
 	break;
 
     case CSS_PROP_LETTER_SPACING:       // normal | <length> | inherit
@@ -809,7 +812,7 @@ bool CSSParser::parseValue( int propId, bool important )
 	if ( id == CSS_VAL_NORMAL )
 	    valid_primitive = true;
 	else
-            valid_primitive = validUnit( value, FLength, strict&(!nonCSSHint) );
+            valid_primitive = validUnit( value, FLength, strict );
 	break;
 
     case CSS_PROP_TEXT_INDENT:          // <length> | <percentage> | inherit
@@ -817,19 +820,22 @@ bool CSSParser::parseValue( int propId, bool important )
     case CSS_PROP_PADDING_RIGHT:        //   Which is defined as
     case CSS_PROP_PADDING_BOTTOM:       //   <length> | <percentage>
     case CSS_PROP_PADDING_LEFT:         ////
-	valid_primitive = ( !id && validUnit( value, FLength|FPercent, strict&(!nonCSSHint) ) );
+	valid_primitive = ( !id && validUnit( value, FLength|FPercent, strict ) );
 	break;
 
     case CSS_PROP_MAX_HEIGHT:           // <length> | <percentage> | none | inherit
     case CSS_PROP_MAX_WIDTH:            // <length> | <percentage> | none | inherit
-	if ( id == CSS_VAL_NONE ) {
+	if (id == CSS_VAL_NONE || id == CSS_VAL_INTRINSIC || id == CSS_VAL_MIN_INTRINSIC) {
 	    valid_primitive = true;
 	    break;
 	}
 	/* nobreak */
     case CSS_PROP_MIN_HEIGHT:           // <length> | <percentage> | inherit
     case CSS_PROP_MIN_WIDTH:            // <length> | <percentage> | inherit
-    	valid_primitive = ( !id && validUnit( value, FLength|FPercent|FNonNeg, strict&(!nonCSSHint) ) );
+        if (id == CSS_VAL_INTRINSIC || id == CSS_VAL_MIN_INTRINSIC)
+            valid_primitive = true;
+        else
+            valid_primitive = ( !id && validUnit( value, FLength|FPercent|FNonNeg, strict ) );
 	break;
 
     case CSS_PROP_FONT_SIZE:
@@ -837,7 +843,7 @@ bool CSSParser::parseValue( int propId, bool important )
 	if (id >= CSS_VAL_XX_SMALL && id <= CSS_VAL_LARGER)
 	    valid_primitive = true;
 	else
-	    valid_primitive = ( validUnit( value, FLength|FPercent, strict&(!nonCSSHint) ) );
+	    valid_primitive = ( validUnit( value, FLength|FPercent, strict ) );
 	break;
 
     case CSS_PROP_FONT_STYLE:           // normal | italic | oblique | inherit
@@ -857,16 +863,16 @@ bool CSSParser::parseValue( int propId, bool important )
 	if ( id >= CSS_VAL_BASELINE && id <= CSS_VAL__KHTML_BASELINE_MIDDLE )
 	    valid_primitive = true;
 	else
-	    valid_primitive = ( !id && validUnit( value, FLength|FPercent, strict&(!nonCSSHint) ) );
+	    valid_primitive = ( !id && validUnit( value, FLength|FPercent, strict ) );
 	break;
 
     case CSS_PROP_HEIGHT:               // <length> | <percentage> | auto | inherit
     case CSS_PROP_WIDTH:                // <length> | <percentage> | auto | inherit
-	if ( id == CSS_VAL_AUTO )
+	if (id == CSS_VAL_AUTO || id == CSS_VAL_INTRINSIC || id == CSS_VAL_MIN_INTRINSIC)
 	    valid_primitive = true;
 	else
 	    // ### handle multilength case where we allow relative units
-	    valid_primitive = ( !id && validUnit( value, FLength|FPercent|FNonNeg, strict&(!nonCSSHint) ) );
+	    valid_primitive = ( !id && validUnit( value, FLength|FPercent|FNonNeg, strict ) );
 	break;
 
     case CSS_PROP_BOTTOM:               // <length> | <percentage> | auto | inherit
@@ -880,7 +886,7 @@ bool CSSParser::parseValue( int propId, bool important )
 	if ( id == CSS_VAL_AUTO )
 	    valid_primitive = true;
 	else
-	    valid_primitive = ( !id && validUnit( value, FLength|FPercent, strict&(!nonCSSHint) ) );
+	    valid_primitive = ( !id && validUnit( value, FLength|FPercent, strict ) );
 	break;
 
     case CSS_PROP_Z_INDEX:              // auto | <integer> | inherit
@@ -900,7 +906,7 @@ bool CSSParser::parseValue( int propId, bool important )
 	if ( id == CSS_VAL_NORMAL )
 	    valid_primitive = true;
 	else
-	    valid_primitive = ( !id && validUnit( value, FNumber|FLength|FPercent, strict&(!nonCSSHint) ) );
+	    valid_primitive = ( !id && validUnit( value, FNumber|FLength|FPercent, strict ) );
 	break;
 #if 0
 	// removed from CSS 2.1
@@ -978,8 +984,40 @@ bool CSSParser::parseValue( int propId, bool important )
 	break;
 
     /* CSS3 properties */
+    case CSS_PROP__KHTML_BINDING:
+#ifndef KHTML_NO_XBL
+        if (id == CSS_VAL_NONE)
+            valid_primitive = true;
+        else {
+            CSSValueListImpl* values = new CSSValueListImpl();
+            Value* val;
+            CSSValueImpl* parsedValue = 0;
+            while ((val = valueList->current())) {
+                if (val->unit == CSSPrimitiveValue::CSS_URI) {
+                    DOMString value = khtml::parseURL(domString(val->string));
+                    parsedValue = new CSSPrimitiveValueImpl(
+                                    DOMString(KURL(styleElement->baseURL().string(), value.string()).url()), 
+                                    CSSPrimitiveValue::CSS_URI);
+                } 
+                
+                if (parsedValue)
+                    values->append(parsedValue);
+                else
+                    break;
+                valueList->next();
+            }
+            if ( values->length() ) {
+                addProperty( propId, values, important );
+                valueList->next();
+                return true;
+            }
+            delete values;
+            return false;
+        }
+#endif
+        break;
     case CSS_PROP_OUTLINE_OFFSET:
-        valid_primitive = validUnit(value, FLength, strict&(!nonCSSHint));
+        valid_primitive = validUnit(value, FLength, strict);
         break;
     case CSS_PROP_TEXT_SHADOW: // CSS2 property, dropped in CSS2.1, back in CSS3, so treat as CSS3
         if (id == CSS_VAL_NONE)
@@ -1020,7 +1058,6 @@ bool CSSParser::parseValue( int propId, bool important )
     case CSS_PROP__KHTML_BOX_ORDINAL_GROUP:
         valid_primitive = validUnit(value, FInteger|FNonNeg, true);
         break;
-    
     case CSS_PROP__KHTML_MARQUEE: {
         const int properties[5] = { CSS_PROP__KHTML_MARQUEE_DIRECTION, CSS_PROP__KHTML_MARQUEE_INCREMENT,
                                     CSS_PROP__KHTML_MARQUEE_REPETITION,
@@ -1037,7 +1074,7 @@ bool CSSParser::parseValue( int propId, bool important )
         if (id == CSS_VAL_SMALL || id == CSS_VAL_LARGE || id == CSS_VAL_MEDIUM)
             valid_primitive = true;
         else
-            valid_primitive = validUnit(value, FLength|FPercent, strict&(!nonCSSHint));
+            valid_primitive = validUnit(value, FLength|FPercent, strict);
         break;
     case CSS_PROP__KHTML_MARQUEE_STYLE:
         if (id == CSS_VAL_NONE || id == CSS_VAL_SLIDE || id == CSS_VAL_SCROLL || id == CSS_VAL_ALTERNATE ||
@@ -1048,16 +1085,44 @@ bool CSSParser::parseValue( int propId, bool important )
         if (id == CSS_VAL_INFINITE)
             valid_primitive = true;
         else
-            valid_primitive = validUnit(value, FInteger|FNonNeg, strict&(!nonCSSHint));
+            valid_primitive = validUnit(value, FInteger|FNonNeg, strict);
         break;
     case CSS_PROP__KHTML_MARQUEE_SPEED:
         if (id == CSS_VAL_NORMAL || id == CSS_VAL_SLOW || id == CSS_VAL_FAST)
             valid_primitive = true;
         else
-            valid_primitive = validUnit(value, FTime|FInteger|FNonNeg, strict&(!nonCSSHint));
+            valid_primitive = validUnit(value, FTime|FInteger|FNonNeg, strict);
+        break;
+    case CSS_PROP__KHTML_USER_DRAG: // auto | none | element
+        if (id == CSS_VAL_AUTO || id == CSS_VAL_NONE || id == CSS_VAL_ELEMENT)
+            valid_primitive = true;
+        break;
+    case CSS_PROP__KHTML_USER_MODIFY:	// read-only | read-write
+        if (id == CSS_VAL_READ_ONLY || id == CSS_VAL_READ_WRITE)
+            valid_primitive = true;
+        break;
+    case CSS_PROP__KHTML_USER_SELECT: // auto | none | text
+        if (id == CSS_VAL_AUTO || id == CSS_VAL_NONE || id == CSS_VAL_TEXT)
+            valid_primitive = true;
+        break;
+    case CSS_PROP_TEXT_OVERFLOW: // clip | ellipsis
+        if (id == CSS_VAL_CLIP || id == CSS_VAL_ELLIPSIS)
+            valid_primitive = true;
         break;
     // End of CSS3 properties
-        
+
+#if APPLE_CHANGES
+    // Apple specific properties.  These will never be standardized and are purely to
+    // support custom WebKit-based Apple applications.
+    case CSS_PROP__APPLE_LINE_CLAMP:
+        valid_primitive = (!id && validUnit(value, FPercent, false));
+        break;
+    case CSS_PROP__APPLE_TEXT_SIZE_ADJUST:
+        if (id == CSS_VAL_AUTO || id == CSS_VAL_NONE)
+            valid_primitive = true;
+        break;
+#endif
+
 	/* shorthand properties */
     case CSS_PROP_BACKGROUND:
     	// ['background-color' || 'background-image' ||'background-repeat' ||
@@ -1371,10 +1436,11 @@ bool CSSParser::parseShape( int propId, bool important )
     int i = 0;
     Value *a = args->current();
     while ( a ) {
-	valid = validUnit( a, FLength, strict );
+	valid = a->id == CSS_VAL_AUTO || validUnit( a, FLength, strict );
 	if ( !valid )
 	    break;
-	CSSPrimitiveValueImpl *length =
+	CSSPrimitiveValueImpl *length = a->id == CSS_VAL_AUTO ?
+            new CSSPrimitiveValueImpl(CSS_VAL_AUTO) :
 	    new CSSPrimitiveValueImpl( a->fValue, (CSSPrimitiveValue::UnitTypes) a->unit );
 	if ( i == 0 )
 	    rect->setTop( length );
@@ -1565,7 +1631,7 @@ CSSValueListImpl *CSSParser::parseFontFamily()
             else if (nextValBreaksFont || !nextValIsFontName)
                 list->append(new CSSPrimitiveValueImpl(value->id));
             else
-                list->append(currFamily = new FontFamilyValueImpl(qString( value->string)));
+                list->append(currFamily = new FontFamilyValueImpl(qString(value->string)));
         }
         else if (value->unit == CSSPrimitiveValue::CSS_STRING) {
             // Strings never share in a family name.
@@ -1607,7 +1673,7 @@ CSSValueListImpl *CSSParser::parseFontFamily()
 }
 
 
-static bool parseColor(const QString &name, QRgb& rgb)
+bool CSSParser::parseColor(const QString &name, QRgb& rgb)
 {
     int len = name.length();
 
@@ -1659,12 +1725,12 @@ CSSPrimitiveValueImpl *CSSParser::parseColorFromValue(Value* value)
         value->fValue >= 0. && value->fValue < 1000000. ) {
         QString str;
         str.sprintf( "%06d", (int)(value->fValue+.5) );
-        if (!::parseColor( str, c ))
+        if (!CSSParser::parseColor( str, c ))
             return 0;
     } else if ( value->unit == CSSPrimitiveValue::CSS_RGBCOLOR ||
                 value->unit == CSSPrimitiveValue::CSS_IDENT ||
                 value->unit == CSSPrimitiveValue::CSS_DIMENSION ) {
-	if (!::parseColor( qString( value->string ), c))
+	if (!CSSParser::parseColor( qString( value->string ), c))
             return 0;
     }
     else if ( value->unit == Value::Function &&
@@ -1802,7 +1868,6 @@ struct ShadowParseContext {
     }
     
     CSSValueListImpl* values;
-    bool succeeded;
     CSSPrimitiveValueImpl* x;
     CSSPrimitiveValueImpl* y;
     CSSPrimitiveValueImpl* blur;
@@ -1815,7 +1880,7 @@ struct ShadowParseContext {
     bool allowBreak;
 };
 
-bool CSSParser::parseShadow( int propId, bool important )
+bool CSSParser::parseShadow(int propId, bool important)
 {
     ShadowParseContext context;
     Value* val;
@@ -1843,7 +1908,7 @@ bool CSSParser::parseShadow( int propId, bool important )
             // The only other type of value that's ok is a color value.
             CSSPrimitiveValueImpl* parsedColor = 0;
             bool isColor = (val->id >= CSS_VAL_AQUA && val->id <= CSS_VAL_WINDOWTEXT || val->id == CSS_VAL_MENU ||
-                            (val->id >= CSS_VAL_GREY && val->id <= CSS_VAL__KHTML_TEXT && (nonCSSHint|!strict)));
+                            (val->id >= CSS_VAL_GREY && val->id <= CSS_VAL__KHTML_TEXT && !strict));
             if (isColor) {
                 if (!context.allowColor)
                     return context.failed();
@@ -1899,7 +1964,7 @@ int DOM::CSSParser::lex( void *_yylval ) {
     qDebug("CSSTokenizer: got token %d: '%s'", token, token == END ? "" : QString( (QChar *)t, length ).latin1() );
 #endif
     switch( token ) {
-    case S:
+    case WHITESPACE:
     case SGML_CD:
     case INCLUDES:
     case DASHMATCH:
@@ -1921,6 +1986,7 @@ int DOM::CSSParser::lex( void *_yylval ) {
     case MEDIA_SYM:
     case FONT_FACE_SYM:
     case CHARSET_SYM:
+    case NAMESPACE_SYM:
 
     case IMPORTANT_SYM:
 	break;

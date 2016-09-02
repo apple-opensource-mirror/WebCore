@@ -3,6 +3,7 @@
  *
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -28,11 +29,41 @@
 #include "rendering/render_object.h"
 
 #include <qregion.h>
+#include <qmap.h>
+#include <qpixmap.h>
+
+namespace khtml {
+    class CachedImage;
+    class CachedObjectClient;
+}
 
 namespace DOM {
 
 class DOMString;
 
+class HTMLImageLoader: public khtml::CachedObjectClient {
+public:
+    HTMLImageLoader(ElementImpl* elt);
+    virtual ~HTMLImageLoader();
+
+    void updateFromElement();
+
+    void dispatchLoadEvent();
+
+    ElementImpl* element() const { return m_element; }
+    bool imageComplete() const { return m_imageComplete; }
+    khtml::CachedImage* image() const { return m_image; }
+
+    // CachedObjectClient API
+    virtual void notifyFinished(khtml::CachedObject *finishedObj);
+
+private:
+    ElementImpl* m_element;
+    khtml::CachedImage* m_image;
+    bool m_firedLoad : 1;
+    bool m_imageComplete : 1;
+};
+    
 class HTMLImageElementImpl
     : public HTMLElementImpl
 {
@@ -43,7 +74,8 @@ public:
 
     virtual Id id() const;
 
-    virtual void parseAttribute(AttributeImpl *);
+    virtual bool mapToEntry(NodeImpl::Id attr, MappedAttributeEntry& result) const;
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *);
 
     virtual void attach();
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
@@ -58,12 +90,22 @@ public:
     DOMString altText() const;
 
     DOMString imageMap() const { return usemap; }
+    
+    virtual bool isURLAttribute(AttributeImpl *attr) const;
 
+#if APPLE_CHANGES
+    QString compositeOperator() const { return _compositeOperator; }
+#endif
+    
 protected:
+    HTMLImageLoader m_imageLoader;
     DOMString usemap;
     bool ismap;
     QString oldIdAttr;
     QString oldNameAttr;
+#if APPLE_CHANGES
+    QString _compositeOperator;
+#endif
 };
 
 
@@ -80,7 +122,7 @@ public:
 
     virtual Id id() const;
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
 
     bool isDefault() const { return shape==Default; }
 
@@ -95,8 +137,7 @@ protected:
     khtml::Length* m_coords;
     int m_coordsLen;
     int lastw, lasth;
-    Shape shape  : 3;
-    bool nohref  : 1;
+    Shape shape;
 };
 
 
@@ -113,13 +154,13 @@ public:
 
     virtual DOMString getName() const { return name; }
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
 
     bool mapMouseEvent(int x_, int y_, int width_, int height_,
                        khtml::RenderObject::NodeInfo& info);
 private:
 
-    QString name;
+    DOMString name;
 };
 
 

@@ -125,6 +125,46 @@ void RenderFlow::addChild(RenderObject *newChild, RenderObject *beforeChild)
     return addChildToFlow(newChild, beforeChild);
 }
 
+void RenderFlow::extractLineBox(InlineFlowBox* box)
+{
+    m_lastLineBox = box->prevFlowBox();
+    if (box == m_firstLineBox)
+        m_firstLineBox = 0;
+    if (box->prevLineBox())
+        box->prevLineBox()->setNextLineBox(0);
+    box->setPreviousLineBox(0);
+    for (InlineRunBox* curr = box; curr; curr = curr->nextLineBox())
+        curr->setExtracted();
+}
+
+void RenderFlow::attachLineBox(InlineFlowBox* box)
+{
+    if (m_lastLineBox) {
+        m_lastLineBox->setNextLineBox(box);
+        box->setPreviousLineBox(m_lastLineBox);
+    }
+    else
+        m_firstLineBox = box;
+    InlineFlowBox* last = box;
+    for (InlineFlowBox* curr = box; curr; curr = curr->nextFlowBox()) {
+        curr->setExtracted(false);
+        last = curr;
+    }
+    m_lastLineBox = last;
+}
+
+void RenderFlow::removeLineBox(InlineFlowBox* box)
+{
+    if (box == m_firstLineBox)
+        m_firstLineBox = box->nextFlowBox();
+    if (box == m_lastLineBox)
+        m_lastLineBox = box->prevFlowBox();
+    if (box->nextLineBox())
+        box->nextLineBox()->setPreviousLineBox(box->prevLineBox());
+    if (box->prevLineBox())
+        box->prevLineBox()->setNextLineBox(box->nextLineBox());
+}
+
 void RenderFlow::deleteLineBoxes()
 {
     if (m_firstLineBox) {
@@ -142,11 +182,109 @@ void RenderFlow::deleteLineBoxes()
 
 void RenderFlow::detach()
 {
+    if (!documentBeingDestroyed() && m_firstLineBox && m_firstLineBox->parent()) {
+        for (InlineRunBox* box = m_firstLineBox; box; box = box->nextLineBox())
+            box->parent()->removeChild(box);
+    }
+
     deleteLineBoxes();
     RenderBox::detach();
 }
 
-InlineBox* RenderFlow::createInlineBox(bool makePlaceHolderBox, bool isRootLineBox)
+void RenderFlow::dirtyLinesFromChangedChild(RenderObject* child)
+{
+    if (!parent() || selfNeedsLayout() || isTable())
+        return;
+    
+    if (!isInline() && (!child->nextSibling() || !firstLineBox())) {
+        // An append onto the end of a block or we don't have any lines anyway.  
+        // In this case we don't have to dirty any specific lines.
+        static_cast<RenderBlock*>(this)->setLinesAppended();
+        return;
+    }
+    
+    // For an empty inline, go ahead and propagate the check up to our parent.
+    if (isInline() && !firstLineBox())
+        return parent()->dirtyLinesFromChangedChild(this);
+    
+    // Try to figure out which line box we belong in.  First try to find a previous
+    // line box by examining our siblings.  If we didn't find a line box, then use our 
+    // parent's first line box.
+    RootInlineBox* box = 0;
+    for (RenderObject* curr = child->previousSibling(); curr; curr = curr->previousSibling()) {
+        if (curr->isFloatingOrPositioned())
+            continue;
+        
+        if (curr->isReplaced()) {
+            InlineBox* wrapper = curr->inlineBoxWrapper();
+            if (wrapper)
+                box = wrapper->root();
+        }
+        else if (curr->isText()) {
+            InlineTextBox* textBox = static_cast<RenderText*>(curr)->lastTextBox();
+            if (textBox)
+                box = textBox->root();
+        }
+        else if (curr->isInlineFlow()) {
+            InlineRunBox* runBox = static_cast<RenderFlow*>(curr)->lastLineBox();
+            if (runBox)
+                box = runBox->root();
+        }
+        
+        if (box)
+            break;
+    }
+    if (!box)
+        box = lastLineBox()->root();
+
+    // If we found a line box, then dirty it.
+    if (box) {
+        box->markDirty();
+        if (child->isBR()) {
+            RootInlineBox* next = box->nextRootBox();
+            if (next)
+                next->markDirty();
+        }
+    }
+}
+
+short RenderFlow::lineHeight(bool firstLine, bool isRootLineBox) const
+{
+    if (firstLine) {
+        RenderStyle* s = style(firstLine);
+        Length lh = s->lineHeight();
+        if (lh.value < 0) {
+            if (s == style()) {
+                if (m_lineHeight == -1)
+                    m_lineHeight = RenderObject::lineHeight(false);
+                return m_lineHeight;
+            }
+            return s->fontMetrics().lineSpacing();
+	}
+        if (lh.isPercent())
+            return lh.minWidth(s->font().pixelSize());
+        return lh.value;
+    }
+
+    if (m_lineHeight == -1)
+        m_lineHeight = RenderObject::lineHeight(false);
+    return m_lineHeight;
+}
+
+void RenderFlow::dirtyLineBoxes(bool fullLayout, bool isRootLineBox)
+{
+    if (!isRootLineBox && isReplaced())
+        return RenderBox::dirtyLineBoxes(isRootLineBox);
+    
+    if (fullLayout)
+        deleteLineBoxes();
+    else {
+        for (InlineRunBox* curr = firstLineBox(); curr; curr = curr->nextLineBox())
+            curr->dirtyLineBoxes();
+    }
+}
+
+InlineBox* RenderFlow::createInlineBox(bool makePlaceHolderBox, bool isRootLineBox, bool isOnlyRun)
 {
     if (!isRootLineBox &&
 	(isReplaced() || makePlaceHolderBox))                     // Inline tables and inline blocks
@@ -169,18 +307,20 @@ InlineBox* RenderFlow::createInlineBox(bool makePlaceHolderBox, bool isRootLineB
     return flowBox;
 }
 
-void RenderFlow::paintLineBoxBackgroundBorder(QPainter *p, int _x, int _y,
-                                int _w, int _h, int _tx, int _ty, PaintAction paintAction)
+void RenderFlow::paintLineBoxBackgroundBorder(PaintInfo& i, int _tx, int _ty)
 {
+    if (!shouldPaintWithinRoot(i))
+        return;
+
     if (!firstLineBox())
         return;
-    
-    if (style()->visibility() == VISIBLE && paintAction == PaintActionForeground) {
+ 
+    if (style()->visibility() == VISIBLE && i.phase == PaintActionForeground) {
         // We can check the first box and last box and avoid painting if we don't
         // intersect.
         int yPos = _ty + firstLineBox()->yPos();
         int h = lastLineBox()->yPos() + lastLineBox()->height() - firstLineBox()->yPos();
-        if( (yPos >= _y + _h) || (yPos + h <= _y))
+        if( (yPos >= i.r.y() + i.r.height()) || (yPos + h <= i.r.y()))
             return;
 
         // See if our boxes intersect with the dirty rect.  If so, then we paint
@@ -190,30 +330,29 @@ void RenderFlow::paintLineBoxBackgroundBorder(QPainter *p, int _x, int _y,
         for (InlineRunBox* curr = firstLineBox(); curr; curr = curr->nextLineBox()) {
             yPos = _ty + curr->yPos();
             h = curr->height();
-            if ((yPos < _y + _h) && (yPos + h > _y))
-                curr->paintBackgroundAndBorder(p, _x, _y, _w, _h, _tx, _ty, xOffsetWithinLineBoxes);
+            if ((yPos < i.r.y() + i.r.height()) && (yPos + h > i.r.y()))
+                curr->paintBackgroundAndBorder(i, _tx, _ty, xOffsetWithinLineBoxes);
             xOffsetWithinLineBoxes += curr->width();
         }
     }
 }
 
-void RenderFlow::paintLineBoxDecorations(QPainter *p, int _x, int _y,
-                                         int _w, int _h, int _tx, int _ty, PaintAction paintAction)
+void RenderFlow::paintLineBoxDecorations(PaintInfo& i, int _tx, int _ty, bool paintedChildren)
 {
-    if (!firstLineBox())
+    if (!shouldPaintWithinRoot(i))
         return;
 
-    if (style()->visibility() == VISIBLE && paintAction == PaintActionForeground) {
-        // We only paint line box decorations in strict or almost strict mode.
-        // Otherwise we let the InlineTextBoxes paint their own decorations.
-        if (style()->htmlHacks())
-            return;
-        
+    // We only paint line box decorations in strict or almost strict mode.
+    // Otherwise we let the InlineTextBoxes paint their own decorations.
+    if (style()->htmlHacks() || !firstLineBox())
+        return;
+
+    if (style()->visibility() == VISIBLE && i.phase == PaintActionForeground) {
         // We can check the first box and last box and avoid painting if we don't
         // intersect.
         int yPos = _ty + firstLineBox()->yPos();;
         int h = lastLineBox()->yPos() + lastLineBox()->height() - firstLineBox()->yPos();
-        if( (yPos >= _y + _h) || (yPos + h <= _y))
+        if( (yPos >= i.r.y() + i.r.height()) || (yPos + h <= i.r.y()))
             return;
 
         // See if our boxes intersect with the dirty rect.  If so, then we paint
@@ -222,8 +361,8 @@ void RenderFlow::paintLineBoxDecorations(QPainter *p, int _x, int _y,
         for (InlineRunBox* curr = firstLineBox(); curr; curr = curr->nextLineBox()) {
             yPos = _ty + curr->yPos();
             h = curr->height();
-            if ((yPos < _y + _h) && (yPos + h > _y))
-                curr->paintDecorations(p, _x, _y, _w, _h, _tx, _ty);
+            if ((yPos < i.r.y() + i.r.height()) && (yPos + h > i.r.y()))
+                curr->paintDecorations(i, _tx, _ty, paintedChildren);
         }
     }
 }
@@ -242,13 +381,9 @@ QRect RenderFlow::getAbsoluteRepaintRect()
         int ow = style() ? style()->outlineSize() : 0;
         if (isCompact())
             left -= m_x;
-#ifdef INCREMENTAL_REPAINTING
         if (style()->position() == RELATIVE && m_layer)
             m_layer->relativePositionOffset(left, top);
-#else
-        if (style()->position() == RELATIVE)
-            relativePositionOffset(left, top);
-#endif
+
         QRect r(-ow+left, -ow+top, width()+ow*2, height()+ow*2);
         containingBlock()->computeAbsoluteRepaintRect(r);
         if (ow) {
@@ -285,7 +420,7 @@ int
 RenderFlow::lowestPosition(bool includeOverflowInterior, bool includeSelf) const
 {
     int bottom = RenderBox::lowestPosition(includeOverflowInterior, includeSelf);
-    if (!includeOverflowInterior && style()->hidesOverflow())
+    if (!includeOverflowInterior && hasOverflowClip())
         return bottom;
 
     // FIXME: Come up with a way to use the layer tree to avoid visiting all the kids.
@@ -305,7 +440,7 @@ RenderFlow::lowestPosition(bool includeOverflowInterior, bool includeSelf) const
 int RenderFlow::rightmostPosition(bool includeOverflowInterior, bool includeSelf) const
 {
     int right = RenderBox::rightmostPosition(includeOverflowInterior, includeSelf);
-    if (!includeOverflowInterior && style()->hidesOverflow())
+    if (!includeOverflowInterior && hasOverflowClip())
         return right;
 
     // FIXME: Come up with a way to use the layer tree to avoid visiting all the kids.
@@ -325,7 +460,7 @@ int RenderFlow::rightmostPosition(bool includeOverflowInterior, bool includeSelf
 int RenderFlow::leftmostPosition(bool includeOverflowInterior, bool includeSelf) const
 {
     int left = RenderBox::leftmostPosition(includeOverflowInterior, includeSelf);
-    if (!includeOverflowInterior && style()->hidesOverflow())
+    if (!includeOverflowInterior && hasOverflowClip())
         return left;
     
     // FIXME: Come up with a way to use the layer tree to avoid visiting all the kids.
@@ -342,3 +477,51 @@ int RenderFlow::leftmostPosition(bool includeOverflowInterior, bool includeSelf)
     return left;
 }
 
+void RenderFlow::caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height)
+{
+    if (firstChild() || style()->display() == INLINE) {
+        // Do the normal calculation
+        RenderBox::caretPos(offset, override, _x, _y, width, height);
+        return;
+    }
+
+    // This is a special case:
+    // The element is not an inline element, and it's empty. So we have to
+    // calculate a fake position to indicate where objects are to be inserted.
+    
+    // EDIT FIXME: this does neither take into regard :first-line nor :first-letter
+    // However, as soon as some content is entered, the line boxes will be
+    // constructed properly and this kludge is not called any more. So only
+    // the caret size of an empty :first-line'd block is wrong, but I think we
+    // can live with that.
+    RenderStyle *currentStyle = style(true);
+    //height = currentStyle->fontMetrics().height();
+    height = lineHeight(true);
+    width = 1;
+
+    // EDIT FIXME: This needs to account for text direction
+    int w = this->width();
+    switch (currentStyle->textAlign()) {
+        case LEFT:
+        case KHTML_LEFT:
+        case TAAUTO:
+        case JUSTIFY:
+            _x = 0;
+            break;
+        case CENTER:
+        case KHTML_CENTER:
+            _x = w / 2;
+        break;
+        case RIGHT:
+        case KHTML_RIGHT:
+            _x = w;
+        break;
+    }
+    
+    _y = 0;
+    
+    int absx, absy;
+    absolutePosition(absx, absy, false);
+    _x += absx + paddingLeft() + borderLeft();
+    _y += absy + paddingTop() + borderTop();
+}

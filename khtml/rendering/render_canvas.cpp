@@ -2,7 +2,7 @@
  * This file is part of the HTML widget for KDE.
  *
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
- * Copyright (C) 2003 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -179,7 +179,7 @@ void RenderCanvas::layout()
 #endif
 
     layer()->setHeight(kMax(doch, m_height));
-    layer()->setWidth(kMax((short)docw, m_width));
+    layer()->setWidth(kMax(docw, m_width));
     
     setNeedsLayout(false);
 }
@@ -196,32 +196,21 @@ bool RenderCanvas::absolutePosition(int &xPos, int &yPos, bool f)
     return true;
 }
 
-void RenderCanvas::paint(QPainter *p, int _x, int _y, int _w, int _h, int _tx, int _ty,
-                       PaintAction paintAction)
-{
-    paintObject(p, _x, _y, _w, _h, _tx, _ty, paintAction);
-}
-
-void RenderCanvas::paintObject(QPainter *p, int _x, int _y,
-                             int _w, int _h, int _tx, int _ty, PaintAction paintAction)
+void RenderCanvas::paint(PaintInfo& i, int _tx, int _ty)
 {
 #ifdef DEBUG_LAYOUT
     kdDebug( 6040 ) << renderName() << "(RenderCanvas) " << this << " ::paintObject() w/h = (" << width() << "/" << height() << ")" << endl;
 #endif
     // 1. paint background, borders etc
-    if (paintAction == PaintActionElementBackground) {
-        paintBoxDecorations(p, _x, _y, _w, _h, _tx, _ty);
+    if (i.phase == PaintActionElementBackground) {
+        paintBoxDecorations(i, _tx, _ty);
         return;
     }
     
     // 2. paint contents
-    RenderObject *child = firstChild();
-    while(child != 0) {
-        if(!child->layer() && !child->isFloating()) {
-            child->paint(p, _x, _y, _w, _h, _tx, _ty, paintAction);
-        }
-        child = child->nextSibling();
-    }
+    for (RenderObject *child = firstChild(); child; child = child->nextSibling())
+        if (!child->layer() && !child->isFloating())
+            child->paint(i, _tx, _ty);
 
     if (m_view)
     {
@@ -230,17 +219,15 @@ void RenderCanvas::paintObject(QPainter *p, int _x, int _y,
     }
     
     // 3. paint floats.
-    if (paintAction == PaintActionFloat)
-        paintFloats(p, _x, _y, _w, _h, _tx, _ty);
+    if (i.phase == PaintActionFloat)
+        paintFloats(i, _tx, _ty);
         
 #ifdef BOX_DEBUG
-    outlineBox(p, _tx, _ty);
+    outlineBox(i.p, _tx, _ty);
 #endif
-
 }
 
-void RenderCanvas::paintBoxDecorations(QPainter *p,int _x, int _y,
-                                       int _w, int _h, int _tx, int _ty)
+void RenderCanvas::paintBoxDecorations(PaintInfo& i, int _tx, int _ty)
 {
     // Check to see if we are enclosed by a transparent layer.  If so, we cannot blit
     // when scrolling, and we need to use slow repaints.
@@ -257,10 +244,11 @@ void RenderCanvas::paintBoxDecorations(QPainter *p,int _x, int _y,
     // This code typically only executes if the root element's visibility has been set to hidden.
     // Only fill with a base color (e.g., white) if we're the root document, since iframes/frames with
     // no background in the child document should show the parent's background.
-    if (elt)
+    if (elt || view()->isTransparent())
         view()->useSlowRepaints(); // The parent must show behind the child.
     else
-        p->fillRect(_x,_y,_w,_h, view()->palette().active().color(QColorGroup::Base));
+        i.p->fillRect(i.r.x(), i.r.y(), i.r.width(), i.r.height(), 
+                    view()->palette().active().color(QColorGroup::Base));
 }
 
 void RenderCanvas::repaintViewRectangle(const QRect& ur, bool immediate)
@@ -391,7 +379,7 @@ void RenderCanvas::setSelection(RenderObject *s, int sp, RenderObject *e, int ep
     while (os && os != oldEnd)
     {
         RenderObject* no;
-        if ( !(no = os->firstChild()) ){
+        if (!(no = os->firstChild())) {
             if ( !(no = os->nextSibling()) )
             {
                 no = os->parent();
@@ -437,10 +425,11 @@ void RenderCanvas::setSelection(RenderObject *s, int sp, RenderObject *e, int ep
     
     while (o && o!=e)
     {
-        o->setSelectionState(SelectionInside);
+        if (o->style()->userSelect() != SELECT_NONE)
+            o->setSelectionState(SelectionInside);
 //      kdDebug( 6040 ) << "setting selected " << o << ", " << o->isText() << endl;
-        RenderObject* no;
-        if ( !(no = o->firstChild()) )
+        RenderObject* no = 0;
+        if (!(no = o->firstChild()))
             if ( !(no = o->nextSibling()) )
             {
                 no = o->parent();
@@ -456,9 +445,13 @@ void RenderCanvas::setSelection(RenderObject *s, int sp, RenderObject *e, int ep
             
         o=no;
     }
-    s->setSelectionState(SelectionStart);
-    e->setSelectionState(SelectionEnd);
-    if(s == e) s->setSelectionState(SelectionBoth);
+    
+    if (s->style()->userSelect() != SELECT_NONE)
+        s->setSelectionState(SelectionStart);
+    if (e->style()->userSelect() != SELECT_NONE)
+        e->setSelectionState(SelectionEnd);
+    if (s == e && s->style()->userSelect() != SELECT_NONE)
+        s->setSelectionState(SelectionBoth);
 
 #if APPLE_CHANGES
     if (!m_view)
@@ -578,10 +571,12 @@ void RenderCanvas::clearSelection()
     if (m_selectionEnd)
     {
         m_selectionEnd->setSelectionState(SelectionNone);
+        // check if selection is collapsed
+        if (m_selectionStart != m_selectionEnd || m_selectionStartPos != m_selectionEndPos)
 #if APPLE_CHANGES
-        if (doRepaint)
+            if (doRepaint)
 #endif
-            m_selectionEnd->repaint();
+                m_selectionEnd->repaint();
     }
 
     // set selection start & end to 0

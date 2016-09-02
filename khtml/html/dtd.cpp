@@ -61,6 +61,7 @@ const unsigned short DOM::tagPriority[] = {
    10, // ID_BODY
     0, // ID_BR
     1, // ID_BUTTON
+    0, // ID_CANVAS
     5, // ID_CAPTION
     5, // ID_CENTER
     1, // ID_CITE
@@ -71,8 +72,8 @@ const unsigned short DOM::tagPriority[] = {
     1, // ID_DEL
     1, // ID_DFN
     5, // ID_DIR
-    4, // ID_DIV
-    4, // ID_DL
+    5, // ID_DIV
+    5, // ID_DL
     3, // ID_DT
     1, // ID_EM
     0, // ID_EMBED
@@ -107,7 +108,7 @@ const unsigned short DOM::tagPriority[] = {
     3, // ID_MARQUEE
     5, // ID_MENU
     0, // ID_META
-    4, // ID_NOBR
+    5, // ID_NOBR
    10,// ID_NOEMBED
    10,// ID_NOFRAMES
     3, // ID_NOSCRIPT
@@ -167,6 +168,7 @@ const tagStatus DOM::endTag[] = {
     REQUIRED,  // ID_BODY
     FORBIDDEN, // ID_BR
     REQUIRED,  // ID_BUTTON
+    FORBIDDEN, // ID_CANVAS
     REQUIRED,  // ID_CAPTION
     REQUIRED,  // ID_CENTER
     REQUIRED,  // ID_CITE
@@ -278,6 +280,7 @@ static const ushort tag_list_0[] = {
     ID_ABBR,
     ID_ACRONYM,
     ID_A,
+    ID_CANVAS,
     ID_IMG,
     ID_APPLET,
     ID_OBJECT,
@@ -353,6 +356,7 @@ static const ushort tag_list_1[] = {
     ID_ABBR,
     ID_ACRONYM,
     ID_A,
+    ID_CANVAS,
     ID_IMG,
     ID_APPLET,
     ID_OBJECT,
@@ -476,6 +480,7 @@ static const ushort tag_list_4[] = {
     ID_ABBR,
     ID_ACRONYM,
     ID_A,
+    ID_CANVAS,
     ID_IMG,
     ID_APPLET,
     ID_OBJECT,
@@ -601,6 +606,7 @@ bool DOM::checkChild(ushort tagID, ushort childID)
     case ID_BR:
     case ID_AREA:
     case ID_LINK:
+    case ID_CANVAS:
     case ID_IMG:
     case ID_PARAM:
     case ID_HR:
@@ -763,60 +769,6 @@ void DOM::addForbidden(int tagId, ushort *forbiddenTags)
 {
     switch(tagId)
     {
-    case ID_A:
-        // we allow nested anchors. The innermost one wil be taken...
-        //forbiddenTags[ID_A]++;
-        break;
-    case ID_NOBR:
-        forbiddenTags[ID_PRE]++;
-        // fall through
-    case ID_PRE:
-    case ID_PLAINTEXT:
-    case ID_XMP:
-        //forbiddenTags[ID_IMG]++;
-        forbiddenTags[ID_OBJECT]++;
-        forbiddenTags[ID_EMBED]++;
-        forbiddenTags[ID_APPLET]++;
-        // why forbid them. We can deal with them in PRE
-        //forbiddenTags[ID_BIG]++;
-        //forbiddenTags[ID_SMALL]++;
-        //forbiddenTags[ID_SUB]++;
-        //forbiddenTags[ID_SUP]++;
-        forbiddenTags[ID_BASEFONT]++;
-        break;
-    case ID_DIR:
-    case ID_MENU:
-        forbiddenTags[ID_P]++;
-        forbiddenTags[ID_H1]++;
-        forbiddenTags[ID_H2]++;
-        forbiddenTags[ID_H3]++;
-        forbiddenTags[ID_H4]++;
-        forbiddenTags[ID_H5]++;
-        forbiddenTags[ID_H6]++;
-        forbiddenTags[ID_UL]++;
-        forbiddenTags[ID_OL]++;
-        forbiddenTags[ID_DIR]++;
-        forbiddenTags[ID_MENU]++;
-        forbiddenTags[ID_PRE]++;
-        forbiddenTags[ID_PLAINTEXT]++;
-        forbiddenTags[ID_XMP]++;
-        forbiddenTags[ID_DL]++;
-        forbiddenTags[ID_DIV]++;
-        forbiddenTags[ID_CENTER]++;
-        forbiddenTags[ID_NOSCRIPT]++;
-        forbiddenTags[ID_NOFRAMES]++;
-        forbiddenTags[ID_BLOCKQUOTE]++;
-        forbiddenTags[ID_FORM]++;
-        forbiddenTags[ID_ISINDEX]++;
-        forbiddenTags[ID_HR]++;
-        forbiddenTags[ID_TABLE]++;
-        forbiddenTags[ID_FIELDSET]++;
-        forbiddenTags[ID_ADDRESS]++;
-        break;
-    case ID_FORM:
-        // the parser deals with them in another way. helps supporting some broken html
-        //forbiddenTags[ID_FORM]++;
-        break;
     case ID_LABEL:
         forbiddenTags[ID_LABEL]++;
         break;
@@ -841,57 +793,6 @@ void DOM::removeForbidden(int tagId, ushort *forbiddenTags)
 {
     switch(tagId)
     {
-    case ID_A:
-        //forbiddenTags[ID_A]--;
-        break;
-    case ID_NOBR:
-        forbiddenTags[ID_PRE]--;
-        // fall through
-    case ID_PRE:
-    case ID_XMP:
-    case ID_PLAINTEXT:
-        //forbiddenTags[ID_IMG]--;
-        forbiddenTags[ID_OBJECT]--;
-        forbiddenTags[ID_EMBED]--;
-        forbiddenTags[ID_APPLET]--;
-        //forbiddenTags[ID_BIG]--;
-        //forbiddenTags[ID_SMALL]--;
-        //forbiddenTags[ID_SUB]--;
-        //forbiddenTags[ID_SUP]--;
-        forbiddenTags[ID_BASEFONT]--;
-        break;
-    case ID_DIR:
-    case ID_MENU:
-        forbiddenTags[ID_P]--;
-        forbiddenTags[ID_H1]--;
-        forbiddenTags[ID_H2]--;
-        forbiddenTags[ID_H3]--;
-        forbiddenTags[ID_H4]--;
-        forbiddenTags[ID_H5]--;
-        forbiddenTags[ID_H6]--;
-        forbiddenTags[ID_UL]--;
-        forbiddenTags[ID_OL]--;
-        forbiddenTags[ID_DIR]--;
-        forbiddenTags[ID_MENU]--;
-        forbiddenTags[ID_PRE]--;
-        forbiddenTags[ID_PLAINTEXT]--;
-        forbiddenTags[ID_XMP]--;
-        forbiddenTags[ID_DL]--;
-        forbiddenTags[ID_DIV]--;
-        forbiddenTags[ID_CENTER]--;
-        forbiddenTags[ID_NOSCRIPT]--;
-        forbiddenTags[ID_NOFRAMES]--;
-        forbiddenTags[ID_BLOCKQUOTE]--;
-        forbiddenTags[ID_FORM]--;
-        forbiddenTags[ID_ISINDEX]--;
-        forbiddenTags[ID_HR]--;
-        forbiddenTags[ID_TABLE]--;
-        forbiddenTags[ID_FIELDSET]--;
-        forbiddenTags[ID_ADDRESS]--;
-        break;
-    case ID_FORM:
-        //forbiddenTags[ID_FORM]--;
-        break;
     case ID_LABEL:
         forbiddenTags[ID_LABEL]--;
         break;

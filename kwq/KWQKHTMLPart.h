@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2004 Apple Computer, Inc.  All rights reserved.
+ * Copyright (C) 2003 Apple Computer, Inc.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -41,8 +41,10 @@
 #include <JavaScriptCore/runtime.h>
 
 #include "KWQDict.h"
+#include "KWQClipboard.h"
 
 class KHTMLPartPrivate;
+class KWQClipboard;
 class KWQWindowWidget;
 
 namespace khtml {
@@ -56,31 +58,46 @@ namespace KJS {
 }
 
 #ifdef __OBJC__
+
+// Avoid clashes with KJS::DOMElement in KHTML code.
+@class DOMElement;
+typedef DOMElement ObjCDOMElement;
+
+@class KWQPageState;
+@class NSArray;
 @class NSAttributedString;
+@class NSColor;
 @class NSEvent;
 @class NSFileWrapper;
+@class NSFont;
+@class NSImage;
+@class NSMutableDictionary;
 @class NSResponder;
+@class NSString;
 @class NSView;
 @class WebCoreBridge;
-@class KWQPageState;
-@class NSString;
-@class NSArray;
-@class NSMutableDictionary;
-@class WebCoreDOMElement;
-@class NSColor;
+@class WebScriptObject;
+
 #else
+
+// Avoid clashes with KJS::DOMElement in KHTML code.
+class ObjCDOMElement;
+
+class KWQPageState;
+class NSArray;
 class NSAttributedString;
+class NSColor;
 class NSEvent;
 class NSFileWrapper;
+class NSFont;
+class NSImage;
+class NSMutableDictionary;
 class NSResponder;
+class NSString;
 class NSView;
 class WebCoreBridge;
-class KWQPageState;
-class NSString;
-class NSArray;
-class NSMutableDictionary;
-class WebCoreDOMElement;
-class NSColor;
+class WebScriptObject;
+
 #endif
 
 enum KWQSelectionDirection {
@@ -166,13 +183,7 @@ public:
     void runJavaScriptAlert(const QString &message);
     bool runJavaScriptConfirm(const QString &message);
     bool runJavaScriptPrompt(const QString &message, const QString &defaultValue, QString &result);
-    bool locationbarVisible();
-    bool menubarVisible();
-    bool personalbarVisible();
-    bool scrollbarsVisible();
-    bool statusbarVisible();
-    bool toolbarVisible();
-
+    void KWQKHTMLPart::addMessageToConsole(const QString &message,  unsigned int lineNumber, const QString &sourceID);
     using KHTMLPart::xmlDocImpl;
     khtml::RenderObject *renderer();
     void forceLayout();
@@ -180,13 +191,13 @@ public:
     void sendResizeEvent();
     void sendScrollEvent();
     void paint(QPainter *, const QRect &);
-    void paintSelectionOnly(QPainter *p, const QRect &rect);
 
     void adjustPageHeight(float *newBottom, float oldTop, float oldBottom, float bottomLimit);
 
     void createEmptyDocument();
 
     static WebCoreBridge *bridgeForWidget(const QWidget *);
+    static KWQKHTMLPart *partForWidget(const QWidget *);
     
     QString requestedURLString() const;
     QString incomingReferrer() const;
@@ -200,6 +211,11 @@ public:
     int selectionEndOffset() const;
 
     QRect selectionRect() const;
+    NSRect visibleSelectionRect() const;
+    NSImage *selectionImage() const;
+    NSImage *snapshotDragImage(DOM::Node node, NSRect *imageRect, NSRect *elementRect) const;
+
+    NSFont *fontForCurrentPosition() const;
 
     NSFileWrapper *fileWrapperForElement(DOM::ElementImpl *);
     NSAttributedString *attributedString(DOM::NodeImpl *startNode, int startOffset, DOM::NodeImpl *endNode, int endOffset);
@@ -213,6 +229,13 @@ public:
     void mouseMoved(NSEvent *);
     bool keyEvent(NSEvent *);
     bool lastEventIsMouseUp();
+
+    void dragSourceMovedTo(const QPoint &loc);
+    void dragSourceEndedAt(const QPoint &loc);
+
+    bool tryCut();
+    bool tryCopy();
+    bool tryPaste();
 
     bool sendContextMenuEvent(NSEvent *);
 
@@ -239,6 +262,8 @@ public:
 
     KWQWindowWidget *topLevelWidget();
     
+    QString overrideMediaType();
+    
     void setMediaType(const QString &);
 
     void setUsesInactiveTextBackgroundColor(bool u) { _usesInactiveTextBackgroundColor = u; }
@@ -258,14 +283,36 @@ public:
 
     void didTellBridgeAboutLoad(const QString &urlString);
     bool haveToldBridgeAboutLoad(const QString &urlString);
-    void print();
 
+    KJS::Bindings::Instance *getEmbedInstanceForView (NSView *aView);
     KJS::Bindings::Instance *getAppletInstanceForView (NSView *aView);
     void addPluginRootObject(const KJS::Bindings::RootObject *root);
     void cleanupPluginRootObjects();
     
-    bool canGoBackOrForward(int distance) const;
+    void registerCommandForUndo(const khtml::EditCommand &);
+    void registerCommandForRedo(const khtml::EditCommand &);
+    void clearUndoRedoOperations();
+    bool interceptEditingKeyEvent();
+    void issueUndoCommand();
+    void issueRedoCommand();
+    void issueCutCommand();
+    void issueCopyCommand();
+    void issuePasteCommand();
+    void respondToChangedSelection();
+    void respondToChangedContents();
+    bool isContentEditable() const;
+    bool shouldBeginEditing(const DOM::Range &) const;
+    bool shouldEndEditing(const DOM::Range &) const;
+
+    KJS::Bindings::RootObject *bindingRootObject();
     
+    WebScriptObject *windowScriptObject();
+    
+    void partClearedInBegin();
+    
+    // Implementation of CSS property -khtml-user-drag == auto
+    bool shouldDragAutoNode(DOM::NodeImpl*) const;
+
 private:
     virtual void khtmlMousePressEvent(khtml::MousePressEvent *);
     virtual void khtmlMouseDoubleClickEvent(khtml::MouseDoubleClickEvent *);
@@ -287,6 +334,14 @@ private:
     static KWQKHTMLPart *partForNode(DOM::NodeImpl *);
     static NSView *documentViewForNode(DOM::NodeImpl *);
     
+    bool dragHysteresisExceeded(float dragLocationX, float dragLocationY) const;
+    bool dispatchCPPEvent(int eventId, KWQClipboard::AccessPolicy policy);
+    bool dispatchDragSrcEvent(int eventId, const QPoint &loc) const;
+
+    NSImage *imageFromRect(NSRect rect) const;
+
+    void freeClipboard();
+
     WebCoreBridge *_bridge;
     
     KWQSignal _started;
@@ -298,6 +353,10 @@ private:
     bool _sendingEventToSubview;
     bool _mouseDownMayStartDrag;
     bool _mouseDownMayStartSelect;
+    // in our window's coords
+    int _mouseDownWinX, _mouseDownWinY;
+    // in our view's coords
+    int _mouseDownX, _mouseDownY;
     
     static NSEvent *_currentEvent;
     static NSResponder *_firstResponderAtMouseDownTime;
@@ -305,7 +364,7 @@ private:
     KURL _submittedFormURL;
 
     NSMutableDictionary *_formValuesAboutToBeSubmitted;
-    WebCoreDOMElement *_formAboutToBeSubmitted;
+    ObjCDOMElement *_formAboutToBeSubmitted;
 
     static QPtrList<KWQKHTMLPart> &mutableInstances();
 
@@ -313,12 +372,27 @@ private:
 
     bool _usesInactiveTextBackgroundColor;
     bool _showsFirstResponder;
-
+    mutable bool _drawSelectionOnly;
+    bool _haveUndoRedoOperations;
+    
     QDict<char> urlsBridgeKnowsAbout;
 
     friend class KHTMLPart;
 
+    KJS::Bindings::RootObject *_bindingRoot;  // The root object used for objects
+                                            // bound outside the context of a plugin.
     QPtrList<KJS::Bindings::RootObject> rootObjects;
+    WebScriptObject *_windowScriptObject;
+    
+    DOM::Node _dragSrc;     // element that may be a drag source, for the current mouse gesture
+    bool _dragSrcIsLink;
+    bool _dragSrcIsImage;
+    bool _dragSrcInSelection;
+    bool _dragSrcMayBeDHTML, _dragSrcMayBeUA;   // Are DHTML and/or the UserAgent allowed to drag out?
+    bool _dragSrcIsDHTML;
+    KWQClipboard *_dragClipboard;   // used on only the source side of dragging
+    
+    mutable DOM::Node _elementToDraw;
 };
 
 inline KWQKHTMLPart *KWQ(KHTMLPart *part) { return static_cast<KWQKHTMLPart *>(part); }

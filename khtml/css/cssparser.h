@@ -3,7 +3,7 @@
  *
  * Copyright (C) 2003 Lars Knoll (knoll@kde.org)
  *
- * $Id: cssparser.h,v 1.16 2003/07/15 22:32:42 hyatt Exp $
+ * $Id: cssparser.h,v 1.25 2004/06/09 20:19:04 hyatt Exp $
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -24,7 +24,9 @@
 #define _CSS_cssparser_h_
 
 #include <qstring.h>
+#include <qcolor.h>
 #include <dom/dom_string.h>
+#include "xml/dom_atomicstring.h"
 
 namespace DOM {
     class StyleListImpl;
@@ -43,6 +45,8 @@ namespace DOM {
     struct ParseString {
 	unsigned short *string;
 	int length;
+        
+        void lower();
     };
 
     struct Value;
@@ -72,7 +76,10 @@ namespace DOM {
     static inline DOMString domString( const ParseString &ps ) {
 	return DOMString( (QChar *)ps.string, ps.length );
     }
-
+    static inline AtomicString atomicString( const ParseString &ps ) {
+	return AtomicString( ps.string, ps.length );
+    }
+    
     class ValueList {
     public:
 	ValueList();
@@ -92,7 +99,7 @@ namespace DOM {
 
         ~Function() { delete args; }
     };
-
+    
     class CSSParser
     {
     public:
@@ -102,9 +109,8 @@ namespace DOM {
 	void parseSheet( DOM::CSSStyleSheetImpl *sheet, const DOM::DOMString &string );
 	DOM::CSSRuleImpl *parseRule( DOM::CSSStyleSheetImpl *sheet, const DOM::DOMString &string );
 	bool parseValue( DOM::CSSStyleDeclarationImpl *decls, int id, const DOM::DOMString &string,
-			 bool _important, bool _nonCSSHint );
-	bool parseDeclaration( DOM::CSSStyleDeclarationImpl *decls, const DOM::DOMString &string,
-			       bool _nonCSSHint );
+			 bool _important );
+	bool parseDeclaration( DOM::CSSStyleDeclarationImpl *decls, const DOM::DOMString &string );
 
 	static CSSParser *current() { return currentParser; }
 
@@ -126,6 +132,8 @@ namespace DOM {
         CSSPrimitiveValueImpl *parseColor();
 	CSSPrimitiveValueImpl *parseColorFromValue(Value* val);
 
+        static bool parseColor(const QString &name, QRgb& rgb);
+
         // CSS3 Parsing Routines (for properties specific to CSS3)
         bool parseShadow(int propId, bool important);
         
@@ -133,7 +141,6 @@ namespace DOM {
     public:
 	bool strict;
 	bool important;
-	bool nonCSSHint;
 	int id;
 	DOM::StyleListImpl *styleElement;
 	DOM::CSSRuleImpl *rule;
@@ -143,6 +150,8 @@ namespace DOM {
 	int maxParsedProperties;
 	bool inParseShortHand;
 
+        Q_UINT16 defaultNamespace;
+        
 	static CSSParser *currentParser;
 
 	// tokenizer methods and data

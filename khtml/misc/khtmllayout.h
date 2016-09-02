@@ -41,7 +41,7 @@ namespace khtml
     /*
      * %multiLength and %Length
      */
-    enum LengthType { Variable = 0, Relative, Percent, Fixed, Static };
+    enum LengthType { Variable = 0, Relative, Percent, Fixed, Static, Intrinsic, MinIntrinsic };
     struct Length
     {
 	Length() { *((Q_UINT32 *)this) = 0; }
@@ -57,6 +57,8 @@ namespace khtml
         bool operator!=(const Length& o) const
             { return *((Q_UINT32 *)this) != *((Q_UINT32 *)&o); }
 
+
+	int length() const { return value; }
 
 	/*
 	 * works only for Fixed and Percent, returns -1 otherwise

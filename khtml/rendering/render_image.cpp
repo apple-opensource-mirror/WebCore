@@ -54,7 +54,6 @@ RenderImage::RenderImage(NodeImpl *_node)
 {
     image = 0;
     berrorPic = false;
-    loadEventSent = false;
     m_selectionState = SelectionNone;
 
     setIntrinsicWidth( 0 );
@@ -64,13 +63,13 @@ RenderImage::RenderImage(NodeImpl *_node)
 RenderImage::~RenderImage()
 {
     if(image) image->deref(this);
+    pix.decreaseUseCount();
 }
 
 void RenderImage::setStyle(RenderStyle* _style)
 {
     RenderReplaced::setStyle(_style);
     
-    setOverhangingContents(style()->height().isPercent());
     setShouldPaintBackgroundOrBorder(true);
 }
 
@@ -81,6 +80,15 @@ void RenderImage::setContentObject(CachedObject* co)
         image = static_cast<CachedImage*>(co);
         if (image) image->ref(this);
     }
+}
+
+void RenderImage::setImage(CachedImage* newImage)
+{
+    if (image)
+        image->deref(this);
+    image = newImage;
+    if (image)
+        image->ref(this);
 }
 
 void RenderImage::setPixmap( const QPixmap &p, const QRect& r, CachedImage *o)
@@ -155,7 +163,13 @@ void RenderImage::setPixmap( const QPixmap &p, const QRect& r, CachedImage *o)
     pix.stopAnimations();
 #endif
     
+#if APPLE_CHANGES
+    pix.decreaseUseCount();
+#endif
     pix = p;
+#if APPLE_CHANGES
+    p.increaseUseCount();
+#endif
 
     if (needlayout) {
         if (!selfNeedsLayout())
@@ -206,17 +220,30 @@ QColor RenderImage::selectionTintColor(QPainter *p) const
 }
 #endif
 
-void RenderImage::paintObject(QPainter *p, int /*_x*/, int /*_y*/, int /*_w*/, int /*_h*/, int _tx, int _ty, PaintAction paintAction)
+void RenderImage::paint(PaintInfo& i, int _tx, int _ty)
 {
-    if (paintAction == PaintActionOutline && style()->outlineWidth() && style()->visibility() == VISIBLE)
+    if (!shouldPaint(i, _tx, _ty)) return;
+
+    _tx += m_x;
+    _ty += m_y;
+        
+    if (shouldPaintBackgroundOrBorder() && i.phase != PaintActionOutline) 
+        paintBoxDecorations(i, _tx, _ty);
+
+    QPainter* p = i.p;
+    
+    if (i.phase == PaintActionOutline && style()->outlineWidth() && style()->visibility() == VISIBLE)
         paintOutline(p, _tx, _ty, width(), height(), style());
     
-    if (paintAction != PaintActionForeground && paintAction != PaintActionSelection)
+    if (i.phase != PaintActionForeground && i.phase != PaintActionSelection)
         return;
 
+    if (!shouldPaintWithinRoot(i))
+        return;
+        
 #if APPLE_CHANGES
     bool drawSelectionTint = selectionState() != SelectionNone;
-    if (paintAction == PaintActionSelection) {
+    if (i.phase == PaintActionSelection) {
         if (selectionState() == SelectionNone) {
             return;
         }
@@ -237,9 +264,9 @@ void RenderImage::paintObject(QPainter *p, int /*_x*/, int /*_y*/, int /*_w*/, i
     //kdDebug( 6040 ) << "    contents (" << contentWidth << "/" << contentHeight << ") border=" << borderLeft() << " padding=" << paddingLeft() << endl;
     if ( pix.isNull() || berrorPic)
     {
-        if (paintAction == PaintActionSelection) {
+        if (i.phase == PaintActionSelection)
             return;
-        }
+
         if(cWidth > 2 && cHeight > 2)
         {
 #if APPLE_CHANGES
@@ -317,6 +344,49 @@ void RenderImage::paintObject(QPainter *p, int /*_x*/, int /*_y*/, int /*_w*/, i
     }
     else if (image && !image->isTransparent())
     {
+#if APPLE_CHANGES
+        // Do the calculations to draw selections as tall as the line.
+        // Ignore the passed-in value for _ty.
+        // Use the bottom of the line above as the y position (if there is one, 
+        // otherwise use the top of this renderer's line) and the height of the line as the height. 
+        // This mimics Cocoa.
+        int selectionTop = -1;
+        int selectionHeight = -1;
+        int selectionLeft = -1;
+        int selectionRight = -1;
+        bool extendSelectionToLeft = false;
+        bool extendSelectionToRight = false;
+        if (drawSelectionTint) {
+            InlineBox *box = inlineBox();
+            if (box) {
+                // Get a value for selectionTop that is relative to the containing block.
+                // This value is used for determining left and right offset for the selection, if necessary,
+                // and for calculating the selection height.
+                if (box->root()->prevRootBox())
+                    selectionTop = box->root()->prevRootBox()->bottomOverflow();
+                else
+                    selectionTop = box->root()->topOverflow();
+
+                selectionHeight = box->root()->bottomOverflow() - selectionTop;
+
+                int absx, absy;
+                containingBlock()->absolutePosition(absx, absy);
+
+                if (selectionState() == SelectionInside && box->root()->firstLeafChild() == box) {
+                    extendSelectionToLeft = true;
+                    selectionLeft = absx + containingBlock()->leftOffset(selectionTop);
+                }
+                if (selectionState() == SelectionInside && box->root()->lastLeafChild() == box) {
+                    extendSelectionToRight = true;
+                    selectionRight = absx + containingBlock()->rightOffset(selectionTop);
+                }
+        
+                // Now make the selectionTop an absolute coordinate.
+                selectionTop += absy;
+            }
+        }
+#endif
+
         if ( (cWidth != intrinsicWidth() ||  cHeight != intrinsicHeight()) &&
              pix.width() > 0 && pix.height() > 0 && image->valid_rect().isValid())
         {
@@ -365,7 +435,16 @@ void RenderImage::paintObject(QPainter *p, int /*_x*/, int /*_y*/, int /*_w*/, i
             }
 #if APPLE_CHANGES
             if (drawSelectionTint) {
-                p->fillRect(_tx + leftBorder + leftPad, _ty + topBorder + topPad, tintSize.width(), tintSize.height(), QBrush(selectionTintColor(p)));
+                int left = _tx + leftBorder + leftPad;
+                int width = tintSize.width();
+                int top = selectionTop >= 0 ? selectionTop : _ty + topBorder + topPad;
+                int height = selectionHeight >= 0 ? selectionHeight : tintSize.height();
+                QBrush brush(selectionTintColor(p));
+                p->fillRect(left, top, width, height, brush);
+                if (extendSelectionToLeft)
+                    p->fillRect(selectionLeft, selectionTop, left - selectionLeft, selectionHeight, brush);
+                if (extendSelectionToRight)
+                    p->fillRect(left + width, selectionTop, selectionRight - (left + width), selectionHeight, brush);
             }
 #endif
         }
@@ -390,10 +469,25 @@ void RenderImage::paintObject(QPainter *p, int /*_x*/, int /*_y*/, int /*_w*/, i
 
 
 //             p->drawPixmap( offs.x(), y, pix, rect.x(), rect.y(), rect.width(), rect.height() );
-             p->drawPixmap(offs, pix, rect);
+             HTMLImageElementImpl* i = (element() && element()->id() == ID_IMG) ? static_cast<HTMLImageElementImpl*>(element()) : 0;
+             if (i && !i->compositeOperator().isNull()){
+                p->drawPixmap (offs, pix, rect, i->compositeOperator());
+             }
+             else {
+                 p->drawPixmap(offs, pix, rect);
+             }
 #if APPLE_CHANGES
              if (drawSelectionTint) {
-                 p->fillRect(offs.x() + rect.x(), offs.y() + rect.y(), rect.width(), rect.height(), QBrush(selectionTintColor(p)));
+                int left = offs.x() + rect.x();
+                int width = rect.width();
+                int top = selectionTop >= 0 ? selectionTop : offs.y() + rect.y();
+                int height = selectionHeight >= 0 ? selectionHeight : rect.height();
+                QBrush brush(selectionTintColor(p));
+                p->fillRect(left, top, width, height, brush);
+                if (extendSelectionToLeft)
+                    p->fillRect(selectionLeft, selectionTop, left - selectionLeft, selectionHeight, brush);
+                if (extendSelectionToRight)
+                    p->fillRect(left + width, selectionTop, selectionRight - (left + width), selectionHeight, brush);
              }
 #endif
         }
@@ -405,14 +499,12 @@ void RenderImage::layout()
     KHTMLAssert(needsLayout());
     KHTMLAssert( minMaxKnown() );
 
-#ifdef INCREMENTAL_REPAINTING
     QRect oldBounds;
     bool checkForRepaint = checkForRepaintDuringLayout();
     if (checkForRepaint)
         oldBounds = getAbsoluteRepaintRect();
-#endif
     
-    short oldwidth = m_width;
+    int oldwidth = m_width;
     int oldheight = m_height;
 
     // minimum height
@@ -443,69 +535,16 @@ void RenderImage::layout()
     if ( m_width != oldwidth || m_height != oldheight )
         resizeCache = QPixmap();
 
-#ifdef INCREMENTAL_REPAINTING
     if (checkForRepaint)
         repaintAfterLayoutIfNeeded(oldBounds, oldBounds);
-#endif
     
     setNeedsLayout(false);
-}
-
-void RenderImage::notifyFinished(CachedObject *finishedObj)
-{
-    if (image == finishedObj) {
-        NodeImpl *node = element();
-        if (node) {
-            DocumentImpl *document = node->getDocument();
-            if (document) {
-                document->dispatchImageLoadEventSoon(this);
-            }
-        }
-    }
-}
-
-void RenderImage::dispatchLoadEvent()
-{
-    if (!loadEventSent) {
-        NodeImpl *node = element();
-        if (node) {
-            loadEventSent = true;
-            if (image->isErrorImage()) {
-                node->dispatchHTMLEvent(EventImpl::ERROR_EVENT, false, false);
-            } else {
-                node->dispatchHTMLEvent(EventImpl::LOAD_EVENT, false, false);
-            }
-        }
-    }
-}
-
-#ifdef FIX_3109150
-void RenderImage::reload()
-{
-    khtml::DocLoader *loader = element()->getDocument()->docLoader();
-    KIO::CacheControl savedCachePolicy = loader->cachePolicy();
-    loader->setCachePolicy(KIO::CC_Reload);
-    updateFromElement();
-    loader->setCachePolicy(savedCachePolicy);
-}
-#endif
-
-void RenderImage::detach()
-{
-    NodeImpl *node = element();
-    if (node) {
-        DocumentImpl *document = node->getDocument();
-        if (document) {
-            document->removeImage(this);
-        }
-    }
-    RenderReplaced::detach();
 }
 
 HTMLMapElementImpl* RenderImage::imageMap()
 {
     HTMLImageElementImpl* i = element()->id() == ID_IMG ? static_cast<HTMLImageElementImpl*>(element()) : 0;
-    return i ? static_cast<HTMLDocumentImpl*>(i->getDocument())->getMap(i->imageMap()) : 0;
+    return i ? i->getDocument()->getImageMap(i->imageMap()) : 0;
 }
 
 bool RenderImage::nodeAtPoint(NodeInfo& info, int _x, int _y, int _tx, int _ty,
@@ -517,10 +556,8 @@ bool RenderImage::nodeAtPoint(NodeInfo& info, int _x, int _y, int _tx, int _ty,
         int tx = _tx + m_x;
         int ty = _ty + m_y;
         
-        HTMLImageElementImpl* i = element()->id() == ID_IMG ? static_cast<HTMLImageElementImpl*>(element()) : 0;
-        HTMLMapElementImpl* map;
-        if (i && i->getDocument()->isHTMLDocument() &&
-            (map = static_cast<HTMLDocumentImpl*>(i->getDocument())->getMap(i->imageMap()))) {
+        HTMLMapElementImpl* map = imageMap();
+        if (map) {
             // we're a client side image map
             inside = map->mapMouseEvent(_x - tx, _y - ty, contentWidth(), contentHeight(), info);
             info.setInnerNonSharedNode(element());
@@ -530,34 +567,8 @@ bool RenderImage::nodeAtPoint(NodeInfo& info, int _x, int _y, int _tx, int _ty,
     return inside;
 }
 
-void RenderImage::updateFromElement()
+void RenderImage::updateAltText()
 {
-    DOMString attr;
-    // Support images in OBJECT tags.
-    if (element()->id() == ID_OBJECT) {
-        attr = element()->getAttribute(ATTR_DATA);
-    } else {
-        attr = element()->getAttribute(ATTR_SRC);
-    }
-    
-    // Treat a lack of src or empty string for src as no image at all, not the page itself
-    // loaded as an image.
-    CachedImage *new_image;
-    if (attr.isEmpty()) {
-        new_image = NULL;
-    } else {
-        new_image = element()->getDocument()->docLoader()->requestImage(khtml::parseURL(attr));
-    }
-
-    if(new_image && new_image != image && (!style() || !style()->contentData())) {
-        loadEventSent = false;
-        CachedImage *old_image = image;
-        image = new_image;
-        image->ref(this);
-        berrorPic = image->isErrorImage();
-        if (old_image) old_image->deref(this);
-    }
-
     if (element()->id() == ID_INPUT)
         alt = static_cast<HTMLInputElementImpl*>(element())->altText();
     else if (element()->id() == ID_IMG)
@@ -570,9 +581,7 @@ bool RenderImage::isWidthSpecified() const
         case Fixed:
         case Percent:
             return true;
-        case Variable:
-        case Relative:
-        case Static:
+        default:
             return false;
     }
     assert(false);
@@ -585,16 +594,14 @@ bool RenderImage::isHeightSpecified() const
         case Fixed:
         case Percent:
             return true;
-        case Variable:
-        case Relative:
-        case Static:
+        default:
             return false;
     }
     assert(false);
     return false;
 }
 
-short RenderImage::calcReplacedWidth() const
+int RenderImage::calcReplacedWidth() const
 {
     // If height is specified and not width, preserve aspect ratio.
     if (isHeightSpecified() && !isWidthSpecified()) {

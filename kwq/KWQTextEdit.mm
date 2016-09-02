@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003 Apple Computer, Inc.  All rights reserved.
+ * Copyright (C) 2004 Apple Computer, Inc.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -27,6 +27,7 @@
 
 #import "KWQAssertions.h"
 #import "KWQExceptions.h"
+#import "KWQLineEdit.h"
 #import "KWQTextArea.h"
 
 QTextEdit::QTextEdit(QWidget *parent)
@@ -103,21 +104,12 @@ QTextEdit::WrapStyle QTextEdit::wordWrap() const
     return NoWrap;
 }
 
-
 void QTextEdit::setWordWrap(WrapStyle style)
 {
     KWQTextArea *textView = (KWQTextArea *)getView();
     KWQ_BLOCK_EXCEPTIONS;
     [textView setWordWrap:style == WidgetWidth];
     KWQ_UNBLOCK_EXCEPTIONS;
-}
-
-void QTextEdit::setTextFormat(TextFormat)
-{
-}
-
-void QTextEdit::setTabStopWidth(int)
-{
 }
 
 bool QTextEdit::isReadOnly() const
@@ -188,10 +180,8 @@ void QTextEdit::setAlignment(AlignmentFlags alignment)
 {
     KWQ_BLOCK_EXCEPTIONS;
 
-    ASSERT(alignment == AlignLeft || alignment == AlignRight);
     KWQTextArea *textArea = getView();
-
-    [textArea setAlignment:(alignment == AlignRight ? NSRightTextAlignment : NSLeftTextAlignment)];
+    [textArea setAlignment:KWQNSTextAlignmentForAlignmentFlags(alignment)];
 
     KWQ_UNBLOCK_EXCEPTIONS;
 }
@@ -218,8 +208,13 @@ QSize QTextEdit::sizeWithColumnsAndRows(int numColumns, int numRows) const
     return QSize((int)ceil(size.width), (int)ceil(size.height));
 }
 
+QWidget::FocusPolicy QTextEdit::focusPolicy() const
+{
+    FocusPolicy policy = QScrollView::focusPolicy();
+    return policy == TabFocus ? StrongFocus : policy;
+}
+
 bool QTextEdit::checksDescendantsForFocus() const
 {
     return true;
 }
-

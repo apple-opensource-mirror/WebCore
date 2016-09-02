@@ -2,7 +2,7 @@
  * This file is part of the DOM implementation for KDE.
  *
  * (C) 1999 Lars Knoll (knoll@kde.org)
- * Copyright (C) 2003 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -24,12 +24,20 @@
 #include "xml/dom_stringimpl.h"
 
 
-using namespace DOM;
+namespace DOM {
 
 
 DOMString::DOMString(const QChar *str, uint len)
 {
-    impl = new DOMStringImpl( str, len );
+    if (!str) {
+        impl = 0;
+        return;
+    }
+    
+    if (len == 0)
+        impl = DOMStringImpl::empty();
+    else
+        impl = new DOMStringImpl(str, len);
     impl->ref();
 }
 
@@ -39,8 +47,11 @@ DOMString::DOMString(const QString &str)
 	impl = 0;
 	return;
     }
-
-    impl = new DOMStringImpl( str.unicode(), str.length() );
+    
+    if (str.isEmpty())
+        impl = DOMStringImpl::empty();
+    else 
+        impl = new DOMStringImpl(str.unicode(), str.length());
     impl->ref();
 }
 
@@ -51,7 +62,11 @@ DOMString::DOMString(const char *str)
 	return;
     }
 
-    impl = new DOMStringImpl( str );
+    int l = strlen(str);
+    if (l == 0)
+        impl = DOMStringImpl::empty();
+    else
+        impl = new DOMStringImpl(str, l);
     impl->ref();
 }
 
@@ -65,11 +80,6 @@ DOMString::DOMString(const DOMString &other)
 {
     impl = other.impl;
     if(impl) impl->ref();
-}
-
-DOMString::~DOMString()
-{
-    if(impl) impl->deref();
 }
 
 DOMString &DOMString::operator =(const DOMString &other)
@@ -102,17 +112,15 @@ DOMString &DOMString::operator += (const DOMString &str)
     return *this;
 }
 
-DOMString DOMString::operator + (const DOMString &str)
+DOMString operator + (const DOMString &a, const DOMString &b)
 {
-    if(!impl) return str.copy();
-    if(str.impl)
-    {
-	DOMString s = copy();
-	s += str;
-	return s;
-    }
-
-    return copy();
+    if (a.isEmpty())
+        return b.copy();
+    if (b.isEmpty())
+        return a.copy();
+    DOMString c = a.copy();
+    c += b;
+    return c;
 }
 
 void DOMString::insert(DOMString str, uint pos)
@@ -210,7 +218,7 @@ int DOMString::toInt() const
 {
     if(!impl) return 0;
 
-    return QConstString(impl->s, impl->l).string().toInt();
+    return impl->toInt();
 }
 
 DOMString DOMString::copy() const
@@ -257,10 +265,18 @@ bool DOMString::isEmpty() const
     return (!impl || impl->l == 0);
 }
 
+khtml::Length* DOMString::toLengthArray(int& len) const 
+{ 
+    return impl ? impl->toLengthArray(len) : 0;
+}
+
 //-----------------------------------------------------------------------------
 
 bool DOM::operator==( const DOMString &a, const DOMString &b )
 {
+    if (a.impl == b.impl)
+        return true;
+    
     unsigned int l = a.length();
 
     if( l != b.length() ) return false;
@@ -298,4 +314,7 @@ bool DOM::operator==( const DOMString &a, const char *b )
         }
     }
     return *b == 0;
+}
+
+
 }

@@ -183,6 +183,34 @@ EventImpl::EventId EventImpl::typeToId(DOMString type)
 	return MOUSEMOVE_EVENT;
     else if (type == "mouseout")
 	return MOUSEOUT_EVENT;
+    else if (type == "onbeforecut")
+	return BEFORECUT_EVENT;
+    else if (type == "oncut")
+	return CUT_EVENT;
+    else if (type == "onbeforecopy")
+	return BEFORECOPY_EVENT;
+    else if (type == "oncopy")
+	return COPY_EVENT;
+    else if (type == "onbeforepaste")
+	return BEFOREPASTE_EVENT;
+    else if (type == "onpaste")
+	return PASTE_EVENT;
+    else if (type == "dragenter")
+	return DRAGENTER_EVENT;
+    else if (type == "dragover")
+	return DRAGOVER_EVENT;
+    else if (type == "dragleave")
+	return DRAGLEAVE_EVENT;
+    else if (type == "drop")
+	return DROP_EVENT;
+    else if (type == "dragstart")
+	return DRAGSTART_EVENT;
+    else if (type == "drag")
+	return DRAG_EVENT;
+    else if (type == "dragend")
+	return DRAGEND_EVENT;
+    else if (type == "selectstart")
+	return SELECTSTART_EVENT;
     else if (type == "DOMSubtreeModified")
 	return DOMSUBTREEMODIFIED_EVENT;
     else if (type == "DOMNodeInserted")
@@ -227,6 +255,12 @@ EventImpl::EventId EventImpl::typeToId(DOMString type)
 	return KEYDOWN_EVENT;
     else if (type == "keyup")
 	return KEYUP_EVENT;
+#if APPLE_CHANGES
+    else if (type == "search")
+	return SEARCH_EVENT;
+#endif
+    else if (type == "input")
+        return INPUT_EVENT;
     else if (type == "textInput")
 	return TEXTINPUT_EVENT;
     else if (type == "readystatechange")
@@ -257,6 +291,34 @@ DOMString EventImpl::idToType(EventImpl::EventId id)
 	    return "mousemove";
 	case MOUSEOUT_EVENT:
 	    return "mouseout";
+        case BEFORECUT_EVENT:
+            return "onbeforecut";
+	case CUT_EVENT:
+            return "oncut";
+	case BEFORECOPY_EVENT:
+            return "onbeforecopy";
+	case COPY_EVENT:
+            return "oncopy";
+	case BEFOREPASTE_EVENT:
+            return "onbeforepaste";
+	case PASTE_EVENT:
+            return "onpaste";
+	case DRAGENTER_EVENT:
+            return "dragenter";
+	case DRAGOVER_EVENT:
+            return "dragover";
+	case DRAGLEAVE_EVENT:
+            return "dragleave";
+	case DROP_EVENT:
+	    return "drop";
+	case DRAGSTART_EVENT:
+	    return "dragstart";
+	case DRAG_EVENT:
+	    return "drag";
+	case DRAGEND_EVENT:
+	    return "dragend";
+	case SELECTSTART_EVENT:
+	    return "selectstart";
 	case DOMSUBTREEMODIFIED_EVENT:
 	    return "DOMSubtreeModified";
 	case DOMNODEINSERTED_EVENT:
@@ -305,6 +367,12 @@ DOMString EventImpl::idToType(EventImpl::EventId id)
             return "keypress";
 	case TEXTINPUT_EVENT:
             return "textInput";
+#if APPLE_CHANGES
+        case SEARCH_EVENT:
+            return "search";
+#endif
+        case INPUT_EVENT:
+            return "input";
 	// khtml extensions
 	case KHTML_DBLCLICK_EVENT:
             return "dblclick";
@@ -342,6 +410,16 @@ bool EventImpl::isMutationEvent() const
 }
 
 bool EventImpl::isKeyboardEvent() const
+{
+    return false;
+}
+
+bool EventImpl::isDragEvent() const
+{
+    return false;
+}
+
+bool EventImpl::isClipboardEvent() const
 {
     return false;
 }
@@ -406,6 +484,7 @@ MouseEventImpl::MouseEventImpl()
     m_metaKey = false;
     m_button = 0;
     m_relatedTarget = 0;
+    m_clipboard = 0;
 }
 
 MouseEventImpl::MouseEventImpl(EventId _id,
@@ -422,7 +501,8 @@ MouseEventImpl::MouseEventImpl(EventId _id,
 			       bool shiftKeyArg,
 			       bool metaKeyArg,
 			       unsigned short buttonArg,
-			       NodeImpl *relatedTargetArg)
+			       NodeImpl *relatedTargetArg,
+                               ClipboardImpl *clipboardArg)
 		   : UIEventImpl(_id,canBubbleArg,cancelableArg,viewArg,detailArg)
 {
     m_screenX = screenXArg;
@@ -437,6 +517,9 @@ MouseEventImpl::MouseEventImpl(EventId _id,
     m_relatedTarget = relatedTargetArg;
     if (m_relatedTarget)
 	m_relatedTarget->ref();
+    m_clipboard = clipboardArg;
+    if (m_clipboard)
+	m_clipboard->ref();
     computeLayerPos();
 }
 
@@ -475,6 +558,8 @@ MouseEventImpl::~MouseEventImpl()
 {
     if (m_relatedTarget)
 	m_relatedTarget->deref();
+    if (m_clipboard)
+	m_clipboard->deref();
 }
 
 void MouseEventImpl::initMouseEvent(const DOMString &typeArg,
@@ -516,6 +601,14 @@ void MouseEventImpl::initMouseEvent(const DOMString &typeArg,
 bool MouseEventImpl::isMouseEvent() const
 {
     return true;
+}
+
+bool MouseEventImpl::isDragEvent() const
+{
+    return (m_id == EventImpl::DRAGENTER_EVENT || m_id == EventImpl::DRAGOVER_EVENT
+            || m_id == EventImpl::DRAGLEAVE_EVENT || m_id == EventImpl::DROP_EVENT 
+            || m_id == EventImpl::DRAGSTART_EVENT || m_id == EventImpl::DRAG_EVENT
+            || m_id == EventImpl::DRAGEND_EVENT);
 }
 
 //---------------------------------------------------------------------------------------------
@@ -747,6 +840,31 @@ bool MutationEventImpl::isMutationEvent() const
 
 // -----------------------------------------------------------------------------
 
+ClipboardEventImpl::ClipboardEventImpl()
+{
+    m_clipboard = 0;
+}
+
+ClipboardEventImpl::ClipboardEventImpl(EventId _id, bool canBubbleArg, bool cancelableArg, ClipboardImpl *clipboardArg)
+  : EventImpl(_id, canBubbleArg, cancelableArg), m_clipboard(clipboardArg)
+{
+      if (m_clipboard)
+          m_clipboard->ref();
+}
+
+ClipboardEventImpl::~ClipboardEventImpl()
+{
+    if (m_clipboard)
+        m_clipboard->deref();
+}
+
+bool ClipboardEventImpl::isClipboardEvent() const
+{
+    return true;
+}
+
+// -----------------------------------------------------------------------------
+
 RegisteredEventListener::RegisteredEventListener(EventImpl::EventId _id, EventListener *_listener, bool _useCapture)
 {
     id = _id;
@@ -764,4 +882,14 @@ bool RegisteredEventListener::operator==(const RegisteredEventListener &other)
     return (id == other.id &&
 	    listener == other.listener &&
 	    useCapture == other.useCapture);
+}
+
+// -----------------------------------------------------------------------------
+
+ClipboardImpl::ClipboardImpl()
+{
+}
+
+ClipboardImpl::~ClipboardImpl()
+{
 }

@@ -52,6 +52,8 @@
     if (!(group->variable == value)) \
         group.access()->variable = value;
 
+class RenderArena;
+
 namespace DOM {
     class DOMStringImpl;
     class ShadowValueImpl;
@@ -134,6 +136,7 @@ private:
     DATA* data;
 };
 
+enum PseudoState { PseudoUnknown, PseudoNone, PseudoAnyLink, PseudoLink, PseudoVisited};
 
 //------------------------------------------------
 
@@ -338,7 +341,7 @@ public:
 // Random visual rendering model attributes. Not inherited.
 
 enum EOverflow {
-    OVISIBLE, OHIDDEN, OSCROLL, OAUTO, OMARQUEE
+    OVISIBLE, OHIDDEN, OSCROLL, OAUTO, OMARQUEE, OOVERLAY
 };
 
 enum EVerticalAlign {
@@ -456,7 +459,6 @@ class StyleFlexibleBoxData : public Shared<StyleFlexibleBoxData>
 {
 public:
     StyleFlexibleBoxData();
-    ~StyleFlexibleBoxData() {}
     StyleFlexibleBoxData(const StyleFlexibleBoxData& o);
 
     bool operator==(const StyleFlexibleBoxData& o) const;
@@ -467,8 +469,7 @@ public:
     float flex;
     unsigned int flex_group;
     unsigned int ordinal_group;
-    int flexed_height; // Not an actual CSS property. Vertical flexing has to use this as a cache.
-    
+
     EBoxAlignment align : 3;
     EBoxAlignment pack: 3;
     EBoxOrient orient: 1;
@@ -495,6 +496,47 @@ struct ShadowData {
     ShadowData* next;
 };
 
+#ifndef KHTML_NO_XBL
+struct BindingURI {
+    BindingURI(DOM::DOMStringImpl*);
+    ~BindingURI();
+
+    BindingURI* copy();
+
+    bool operator==(const BindingURI& o) const;
+    bool operator!=(const BindingURI& o) const {
+        return !(*this == o);
+    }
+    
+    BindingURI* next() { return m_next; }
+    void setNext(BindingURI* n) { m_next = n; }
+    
+    DOM::DOMStringImpl* uri() { return m_uri; }
+    
+    BindingURI* m_next;
+    DOM::DOMStringImpl* m_uri;
+};
+#endif
+
+//------------------------------------------------
+// CSS3 User Modify Properties
+
+enum EUserModify {
+    READ_ONLY, READ_WRITE
+};
+
+// CSS3 User Drag Values
+
+enum EUserDrag {
+    DRAG_AUTO, DRAG_NONE, DRAG_ELEMENT
+};
+
+// CSS3 User Select Values
+
+enum EUserSelect {
+    SELECT_AUTO, SELECT_NONE, SELECT_TEXT
+};
+
 // This struct is for rarely used non-inherited CSS3 properties.  By grouping them together,
 // we save space, and only allocate this object when someone actually uses
 // a non-inherited CSS3 property.
@@ -502,22 +544,36 @@ class StyleCSS3NonInheritedData : public Shared<StyleCSS3NonInheritedData>
 {
 public:
     StyleCSS3NonInheritedData();
-    ~StyleCSS3NonInheritedData() {}
+    ~StyleCSS3NonInheritedData();
     StyleCSS3NonInheritedData(const StyleCSS3NonInheritedData& o);
+
+#ifndef KHTML_NO_XBL
+    bool bindingsEquivalent(const StyleCSS3NonInheritedData& o) const;
+#endif
 
     bool operator==(const StyleCSS3NonInheritedData& o) const;
     bool operator!=(const StyleCSS3NonInheritedData &o) const {
         return !(*this == o);
     }
     
+#if APPLE_CHANGES
+    int lineClamp;         // An Apple extension.  Not really CSS3 but not worth making a new struct over.
+#endif
     float opacity;         // Whether or not we're transparent.
     DataRef<StyleFlexibleBoxData> flexibleBox; // Flexible box properties 
     DataRef<StyleMarqueeData> marquee; // Marquee properties
+    EUserDrag userDrag : 2; // Whether or not a drag can be initiated by this element.
+    EUserSelect userSelect : 2;  // Whether or not the element is selectable.
+    bool textOverflow : 1; // Whether or not lines that spill out should be truncated with "..."
+
+#ifndef KHTML_NO_XBL
+    BindingURI* bindingURI; // The XBL binding URI list.
+#endif
 };
 
 // This struct is for rarely used inherited CSS3 properties.  By grouping them together,
 // we save space, and only allocate this object when someone actually uses
-// a non-inherited CSS3 property.
+// an inherited CSS3 property.
 class StyleCSS3InheritedData : public Shared<StyleCSS3InheritedData>
 {
 public:
@@ -532,7 +588,11 @@ public:
     bool shadowDataEquivalent(const StyleCSS3InheritedData& o) const;
 
     ShadowData* textShadow;  // Our text shadow information for shadowed text drawing.
-
+    EUserModify userModify : 2; // Flag used for editing state
+#if APPLE_CHANGES
+    bool textSizeAdjust : 1;    // An Apple extension.  Not really CSS3 but not worth making a new struct over.
+#endif
+    
 private:
     StyleCSS3InheritedData &operator=(const StyleCSS3InheritedData &);
 };
@@ -650,7 +710,7 @@ struct ContentData {
 
     ContentData* _nextContent;
 };
-    
+
 //------------------------------------------------
 
 enum EDisplay {
@@ -661,7 +721,7 @@ enum EDisplay {
     TABLE_CAPTION, BOX, INLINE_BOX, NONE
 };
 
-class RenderStyle : public Shared<RenderStyle>
+class RenderStyle
 {
     friend class CSSStyleSelector;
 public:
@@ -669,6 +729,25 @@ public:
 
     // static pseudo styles. Dynamic ones are produced on the fly.
     enum PseudoId { NOPSEUDO, FIRST_LINE, FIRST_LETTER, BEFORE, AFTER, SELECTION, FIRST_LINE_INHERITED };
+
+    void ref() { m_ref++;  }
+    void deref(RenderArena* arena) { 
+	if (m_ref) m_ref--; 
+	if (!m_ref)
+	    arenaDelete(arena);
+    }
+    bool hasOneRef() { return m_ref==1; }
+    int refCount() const { return m_ref; }
+    
+    // Overloaded new operator.  Derived classes must override operator new
+    // in order to allocate out of the RenderArena.
+    void* operator new(size_t sz, RenderArena* renderArena) throw();    
+    
+    // Overridden to prevent the normal delete from being called.
+    void operator delete(void* ptr, size_t sz);
+    
+private:
+    void arenaDelete(RenderArena *arena);
 
 protected:
 
@@ -736,6 +815,7 @@ protected:
             (_styleType == other._styleType) &&
             (_affectedByHover == other._affectedByHover) &&
             (_affectedByActive == other._affectedByActive) &&
+            (_affectedByDrag == other._affectedByDrag) &&
             (_pseudoBits == other._pseudoBits) &&
             (_unicodeBidi == other._unicodeBidi);
 	}
@@ -761,6 +841,7 @@ protected:
         PseudoId _styleType : 3;
         bool _affectedByHover : 1;
         bool _affectedByActive : 1;
+        bool _affectedByDrag : 1;
         int _pseudoBits : 6;
         EUnicodeBidi _unicodeBidi : 2;
     } noninherited_flags;
@@ -782,6 +863,12 @@ protected:
     // added this here, so we can get rid of the vptr in this class.
     // makes up for the same size.
     ContentData *content;
+
+    PseudoState m_pseudoState : 3;
+    bool m_affectedByAttributeSelectors : 1;
+    
+    int m_ref;
+    
 // !END SYNC!
 
 // static default style
@@ -821,6 +908,7 @@ protected:
 	noninherited_flags._styleType = NOPSEUDO;
         noninherited_flags._affectedByHover = false;
         noninherited_flags._affectedByActive = false;
+        noninherited_flags._affectedByDrag = false;
         noninherited_flags._pseudoBits = 0;
 	noninherited_flags._unicodeBidi = initialUnicodeBidi();
     }
@@ -840,13 +928,14 @@ public:
 
     RenderStyle* getPseudoStyle(PseudoId pi);
     void addPseudoStyle(RenderStyle* pseudo);
-    void removePseudoStyle(PseudoId pi);
 
     bool affectedByHoverRules() const { return  noninherited_flags._affectedByHover; }
     bool affectedByActiveRules() const { return  noninherited_flags._affectedByActive; }
+    bool affectedByDragRules() const { return  noninherited_flags._affectedByDrag; }
 
     void setAffectedByHoverRules(bool b) {  noninherited_flags._affectedByHover = b; }
     void setAffectedByActiveRules(bool b) {  noninherited_flags._affectedByActive = b; }
+    void setAffectedByDragRules(bool b) {  noninherited_flags._affectedByDrag = b; }
  
     bool operator==(const RenderStyle& other) const;
     bool        isFloating() const { return !(noninherited_flags._floating == FNONE); }
@@ -888,36 +977,33 @@ public:
     const BorderValue& borderBottom() const { return surround->border.bottom; }
 
     unsigned short  borderLeftWidth() const
-    { if( surround->border.left.style == BNONE) return 0; return surround->border.left.width; }
+    { if( surround->border.left.style == BNONE || surround->border.left.style == BHIDDEN) return 0; return surround->border.left.width; }
     EBorderStyle    borderLeftStyle() const { return surround->border.left.style; }
     const QColor &  borderLeftColor() const { return surround->border.left.color; }
     bool borderLeftIsTransparent() const { return surround->border.left.isTransparent(); }
     unsigned short  borderRightWidth() const
-    { if (surround->border.right.style == BNONE) return 0; return surround->border.right.width; }
+    { if (surround->border.right.style == BNONE || surround->border.right.style == BHIDDEN) return 0; return surround->border.right.width; }
     EBorderStyle    borderRightStyle() const {  return surround->border.right.style; }
     const QColor &  	    borderRightColor() const {  return surround->border.right.color; }
     bool borderRightIsTransparent() const { return surround->border.right.isTransparent(); }
     unsigned short  borderTopWidth() const
-    { if(surround->border.top.style == BNONE) return 0; return surround->border.top.width; }
+    { if(surround->border.top.style == BNONE || surround->border.top.style == BHIDDEN) return 0; return surround->border.top.width; }
     EBorderStyle    borderTopStyle() const {return surround->border.top.style; }
     const QColor &  borderTopColor() const {  return surround->border.top.color; }
     bool borderTopIsTransparent() const { return surround->border.top.isTransparent(); }
     unsigned short  borderBottomWidth() const
-    { if(surround->border.bottom.style == BNONE) return 0; return surround->border.bottom.width; }
+    { if(surround->border.bottom.style == BNONE || surround->border.bottom.style == BHIDDEN) return 0; return surround->border.bottom.width; }
     EBorderStyle    borderBottomStyle() const {  return surround->border.bottom.style; }
     const QColor &  	    borderBottomColor() const {  return surround->border.bottom.color; }
     bool borderBottomIsTransparent() const { return surround->border.bottom.isTransparent(); }
     
     unsigned short outlineSize() const { return outlineWidth() + outlineOffset(); }
-    unsigned short outlineWidth() const { if (background->outline.style == BNONE) return 0; return background->outline.width; }
+    unsigned short outlineWidth() const { if (background->outline.style == BNONE || background->outline.style == BHIDDEN) return 0; return background->outline.width; }
     EBorderStyle    outlineStyle() const {  return background->outline.style; }
     bool outlineStyleIsAuto() const { return background->outline._auto; }
     const QColor &  	    outlineColor() const {  return background->outline.color; }
 
     EOverflow overflow() const { return  noninherited_flags._overflow; }
-    bool hidesOverflow() const { return overflow() != OVISIBLE; }
-    bool scrollsOverflow() const { return overflow() == OSCROLL || overflow() == OAUTO; }
-
     EVisibility visibility() const { return inherited_flags._visibility; }
     EVerticalAlign verticalAlign() const { return  noninherited_flags._vertical_align; }
     Length verticalAlignLength() const { return box->vertical_align; }
@@ -997,8 +1083,11 @@ public:
     EPageBreak pageBreakAfter() const { return noninherited_flags._page_break_after; }
     
     // CSS3 Getter Methods
+#ifndef KHTML_NO_XBL
+    BindingURI* bindingURIs() const { return css3NonInheritedData->bindingURI; }
+#endif
     int outlineOffset() const { 
-        if (background->outline.style == BNONE) return 0; return background->outline._offset;
+        if (background->outline.style == BNONE || background->outline.style == BHIDDEN) return 0; return background->outline._offset;
     }
     ShadowData* textShadow() const { return css3InheritedData->textShadow; }
     float opacity() { return css3NonInheritedData->opacity; }
@@ -1010,13 +1099,22 @@ public:
     unsigned int boxOrdinalGroup() { return css3NonInheritedData->flexibleBox->ordinal_group; }
     EBoxOrient boxOrient() { return css3NonInheritedData->flexibleBox->orient; }
     EBoxAlignment boxPack() { return css3NonInheritedData->flexibleBox->pack; }
-    int boxFlexedHeight() { return css3NonInheritedData->flexibleBox->flexed_height; }
     Length marqueeIncrement() { return css3NonInheritedData->marquee->increment; }
     int marqueeSpeed() { return css3NonInheritedData->marquee->speed; }
     int marqueeLoopCount() { return css3NonInheritedData->marquee->loops; }
     EMarqueeBehavior marqueeBehavior() { return css3NonInheritedData->marquee->behavior; }
     EMarqueeDirection marqueeDirection() { return css3NonInheritedData->marquee->direction; }
+    EUserModify userModify() const { return css3InheritedData->userModify; }
+    EUserDrag userDrag() const { return css3NonInheritedData->userDrag; }
+    EUserSelect userSelect() const { return css3NonInheritedData->userSelect; }
+    bool textOverflow() const { return css3NonInheritedData->textOverflow; }
     // End CSS3 Getters
+
+#if APPLE_CHANGES
+    // Apple-specific property getter methods
+    int lineClamp() const { return css3NonInheritedData->lineClamp; }
+    bool textSizeAdjust() const { return css3InheritedData->textSizeAdjust; }
+#endif
 
 // attribute setter methods
 
@@ -1149,9 +1247,9 @@ public:
     void setHtmlHacks(bool b=true) { inherited_flags._htmlHacks = b; }
 
     bool hasAutoZIndex() { return box->z_auto; }
-    void setHasAutoZIndex() { SET_VAR(box, z_auto, true) }
+    void setHasAutoZIndex() { SET_VAR(box, z_auto, true); SET_VAR(box, z_index, 0) }
     int zIndex() const { return box->z_index; }
-    void setZIndex(int v) { SET_VAR(box, z_auto, false); SET_VAR(box,z_index,v) }
+    void setZIndex(int v) { SET_VAR(box, z_auto, false); SET_VAR(box, z_index, v) }
 
     void setWidows(short w) { SET_VAR(inherited, widows, w); }
     void setOrphans(short o) { SET_VAR(inherited, orphans, o); }
@@ -1160,6 +1258,16 @@ public:
     void setPageBreakAfter(EPageBreak b) { noninherited_flags._page_break_after = b; }
     
     // CSS3 Setters
+#ifndef KHTML_NO_XBL
+    void deleteBindingURIs() { 
+        delete css3NonInheritedData->bindingURI; 
+        SET_VAR(css3NonInheritedData, bindingURI, 0);
+    }
+    void inheritBindingURIs(BindingURI* other) {
+        SET_VAR(css3NonInheritedData, bindingURI, other->copy());
+    }
+    void addBindingURI(DOM::DOMStringImpl* uri);
+#endif
     void setOutlineOffset(unsigned short v) {  SET_VAR(background,outline._offset,v) }
     void setTextShadow(ShadowData* val, bool add=false);
     void setOpacity(float f) { SET_VAR(css3NonInheritedData, opacity, f); }
@@ -1171,14 +1279,23 @@ public:
     void setBoxOrdinalGroup(unsigned int og) { SET_VAR(css3NonInheritedData.access()->flexibleBox, ordinal_group, og); }
     void setBoxOrient(EBoxOrient o) { SET_VAR(css3NonInheritedData.access()->flexibleBox, orient, o); }
     void setBoxPack(EBoxAlignment p) { SET_VAR(css3NonInheritedData.access()->flexibleBox, pack, p); }
-    void setBoxFlexedHeight(int h) { SET_VAR(css3NonInheritedData.access()->flexibleBox, flexed_height, h); }
     void setMarqueeIncrement(const Length& f) { SET_VAR(css3NonInheritedData.access()->marquee, increment, f); }
     void setMarqueeSpeed(int f) { SET_VAR(css3NonInheritedData.access()->marquee, speed, f); }
     void setMarqueeDirection(EMarqueeDirection d) { SET_VAR(css3NonInheritedData.access()->marquee, direction, d); }
     void setMarqueeBehavior(EMarqueeBehavior b) { SET_VAR(css3NonInheritedData.access()->marquee, behavior, b); }
     void setMarqueeLoopCount(int i) { SET_VAR(css3NonInheritedData.access()->marquee, loops, i); }
+    void setUserModify(EUserModify u) { SET_VAR(css3InheritedData, userModify, u); }
+    void setUserDrag(EUserDrag d) { SET_VAR(css3NonInheritedData, userDrag, d); }
+    void setUserSelect(EUserSelect s) { SET_VAR(css3NonInheritedData, userSelect, s); }
+    void setTextOverflow(bool b) { SET_VAR(css3NonInheritedData, textOverflow, b); }
     // End CSS3 Setters
-    
+   
+#if APPLE_CHANGES
+    // Apple-specific property setters
+    void setLineClamp(int c) { SET_VAR(css3NonInheritedData, lineClamp, c); }
+    void setTextSizeAdjust(bool b) { SET_VAR(css3InheritedData, textSizeAdjust, b); }
+#endif
+
     QPalette palette() const { return visual->palette; }
     void setPaletteColor(QPalette::ColorGroup g, QColorGroup::ColorRole r, const QColor& c);
     void resetPalette() // Called when the desktop color scheme changes.
@@ -1196,15 +1313,25 @@ public:
     enum Diff { Equal, NonVisible = Equal, Visible, Position, Layout, CbLayout };
     Diff diff( const RenderStyle *other ) const;
 
+    bool isDisplayReplacedType() {
+        return display() == INLINE_BLOCK || display() == INLINE_BOX || display() == INLINE_TABLE;
+    }
     bool isDisplayInlineType() {
-        return display() == INLINE || display() == INLINE_BLOCK || display() == INLINE_BOX ||
-               display() == INLINE_TABLE;
+        return display() == INLINE || isDisplayReplacedType();
     }
     bool isOriginalDisplayInlineType() {
         return originalDisplay() == INLINE || originalDisplay() == INLINE_BLOCK ||
                originalDisplay() == INLINE_BOX || originalDisplay() == INLINE_TABLE;
     }
     
+    // To obtain at any time the pseudo state for a given link.
+    PseudoState pseudoState() const { return m_pseudoState; }
+    void setPseudoState(PseudoState s) { m_pseudoState = s; }
+    
+    // To tell if this style matched attribute selectors. This makes it impossible to share.
+    bool affectedByAttributeSelectors() const { return m_affectedByAttributeSelectors; }
+    void setAffectedByAttributeSelectors() { m_affectedByAttributeSelectors = true; }
+
     // Initial values for all the properties
     static bool initialBackgroundAttachment() { return true; }
     static EBackgroundRepeat initialBackgroundRepeat() { return REPEAT; }
@@ -1264,6 +1391,16 @@ public:
     static Length initialMarqueeIncrement() { return Length(6, Fixed); }
     static EMarqueeBehavior initialMarqueeBehavior() { return MSCROLL; }
     static EMarqueeDirection initialMarqueeDirection() { return MAUTO; }
+    static EUserModify initialUserModify() { return READ_ONLY; }
+    static EUserDrag initialUserDrag() { return DRAG_AUTO; }
+    static EUserSelect initialUserSelect() { return SELECT_AUTO; }
+    static bool initialTextOverflow() { return false; }
+
+#if APPLE_CHANGES
+    // Keep these at the end.
+    static int initialLineClamp() { return -1; }
+    static bool initialTextSizeAdjust() { return true; }
+#endif
 };
 
 

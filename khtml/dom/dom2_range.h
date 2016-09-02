@@ -5,6 +5,7 @@
  * (C) 2000 Gunnstein Lye (gunnstein@netcom.no)
  * (C) 2000 Frederik Holljen (frederik.holljen@hig.no)
  * (C) 2001 Peter Kelly (pmk@post.com)
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -462,16 +463,20 @@ public:
      * @internal
      * not part of the DOM
      */
+    Range(RangeImpl *i);
     RangeImpl *handle() const;
     bool isNull() const;
 
 protected:
     RangeImpl *impl;
-    Range(RangeImpl *i);
+
 private:
     void throwException(int exceptioncode) const;
 };
 
-}; // namespace
+bool operator==(const Range &, const Range &);
+inline bool operator!=(const Range &a, const Range &b) { return !(a == b); }
+
+} // namespace
 
 #endif

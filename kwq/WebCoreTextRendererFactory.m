@@ -28,7 +28,7 @@
 
 #import "KWQAssertions.h"
 
-inline void WebCoreInitializeTextRun(WebCoreTextRun *run, const UniChar *characters, unsigned int length, int from, int to)
+void WebCoreInitializeTextRun(WebCoreTextRun *run, const UniChar *characters, unsigned int length, int from, int to)
 {
     run->characters = characters;
     run->length = length;
@@ -36,7 +36,7 @@ inline void WebCoreInitializeTextRun(WebCoreTextRun *run, const UniChar *charact
     run->to = to;
 }
 
-inline void WebCoreInitializeEmptyTextStyle(WebCoreTextStyle *style)
+void WebCoreInitializeEmptyTextStyle(WebCoreTextStyle *style)
 {
     style->padding = 0;
     style->textColor = nil;
@@ -46,9 +46,20 @@ inline void WebCoreInitializeEmptyTextStyle(WebCoreTextStyle *style)
     style->letterSpacing = 0;
     style->wordSpacing = 0;
     style->smallCaps = false;
-    style->applyRounding = true;
+    style->applyRunRounding = true;
+    style->applyWordRounding = true;
     style->attemptFontSubstitution = true;
     style->families = nil;
+}
+
+void WebCoreInitializeEmptyTextGeometry(WebCoreTextGeometry *geometry)
+{
+    geometry->point = NSMakePoint(0,0);
+    geometry->selectionY = 0;
+    geometry->selectionHeight = 0;
+    geometry->selectionMinX = 0;
+    geometry->selectionMaxX = 0;
+    geometry->useFontMetricsForSelectionYAndHeight = true;
 }
 
 @implementation WebCoreTextRendererFactory

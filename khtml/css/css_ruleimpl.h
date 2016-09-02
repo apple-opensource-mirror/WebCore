@@ -20,7 +20,7 @@
  * the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 02111-1307, USA.
  *
- * $Id: css_ruleimpl.h,v 1.9 2003/08/29 22:04:02 mjs Exp $
+ * $Id: css_ruleimpl.h,v 1.10 2004/02/05 01:45:16 hyatt Exp $
  */
 #ifndef _CSS_css_ruleimpl_h_
 #define _CSS_css_ruleimpl_h_
@@ -30,6 +30,7 @@
 #include "css/css_base.h"
 #include "misc/loader_client.h"
 #include "misc/shared.h"
+#include "css_valueimpl.h"
 
 namespace khtml {
     class CachedCSSStyleSheet;
@@ -191,6 +192,7 @@ protected:
     CSSStyleDeclarationImpl *m_style;
 };
 
+class CSSImportantRuleImpl;
 
 class CSSStyleRuleImpl : public CSSRuleImpl
 {
@@ -208,19 +210,16 @@ public:
 
     virtual bool parseString( const DOMString &string, bool = false );
 
-    void setSelector( QPtrList<CSSSelector> *selector) { m_selector = selector; }
+    void setSelector(CSSSelector* selector) { m_selector = selector; }
     void setDeclaration( CSSStyleDeclarationImpl *style);
 
-    QPtrList<CSSSelector> *selector() { return m_selector; }
+    CSSSelector* selector() { return m_selector; }
     CSSStyleDeclarationImpl *declaration() { return m_style; }
-
-    void setNonCSSHints();
-
+ 
 protected:
     CSSStyleDeclarationImpl *m_style;
-    QPtrList<CSSSelector> *m_selector;
+    CSSSelector* m_selector;
 };
-
 
 class CSSUnknownRuleImpl : public CSSRuleImpl
 {

@@ -22,7 +22,6 @@
  * along with this library; see the file COPYING.LIB.  If not, write to
  * the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 02111-1307, USA.
- *
  */
 #ifndef RENDER_TABLE_H
 #define RENDER_TABLE_H
@@ -102,10 +101,8 @@ public:
     virtual int overflowHeight(bool includeInterior=true) const { return height(); }
     virtual int overflowWidth(bool includeInterior=true) const { return width(); }
     virtual void addChild(RenderObject *child, RenderObject *beforeChild = 0);
-    virtual void paint( QPainter *, int x, int y, int w, int h,
-                        int tx, int ty, PaintAction paintAction);
-    virtual void paintBoxDecorations(QPainter *p,int _x, int _y,
-                                     int _w, int _h, int _tx, int _ty);
+    virtual void paint(PaintInfo& i, int tx, int ty);
+    virtual void paintBoxDecorations(PaintInfo& i, int _tx, int _ty);
     virtual void layout();
     virtual void calcMinMaxWidth();
     virtual void close();
@@ -132,7 +129,7 @@ public:
 	    width = WidthUndefined;
 	}
 	ushort span;
-	ushort width; // the calculated position of the column
+	uint width; // the calculated position of the column
     };
 
     QMemArray<int> columnPos;
@@ -249,8 +246,7 @@ public:
 	return (*(grid[row].row))[col];
     }
 
-    virtual void paint( QPainter *, int x, int y, int w, int h,
-                        int tx, int ty, PaintAction paintAction);
+    virtual void paint(PaintInfo& i, int tx, int ty);
 
     int numRows() const { return grid.size(); }
     int getBaseline(int row) {return grid[row].baseLine;}
@@ -321,6 +317,9 @@ public:
     virtual const char *renderName() const { return "RenderTableCell"; }
     virtual bool isTableCell() const { return true; }
 
+    // overrides RenderObject
+    virtual bool requiresLayer();
+
     // ### FIX these two...
     long cellIndex() const { return 0; }
     void setCellIndex( long ) { }
@@ -363,8 +362,7 @@ public:
     int getCellPercentageHeight() const;
     void setCellPercentageHeight(int h);
     
-    virtual void paint( QPainter* p, int x, int y,
-                        int w, int h, int tx, int ty, PaintAction paintAction);
+    virtual void paint(PaintInfo& i, int tx, int ty);
 
     void paintCollapsedBorder(QPainter* p, int x, int y, int w, int h);
     
@@ -388,14 +386,10 @@ public:
     virtual void dump(QTextStream *stream, QString ind = "") const;
 #endif
 
-    virtual void paintObject(QPainter *, int x, int y, int w, int h,
-                             int tx, int ty, PaintAction paintAction);
-    
     virtual QRect getAbsoluteRepaintRect();
     
 protected:
-    virtual void paintBoxDecorations(QPainter *p,int _x, int _y,
-                                     int _w, int _h, int _tx, int _ty);
+    virtual void paintBoxDecorations(PaintInfo& i, int _tx, int _ty);
     
     short _row;
     short _col;

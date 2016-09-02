@@ -48,24 +48,28 @@ public:
     virtual const char *renderName() const { return "RenderBox"; }
 
     virtual void setStyle(RenderStyle *style);
-    virtual void paint(QPainter *p, int _x, int _y, int _w, int _h,
-                       int _tx, int _ty, PaintAction paintAction);
+    virtual void paint(PaintInfo& i, int _tx, int _ty);
 
     virtual void detach();
     
-    virtual short minWidth() const { return m_minWidth; }
-    virtual short maxWidth() const { return m_maxWidth; }
+    virtual int minWidth() const { return m_minWidth; }
+    virtual int maxWidth() const { return m_maxWidth; }
 
-    virtual short contentWidth() const;
+    virtual int contentWidth() const;
     virtual int contentHeight() const;
 
+    virtual int overrideSize() const { return m_overrideSize; }
+    virtual int overrideWidth() const;
+    virtual int overrideHeight() const;
+    virtual void setOverrideSize(int s) { m_overrideSize = s; }
+    
     virtual bool absolutePosition(int &xPos, int &yPos, bool f = false);
 
     virtual void setPos( int xPos, int yPos );
 
     virtual int xPos() const { return m_x; }
     virtual int yPos() const { return m_y; }
-    virtual short width() const;
+    virtual int width() const;
     virtual int height() const;
 
     virtual short marginTop() const { return m_marginTop; }
@@ -84,6 +88,15 @@ public:
 
     virtual void position(InlineBox* box, int from, int len, bool reverse);
     
+    virtual void dirtyLineBoxes(bool fullLayout, bool isRootLineBox=false);
+
+    // For inline replaced elements, this function returns the inline box that owns us.  Enables
+    // the replaced RenderObject to quickly determine what line it is contained on and to easily
+    // iterate over structures on the line.
+    virtual InlineBox* inlineBoxWrapper() const;
+    virtual void setInlineBoxWrapper(InlineBox* b);
+    void deleteLineBoxWrapper();
+    
     virtual int lowestPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
     virtual int rightmostPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
     virtual int leftmostPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
@@ -91,21 +104,22 @@ public:
     virtual QRect getAbsoluteRepaintRect();
     virtual void computeAbsoluteRepaintRect(QRect& r, bool f=false);
 
-#ifdef INCREMENTAL_REPAINTING
     virtual void repaintDuringLayoutIfMoved(int oldX, int oldY);
-#endif
     
-    virtual short containingBlockWidth() const;
+    virtual int containingBlockWidth() const;
 
     virtual void calcWidth();
     virtual void calcHeight();
 
     int calcWidthUsing(WidthType widthType, int cw, LengthType& lengthType);
+    int calcHeightUsing(const Length& height);
     int calcReplacedWidthUsing(WidthType widthType) const;
     int calcReplacedHeightUsing(HeightType heightType) const;
     
-    virtual short calcReplacedWidth() const;
-    virtual int   calcReplacedHeight() const;
+    virtual int calcReplacedWidth() const;
+    virtual int calcReplacedHeight() const;
+
+    int calcPercentageHeight(const Length& height);
 
     virtual int availableHeight() const;
     int availableHeightUsing(const Length& h) const;
@@ -115,19 +129,19 @@ public:
     void relativePositionOffset(int &tx, int &ty);
 
     virtual RenderLayer* layer() const { return m_layer; }
+    
+    virtual void caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height);
 
     virtual void paintBackgroundExtended(QPainter *p, const QColor &c, CachedImage *bg, int clipy, int cliph,
                                          int _tx, int _ty, int w, int height,
                                          int bleft, int bright);
 
-    virtual void setStaticX(short staticX);
+    virtual void setStaticX(int staticX);
     virtual void setStaticY(int staticY);
 
 protected:
-    virtual void paintBoxDecorations(QPainter *p,int _x, int _y,
-                                     int _w, int _h, int _tx, int _ty);
-    void paintRootBoxDecorations(QPainter *p,int, int _y,
-                                 int, int _h, int _tx, int _ty);
+    virtual void paintBoxDecorations(PaintInfo& i, int _tx, int _ty);
+    void paintRootBoxDecorations(PaintInfo& i, int _tx, int _ty);
 
     void paintBackground(QPainter *p, const QColor &c, CachedImage *bg, int clipy, int cliph, int _tx, int _ty, int w, int h);
     void outlineBox(QPainter *p, int _tx, int _ty, const char *color = "red");
@@ -146,8 +160,8 @@ protected:
 
     int m_y;
 
-    short m_x;
-    short m_width;
+    int m_x;
+    int m_width;
 
     short m_marginTop;
     short m_marginBottom;
@@ -159,19 +173,25 @@ protected:
      * the minimum width the element needs, to be able to render
      * it's content without clipping
      */
-    short m_minWidth;
+    int m_minWidth;
     /* The maximum width the element can fill horizontally
      * ( = the width of the element with line breaking disabled)
      */
-    short m_maxWidth;
+    int m_maxWidth;
+
+    // Used by flexible boxes when flexing this element.
+    int m_overrideSize;
 
     // Cached normal flow values for absolute positioned elements with static left/top values.
-    short m_staticX;
+    int m_staticX;
     int m_staticY;
     
     // A pointer to our layer if we have one.  Currently only positioned elements
     // and floaters have layers.
     RenderLayer* m_layer;
+    
+    // For inline replaced elements, the inline box that owns us.
+    InlineBox* m_inlineBoxWrapper;
 };
 
 

@@ -120,6 +120,8 @@ teal
 white
 yellow
 transparent
+-khtml-link
+-khtml-activelink
 activeborder
 activecaption
 appworkspace
@@ -301,6 +303,7 @@ no-close-quote
 no-open-quote
 nowrap
 open-quote
+overlay
 overline
 portrait
 pre
@@ -368,3 +371,25 @@ slide
 alternate
 unfurl
 
+#
+# CSS_PROP__KHTML_USER_MODIFY
+#
+read-only
+read-write
+
+#
+# CSS_PROP__KHTML_USER_DRAG
+#
+element
+
+#
+# CSS_PROP_WIDTH/MIN_WIDTH/MAX_WIDTH
+#
+intrinsic
+min-intrinsic
+
+#
+# CSS_PROP_TEXT_OVERFLOW
+#
+clip
+ellipsis

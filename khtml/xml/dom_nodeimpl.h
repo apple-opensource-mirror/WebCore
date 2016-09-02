@@ -4,7 +4,7 @@
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
  *           (C) 2001 Dirk Mueller (mueller@kde.org)
- * Copyright (C) 2003 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -30,9 +30,7 @@
 #include "dom/dom_node.h"
 #include "misc/helper.h"
 #include "misc/shared.h"
-
-// The namespace used for XHTML elements
-#define XHTML_NAMESPACE "http://www.w3.org/1999/xhtml"
+#include "dom_atomicstring.h"
 
 class QPainter;
 template <class type> class QPtrList;
@@ -51,12 +49,33 @@ namespace khtml {
 
 namespace DOM {
 
-class NodeListImpl;
-class NamedNodeMapImpl;
-class DocumentImpl;
 class CSSStyleDeclarationImpl;
-class RegisteredEventListener;
+class DocumentImpl;
+class ElementImpl;
 class EventImpl;
+class NamedNodeMapImpl;
+class NodeListImpl;
+class Position;
+class Range;
+class RangeImpl;
+class RegisteredEventListener;
+
+// The namespace used for XHTML elements
+#define XHTML_NAMESPACE "http://www.w3.org/1999/xhtml"
+
+const Q_UINT16 noNamespace = 0;
+const Q_UINT16 anyNamespace = 1;
+const Q_UINT16 xhtmlNamespace = 2;
+const Q_UINT16 anyLocalName = 0;
+
+const Q_UINT32 namespaceMask = 0xFFFF0000U;
+const Q_UINT32 localNameMask = 0x0000FFFFU;
+
+inline Q_UINT16 namespacePart(Q_UINT32 i) { return i >> 16; }
+inline Q_UINT16 localNamePart(Q_UINT32 i) { return i; }
+inline Q_UINT32 makeId(Q_UINT16 n, Q_UINT16 l) { return (n << 16) | l; }
+
+const Q_UINT32 anyQName = makeId(anyNamespace, anyLocalName);
 
 class DocumentPtr : public khtml::Shared<DocumentPtr>
 {
@@ -93,6 +112,7 @@ public:
     virtual NodeImpl *replaceChild ( NodeImpl *newChild, NodeImpl *oldChild, int &exceptioncode );
     virtual NodeImpl *removeChild ( NodeImpl *oldChild, int &exceptioncode );
     virtual NodeImpl *appendChild ( NodeImpl *newChild, int &exceptioncode );
+    virtual void remove(int &exceptioncode);
     virtual bool hasChildNodes (  ) const;
     virtual NodeImpl *cloneNode ( bool deep ) = 0;
     virtual DOMString localName() const;
@@ -107,6 +127,7 @@ public:
     virtual bool isTextNode() const { return false; }
     virtual bool isDocumentNode() const { return false; }
     virtual bool isXMLElementNode() const { return false; }
+    bool isBlockFlow() const;
     
     // Used by <form> elements to indicate a malformed state of some kind, typically
     // used to keep from applying the bottom margin of the form.
@@ -123,13 +144,38 @@ public:
     virtual void setFirstChild(NodeImpl *child);
     virtual void setLastChild(NodeImpl *child);
 
+    /** (Not part of the official DOM)
+     * Returns the next leaf node.
+     *
+     * Using this function delivers leaf nodes as if the whole DOM tree
+     * were a linear chain of its leaf nodes.
+     * @return next leaf node or 0 if there are no more.
+     */
+    NodeImpl *nextLeafNode() const;
+
+    /** (Not part of the official DOM)
+     * Returns the previous leaf node.
+     *
+     * Using this function delivers leaf nodes as if the whole DOM tree
+     * were a linear chain of its leaf nodes.
+     * @return previous leaf node or 0 if there are no more.
+     */
+    NodeImpl *previousLeafNode() const;
+
+    bool isEditableBlock() const;
+    ElementImpl *enclosingBlockFlowElement() const;
+    ElementImpl *rootEditableElement() const;
+    
+    bool inSameRootEditableElement(NodeImpl *);
+    bool inSameContainingBlockFlowElement(NodeImpl *);
+    
+    Position positionForCoordinates(int x, int y);
+
     // used by the parser. Doesn't do as many error checkings as
     // appendChild(), and returns the node into which will be parsed next.
     virtual NodeImpl *addChild(NodeImpl *newChild);
 
     typedef Q_UINT32 Id;
-    static const Q_UINT32 IdNSMask;
-    static const Q_UINT32 IdLocalMask;
     // id() is used to easily and exactly identify a node. It
     // is optimized for quick comparison and low memory consumption.
     // its value depends on the owner document of the node and is
@@ -145,7 +191,9 @@ public:
     //                 the lower 16 bit identify the local part of the
     //                 qualified element name.
     virtual Id id() const { return 0; };
-
+#if APPLE_CHANGES
+    Id identifier() const;
+#endif
     enum MouseEventType {
         MousePress,
         MouseRelease,
@@ -194,7 +242,7 @@ public:
     void setInDocument(bool b=true) { m_inDocument = b; }
     virtual void setFocus(bool b=true) { m_focused = b; }
     virtual void setActive(bool b=true) { m_active = b; }
-    virtual void setChanged(bool b=true);
+    void setChanged(bool b=true);
 
     unsigned short tabIndex() const { return m_tabIndex; }
     void setTabIndex(unsigned short _tabIndex) { m_tabIndex = _tabIndex; }
@@ -209,8 +257,10 @@ public:
     virtual bool isInline() const;
     virtual QString toHTML() const;
     QString recursive_toHTML(bool start = false) const;
-
-    virtual void getCursor(int offset, int &_x, int &_y, int &height);
+    QString recursive_toHTMLWithOptions(bool start=false, const DOM::RangeImpl *range=NULL, QPtrList<NodeImpl> *nodes=NULL) const;
+    void recursive_completeURLs(QString baseURL);
+    
+    virtual bool isContentEditable() const;
     virtual QRect getRect() const;
 
     enum StyleChange { NoChange, NoInherit, Inherit, Detach, Force };
@@ -269,6 +319,9 @@ public:
      * see @ref traversePreviousNode()
      */
     NodeImpl *traverseNextNode(NodeImpl *stayWithin = 0) const;
+    
+    /* Like traverseNextNode, but skips children and starts with the next sibling. */
+    NodeImpl *traverseNextSibling(NodeImpl *stayWithin = 0) const;
 
     /**
      * Does a reverse pre-order traversal to find the node that comes before the current one in document order
@@ -279,6 +332,10 @@ public:
 
     DocumentPtr *docPtr() const { return document; }
 
+    NodeImpl *previousEditable() const;
+    NodeImpl *nextEditable() const;
+    //bool isEditable() const;
+
     khtml::RenderObject *renderer() const { return m_render; }
     khtml::RenderObject *nextRenderer();
     khtml::RenderObject *previousRenderer();
@@ -286,8 +343,14 @@ public:
     
     void checkSetPrefix(const DOMString &_prefix, int &exceptioncode);
     void checkAddChild(NodeImpl *newChild, int &exceptioncode);
-    bool isAncestor( NodeImpl *other );
+    bool isAncestor(NodeImpl *) const;
     virtual bool childAllowed( NodeImpl *newChild );
+
+    virtual long maxOffset() const;
+    virtual long caretMinOffset() const;
+    virtual long caretMaxOffset() const;
+    virtual unsigned long caretMaxRenderedOffset() const;
+
 #ifndef NDEBUG
     virtual void dump(QTextStream *stream, QString ind = "") const;
 #endif
@@ -442,6 +505,9 @@ public:
     virtual unsigned long childNodeCount();
     virtual NodeImpl *childNode(unsigned long index);
 
+    virtual void insertedIntoDocument();
+    virtual void removedFromDocument();
+    
     // check for being (grand-..)father:
     bool checkNoOwner( NodeImpl *other, int &exceptioncode );
 

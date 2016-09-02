@@ -3,7 +3,7 @@
  *
  * (C) 1999 Lars Knoll (knoll@kde.org)
  * (C) 2000 Dirk Mueller (mueller@kde.org)
- * Copyright (C) 2003 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -36,25 +36,52 @@
 class QPainter;
 class QFontMetrics;
 
+namespace DOM {
+    class Position;
+};
+
+// Define a constant for soft hyphen's unicode value.
+#define SOFT_HYPHEN 173
+
+const int cNoTruncation = -1;
+const int cFullTruncation = -2;
+
 namespace khtml
 {
     class RenderText;
     class RenderStyle;
 
-class InlineTextBox : public InlineBox
+class InlineTextBox : public InlineRunBox
 {
 public:
     InlineTextBox(RenderObject* obj)
-    :InlineBox(obj)
+    :InlineRunBox(obj)
     {
         m_start = 0;
         m_len = 0;
         m_reversed = false;
         m_toAdd = 0;
+        m_truncation = cNoTruncation;
     }
     
+    InlineTextBox* nextTextBox() const { return static_cast<InlineTextBox*>(nextLineBox()); }
+    InlineTextBox* prevTextBox() const { return static_cast<InlineTextBox*>(prevLineBox()); }
+    
+    uint start() const { return m_start; }
+    uint end() const { return m_len ? m_start+m_len-1 : m_start; }
+    uint len() const { return m_len; }
+
+    void offsetRun(int d) { m_start += d; }
+
     void detach(RenderArena* arena);
     
+    virtual void deleteLine(RenderArena* arena);
+    virtual void extractLine();
+    virtual void attachLine();
+
+    virtual void clearTruncation() { m_truncation = cNoTruncation; }
+    virtual int placeEllipsisBox(bool ltr, int blockEdge, int ellipsisWidth, bool& foundBox);
+
     // Overloaded new operator.  Derived classes must override operator new
     // in order to allocate out of the RenderArena.
     void* operator new(size_t sz, RenderArena* renderArena) throw();    
@@ -73,11 +100,14 @@ public:
     virtual bool isInlineTextBox() { return true; }
     
     void paintDecoration( QPainter *pt, int _tx, int _ty, int decoration);
-    void paintSelection(const Font *f, RenderText *text, QPainter *p, RenderStyle* style, int tx, int ty, int startPos, int endPos);
+    void paintSelection(const Font *f, RenderText *text, QPainter *p, RenderStyle* style, int tx, int ty, int startPos, int endPos, bool extendSelection);
 
-    // Return before, after (offset set to max), or inside the text, at @p offset
-    FindSelectionResult checkSelectionPoint(int _x, int _y, int _tx, int _ty, const Font *f, RenderText *text, int & offset, short lineheight);
-
+    virtual long caretMinOffset() const;
+    virtual long caretMaxOffset() const;
+    virtual unsigned long caretMaxRenderedOffset() const;
+    
+    int offsetForPosition(int _x, bool includePartialGlyphs = true);
+    
     /**
      * if this text run was rendered @ref _ty pixels below the upper edge
      * of a view, would the @ref _y -coordinate be inside the vertical range
@@ -89,29 +119,13 @@ public:
     int m_start;
     unsigned short m_len;
     
+    int m_truncation; // Where to truncate when text overflow is applied.  We use special constants to
+                      // denote no truncation (the whole run paints) and full truncation (nothing paints at all).
+
     bool m_reversed : 1;
     int m_toAdd : 14; // for justified text
 private:
-    // this is just for QVector::bsearch. Don't use it otherwise
-    InlineTextBox(int _x, int _y)
-        :InlineBox(0)
-    {
-        m_x = _x;
-        m_y = _y;
-        m_reversed = false;
-    };
     friend class RenderText;
-};
-
-class InlineTextBoxArray : public QPtrVector<InlineTextBox>
-{
-public:
-    InlineTextBoxArray();
-
-    InlineTextBox* first();
-
-    int	  findFirstMatching( Item ) const;
-    virtual int compareItems( Item, Item );
 };
 
 class RenderText : public RenderObject
@@ -129,18 +143,19 @@ public:
 
     virtual void setStyle(RenderStyle *style);
     
-    virtual void paint(QPainter *, int x, int y, int w, int h,
-                       int tx, int ty, PaintAction paintAction);
-    virtual void paintObject(QPainter *, int x, int y, int w, int h,
-                             int tx, int ty, PaintAction paintAction);
+    virtual void paint(PaintInfo& i, int tx, int ty);
 
-    void deleteRuns();
+    void extractTextBox(InlineTextBox* textBox);
+    void attachTextBox(InlineTextBox* textBox);
+    void removeTextBox(InlineTextBox* textBox);
+    void deleteTextBoxes();
     virtual void detach();
     
     DOM::DOMString data() const { return str; }
     DOM::DOMStringImpl *string() const { return str; }
 
-    virtual InlineBox* createInlineBox(bool,bool);
+    virtual InlineBox* createInlineBox(bool,bool, bool isOnlyRun = false);
+    virtual void dirtyLineBoxes(bool fullLayout, bool isRootInlineBox = false);
     
     virtual void layout() {assert(false);}
 
@@ -149,9 +164,7 @@ public:
 
     virtual void absoluteRects(QValueList<QRect>& rects, int _tx, int _ty);
 
-    // Return before, after (offset set to max), or inside the text, at @p offset
-    virtual FindSelectionResult checkSelectionPointIgnoringContinuations
-        (int _x, int _y, int _tx, int _ty, DOM::NodeImpl*& node, int & offset);
+    virtual DOM::Position positionForCoordinates(int _x, int _y);
 
     unsigned int length() const { return str->l; }
     QChar *text() const { return str->s; }
@@ -160,7 +173,7 @@ public:
 
     virtual unsigned int width(unsigned int from, unsigned int len, const Font *f) const;
     virtual unsigned int width(unsigned int from, unsigned int len, bool firstLine = false) const;
-    virtual short width() const;
+    virtual int width() const;
     virtual int height() const;
 
     // height of the contents (without paddings, margins and borders)
@@ -169,13 +182,13 @@ public:
 
     // overrides
     virtual void calcMinMaxWidth();
-    virtual short minWidth() const { return m_minWidth; }
-    virtual short maxWidth() const { return m_maxWidth; }
-    virtual void trimmedMinMaxWidth(short& beginMinW, bool& beginWS, 
-                                    short& endMinW, bool& endWS,
+    virtual int minWidth() const { return m_minWidth; }
+    virtual int maxWidth() const { return m_maxWidth; }
+    virtual void trimmedMinMaxWidth(int& beginMinW, bool& beginWS, 
+                                    int& endMinW, bool& endWS,
                                     bool& hasBreakableChar, bool& hasBreak,
-                                    short& beginMaxW, short& endMaxW,
-                                    short& minW, short& maxW, bool& stripFrontSpaces);
+                                    int& beginMaxW, int& endMaxW,
+                                    int& minW, int& maxW, bool& stripFrontSpaces);
     
     bool containsOnlyWhitespace(unsigned int from, unsigned int len) const;
     
@@ -189,19 +202,16 @@ public:
     virtual const QFont &font();
     virtual short verticalPositionHint( bool firstLine ) const;
 
-    bool isFixedWidthFont() const;
-
     void setText(DOM::DOMStringImpl *text, bool force=false);
+    void setTextWithOffset(DOM::DOMStringImpl *text, uint offset, uint len, bool force=false);
 
     virtual SelectionState selectionState() const {return m_selectionState;}
     virtual void setSelectionState(SelectionState s) {m_selectionState = s; }
-    virtual void cursorPos(int offset, int &_x, int &_y, int &height);
+    virtual void caretPos(int offset, bool override, int &_x, int &_y, int &width, int &height);
     void posOfChar(int ch, int &x, int &y);
 
     virtual short marginLeft() const { return style()->marginLeft().minWidth(0); }
     virtual short marginRight() const { return style()->marginRight().minWidth(0); }
-
-    virtual int rightmostPosition() const;
 
     virtual QRect getAbsoluteRepaintRect();
 
@@ -211,28 +221,37 @@ public:
     DOM::TextImpl *element() const
     { return static_cast<DOM::TextImpl*>(RenderObject::element()); }
 
+    InlineTextBox* firstTextBox() const { return m_firstTextBox; }
+    InlineTextBox* lastTextBox() const { return m_lastTextBox; }
+    
+    virtual InlineBox *inlineBox(long offset);
+
 #if APPLE_CHANGES
-    InlineTextBoxArray inlineTextBoxes() const { return m_lines; }
     int widthFromCache(const Font *, int start, int len) const;
     bool shouldUseMonospaceCache(const Font *) const;
     void cacheWidths();
     bool allAscii() const;
 #endif
 
+    virtual long caretMinOffset() const;
+    virtual long caretMaxOffset() const;
+    virtual unsigned long caretMaxRenderedOffset() const;
+    
 #if APPLE_CHANGES
 public:
 #endif
     InlineTextBox * findNextInlineTextBox( int offset, int &pos );
 
 protected: // members
-    InlineTextBoxArray m_lines;
-    DOM::DOMStringImpl *str; //
-
-    short m_lineHeight;
-    short m_minWidth;
-    short m_maxWidth;
-    short m_beginMinWidth;
-    short m_endMinWidth;
+    DOM::DOMStringImpl *str;
+    
+    InlineTextBox* m_firstTextBox;
+    InlineTextBox* m_lastTextBox;
+    
+    int m_minWidth;
+    int m_maxWidth;
+    int m_beginMinWidth;
+    int m_endMinWidth;
     
     SelectionState m_selectionState : 3 ;
     bool m_hasBreakableChar : 1; // Whether or not we can be broken into multiple lines.
@@ -240,7 +259,12 @@ protected: // members
     bool m_hasBeginWS : 1; // Whether or not we begin with WS (only true if we aren't pre)
     bool m_hasEndWS : 1; // Whether or not we end with WS (only true if we aren't pre)
     
-    // 19 bits left
+    bool m_linesDirty : 1; // This bit indicates that the text run has already dirtied specific
+                           // line boxes, and this hint will enable layoutInlineChildren to avoid
+                           // just dirtying everything when character data is modified (e.g., appended/inserted
+                           // or removed).
+
+    // 22 bits left
 #if APPLE_CHANGES
     mutable bool m_allAsciiChecked:1;
     mutable bool m_allAscii:1;

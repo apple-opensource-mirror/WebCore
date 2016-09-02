@@ -25,6 +25,7 @@
 
 #include "render_style.h"
 #include "css/cssstyleselector.h"
+#include "render_arena.h"
 
 #include "kdebug.h"
 
@@ -155,7 +156,6 @@ StyleFlexibleBoxData::StyleFlexibleBoxData()
     pack = RenderStyle::initialBoxPack();
     orient = RenderStyle::initialBoxOrient();
     lines = RenderStyle::initialBoxLines();
-    flexed_height = -1;
 }
 
 StyleFlexibleBoxData::StyleFlexibleBoxData(const StyleFlexibleBoxData& o)
@@ -168,34 +168,80 @@ StyleFlexibleBoxData::StyleFlexibleBoxData(const StyleFlexibleBoxData& o)
     pack = o.pack;
     orient = o.orient;
     lines = o.lines;
-    flexed_height = o.flexed_height;
 }
 
 bool StyleFlexibleBoxData::operator==(const StyleFlexibleBoxData& o) const
 {
     return flex == o.flex && flex_group == o.flex_group &&
            ordinal_group == o.ordinal_group && align == o.align &&
-           pack == o.pack && orient == o.orient && lines == o.lines &&
-           flexed_height == o.flexed_height;
+           pack == o.pack && orient == o.orient && lines == o.lines;
 }
 
 StyleCSS3NonInheritedData::StyleCSS3NonInheritedData()
-:Shared<StyleCSS3NonInheritedData>(), opacity(RenderStyle::initialOpacity())
+:Shared<StyleCSS3NonInheritedData>(), 
+#if APPLE_CHANGES
+lineClamp(RenderStyle::initialLineClamp()),
+#endif
+opacity(RenderStyle::initialOpacity()),
+userDrag(RenderStyle::initialUserDrag()),
+userSelect(RenderStyle::initialUserSelect()),
+textOverflow(RenderStyle::initialTextOverflow())
+#ifndef KHTML_NO_XBL
+, bindingURI(0)
+#endif
 {
 }
 
 StyleCSS3NonInheritedData::StyleCSS3NonInheritedData(const StyleCSS3NonInheritedData& o)
-:Shared<StyleCSS3NonInheritedData>(), opacity(o.opacity), flexibleBox(o.flexibleBox), marquee(o.marquee)
+:Shared<StyleCSS3NonInheritedData>(), 
+#if APPLE_CHANGES
+lineClamp(o.lineClamp),
+#endif
+opacity(o.opacity), flexibleBox(o.flexibleBox), marquee(o.marquee),
+userDrag(o.userDrag), userSelect(o.userSelect), textOverflow(o.textOverflow)
 {
+#ifndef KHTML_NO_XBL
+    bindingURI = o.bindingURI ? o.bindingURI->copy() : 0;
+#endif
 }
+
+StyleCSS3NonInheritedData::~StyleCSS3NonInheritedData()
+{
+#ifndef KHTML_NO_XBL
+    delete bindingURI;
+#endif
+}
+
+#ifndef KHTML_NO_XBL
+bool StyleCSS3NonInheritedData::bindingsEquivalent(const StyleCSS3NonInheritedData& o) const
+{
+    if (this == &o) return true;
+    if (!bindingURI && o.bindingURI || bindingURI && !o.bindingURI)
+        return false;
+    if (bindingURI && o.bindingURI && (*bindingURI != *o.bindingURI))
+        return false;
+    return true;
+}
+#endif
 
 bool StyleCSS3NonInheritedData::operator==(const StyleCSS3NonInheritedData& o) const
 {
-    return opacity == o.opacity && flexibleBox == o.flexibleBox && marquee == o.marquee;
+    return opacity == o.opacity && flexibleBox == o.flexibleBox && marquee == o.marquee &&
+           userDrag == o.userDrag && userSelect == o.userSelect && textOverflow == o.textOverflow
+#ifndef KHTML_NO_XBL
+           && bindingsEquivalent(o)
+#endif
+#if APPLE_CHANGES
+           && lineClamp == o.lineClamp
+#endif
+    ;
 }
 
 StyleCSS3InheritedData::StyleCSS3InheritedData()
-:Shared<StyleCSS3InheritedData>(), textShadow(0)
+:Shared<StyleCSS3InheritedData>(), textShadow(0), userModify(READ_ONLY)
+#if APPLE_CHANGES
+, textSizeAdjust(RenderStyle::initialTextSizeAdjust())
+#endif
 {
 
 }
@@ -204,6 +250,10 @@ StyleCSS3InheritedData::StyleCSS3InheritedData(const StyleCSS3InheritedData& o)
 :Shared<StyleCSS3InheritedData>()
 {
     textShadow = o.textShadow ? new ShadowData(*o.textShadow) : 0;
+    userModify = o.userModify;
+#if APPLE_CHANGES
+    textSizeAdjust = o.textSizeAdjust;
+#endif
 }
 
 StyleCSS3InheritedData::~StyleCSS3InheritedData()
@@ -213,7 +263,11 @@ StyleCSS3InheritedData::~StyleCSS3InheritedData()
 
 bool StyleCSS3InheritedData::operator==(const StyleCSS3InheritedData& o) const
 {
-    return shadowDataEquivalent(o);
+    return (userModify == o.userModify) && shadowDataEquivalent(o)
+#if APPLE_CHANGES
+            && (textSizeAdjust == o.textSizeAdjust)
+#endif
+    ;
 }
 
 bool StyleCSS3InheritedData::shadowDataEquivalent(const StyleCSS3InheritedData& o) const
@@ -267,11 +321,48 @@ bool StyleInheritedData::operator==(const StyleInheritedData& o) const
         page_break_inside == o.page_break_inside;
 }
 
-RenderStyle::RenderStyle()
+// ----------------------------------------------------------
+
+void* RenderStyle::operator new(size_t sz, RenderArena* renderArena) throw()
 {
-//    counter++;
+    return renderArena->allocate(sz);
+}
+
+void RenderStyle::operator delete(void* ptr, size_t sz)
+{
+    // Stash size where detach can find it.
+    *(size_t *)ptr = sz;
+}
+
+void RenderStyle::arenaDelete(RenderArena *arena)
+{
+    RenderStyle *ps = pseudoStyle;
+    RenderStyle *prev = 0;
+    
+    while (ps) {
+        prev = ps;
+        ps = ps->pseudoStyle;
+	// to prevent a double deletion.
+	// this works only because the styles below aren't really shared
+	// Dirk said we need another construct as soon as these are shared
+        prev->pseudoStyle = 0;
+        prev->deref(arena);
+    }
+    delete content;
+    
+    delete this;
+    
+    // Recover the size left there for us by operator delete and free the memory.
+    arena->free(*(size_t *)this, this);
+}
+
+RenderStyle::RenderStyle()
+:m_pseudoState(PseudoUnknown), m_affectedByAttributeSelectors(false)
+{
+    m_ref = 0;
+    
     if (!_default)
-	_default = new RenderStyle(true);
+	_default = ::new RenderStyle(true);
 
     box = _default->box;
     visual = _default->visual;
@@ -289,6 +380,7 @@ RenderStyle::RenderStyle()
 }
 
 RenderStyle::RenderStyle(bool)
+:m_pseudoState(PseudoUnknown), m_affectedByAttributeSelectors(false)
 {
     setBitDefaults();
 
@@ -304,15 +396,17 @@ RenderStyle::RenderStyle(bool)
 
     pseudoStyle = 0;
     content = 0;
+    m_ref = 1;
 }
 
 RenderStyle::RenderStyle(const RenderStyle& o)
-    : Shared<RenderStyle>(),
-      inherited_flags( o.inherited_flags ), noninherited_flags( o.noninherited_flags ),
+    : inherited_flags( o.inherited_flags ), noninherited_flags( o.noninherited_flags ),
       box( o.box ), visual( o.visual ), background( o.background ), surround( o.surround ),
       css3NonInheritedData( o.css3NonInheritedData ), css3InheritedData( o.css3InheritedData ),
-      inherited( o.inherited ), pseudoStyle( 0 ), content( o.content )
+      inherited( o.inherited ), pseudoStyle( 0 ), content( o.content ), m_pseudoState(o.m_pseudoState),
+      m_affectedByAttributeSelectors(false)
 {
+    m_ref = 0;
 }
 
 void RenderStyle::inheritFrom(const RenderStyle* inheritParent)
@@ -324,19 +418,6 @@ void RenderStyle::inheritFrom(const RenderStyle* inheritParent)
 
 RenderStyle::~RenderStyle()
 {
-    RenderStyle *ps = pseudoStyle;
-    RenderStyle *prev = 0;
-
-    while (ps) {
-        prev = ps;
-        ps = ps->pseudoStyle;
-	// to prevent a double deletion.
-	// this works only because the styles below aren't really shared
-	// Dirk said we need another construct as soon as these are shared
-        prev->pseudoStyle = 0;
-        prev->deref();
-    }
-    delete content;
 }
 
 bool RenderStyle::operator==(const RenderStyle& o) const
@@ -415,23 +496,6 @@ void RenderStyle::addPseudoStyle(RenderStyle* pseudo)
     pseudoStyle = pseudo;
 }
 
-void RenderStyle::removePseudoStyle(PseudoId pid)
-{
-    RenderStyle *ps = pseudoStyle;
-    RenderStyle *prev = this;
-
-    while (ps) {
-        if (ps->noninherited_flags._styleType==pid) {
-            prev->pseudoStyle = ps->pseudoStyle;
-            ps->deref();
-            return;
-        }
-        prev = ps;
-        ps = ps->pseudoStyle;
-    }
-}
-
-
 bool RenderStyle::inheritedNotEqual( RenderStyle *other ) const
 {
     return inherited_flags != other->inherited_flags ||
@@ -477,6 +541,10 @@ RenderStyle::Diff RenderStyle::diff( const RenderStyle *other ) const
          !(surround->margin == other->surround->margin) ||
          !(surround->padding == other->surround->padding) ||
          *css3NonInheritedData->flexibleBox.get() != *other->css3NonInheritedData->flexibleBox.get() ||
+#if APPLE_CHANGES
+         (css3NonInheritedData->lineClamp != other->css3NonInheritedData->lineClamp) ||
+         (css3InheritedData->textSizeAdjust != other->css3InheritedData->textSizeAdjust) ||
+#endif
         !(inherited->indent == other->inherited->indent) ||
         !(inherited->line_height == other->inherited->line_height) ||
         !(inherited->style_image == other->inherited->style_image) ||
@@ -492,7 +560,8 @@ RenderStyle::Diff RenderStyle::diff( const RenderStyle *other ) const
         !(noninherited_flags._originalDisplay == other->noninherited_flags._originalDisplay) ||
          visual->colspan != other->visual->colspan ||
          visual->counter_increment != other->visual->counter_increment ||
-         visual->counter_reset != other->visual->counter_reset)
+         visual->counter_reset != other->visual->counter_reset ||
+         css3NonInheritedData->textOverflow != other->css3NonInheritedData->textOverflow)
         return CbLayout;
    
     // changes causing Layout changes:
@@ -586,6 +655,9 @@ RenderStyle::Diff RenderStyle::diff( const RenderStyle *other ) const
         visual->textDecoration != other->visual->textDecoration ||
         css3NonInheritedData->opacity != other->css3NonInheritedData->opacity ||
         !css3InheritedData->shadowDataEquivalent(*other->css3InheritedData.get()) ||
+        css3InheritedData->userModify != other->css3InheritedData->userModify ||
+        css3NonInheritedData->userSelect != other->css3NonInheritedData->userSelect ||
+        css3NonInheritedData->userDrag != other->css3NonInheritedData->userDrag ||
         !(visual->palette == other->visual->palette)
 	)
         return Visible;
@@ -741,6 +813,59 @@ void ContentData::clearContent()
             ;
     }
 }
+
+#ifndef KHTML_NO_XBL
+BindingURI::BindingURI(DOM::DOMStringImpl* uri) 
+:m_next(0)
+{ 
+    m_uri = uri;
+    if (uri) uri->ref();
+}
+
+BindingURI::~BindingURI()
+{
+    if (m_uri)
+        m_uri->deref();
+    delete m_next;
+}
+
+BindingURI* BindingURI::copy()
+{
+    BindingURI* newBinding = new BindingURI(m_uri);
+    if (next()) {
+        BindingURI* nextCopy = next()->copy();
+        newBinding->setNext(nextCopy);
+    }
+    
+    return newBinding;
+}
+
+bool BindingURI::operator==(const BindingURI& o) const
+{
+    if ((m_next && !o.m_next) || (!m_next && o.m_next) ||
+        (m_next && o.m_next && *m_next != *o.m_next))
+        return false;
+    
+    if (m_uri == o.m_uri)
+        return true;
+    if (!m_uri || !o.m_uri)
+        return false;
+    
+    return DOMString(m_uri) == DOMString(o.m_uri);
+}
+
+void RenderStyle::addBindingURI(DOM::DOMStringImpl* uri)
+{
+    BindingURI* binding = new BindingURI(uri);
+    if (!bindingURIs())
+        SET_VAR(css3NonInheritedData, bindingURI, binding)
+    else 
+        for (BindingURI* b = bindingURIs(); b; b = b->next()) {
+            if (!b->next())
+                b->setNext(binding);
+        }
+}
+#endif
 
 void RenderStyle::setTextShadow(ShadowData* val, bool add)
 {

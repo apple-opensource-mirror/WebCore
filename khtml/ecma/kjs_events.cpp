@@ -18,7 +18,7 @@
  *  License along with this library; if not, write to the Free Software
  *  Foundation, Inc., 59 Temple Place, Suite 330, Boston, MA  02111-1307  USA
  */
-
+#include "khtml_part.h"
 #include "kjs_window.h"
 #include "kjs_events.h"
 #include "kjs_events.lut.h"
@@ -28,12 +28,14 @@
 #include "xml/dom_docimpl.h"
 #include "xml/dom2_eventsimpl.h"
 #include "rendering/render_object.h"
+#include "misc/loader.h"
 
 #include <kdebug.h>
 
 using namespace KJS;
 
 using DOM::KeyboardEvent;
+using DOM::EventImpl;
 
 // -------------------------------------------------------------------------
 
@@ -111,10 +113,15 @@ void JSEventListener::handleEvent(DOM::Event &evt, bool isWindowEvent)
     interpreter->setCurrentEvent( 0 );
 #if APPLE_CHANGES
     if ( exec->hadException() ) {
+        KJS::Interpreter::lock();
+        char *message = exec->exception().toObject(exec).get(exec, messagePropertyName).toString(exec).ascii();
+        int lineNumber =  exec->exception().toObject(exec).get(exec, "line").toInt32(exec);
+        UString sourceURL = exec->exception().toObject(exec).get(exec, "sourceURL").toString(exec);
+        KJS::Interpreter::unlock();
         if (Interpreter::shouldPrintExceptions()) {
-	    char *message = exec->exception().toObject(exec).get(exec, messagePropertyName).toString(exec).ascii();
 	    printf("(event handler):%s\n", message);
 	}
+        KWQ(part)->addMessageToConsole(message, lineNumber, sourceURL.qstring());
         exec->clearException();
     }
 #else
@@ -157,7 +164,7 @@ JSLazyEventListener::JSLazyEventListener(QString _code, const Object &_win, bool
 void JSLazyEventListener::handleEvent(DOM::Event &evt, bool isWindowEvent)
 {
   parseCode();
-  if (!listener.isNull()) {
+  if (!listener.isNull()) { 
     JSEventListener::handleEvent(evt, isWindowEvent);
   }
 }
@@ -188,7 +195,7 @@ void JSLazyEventListener::parseCode() const
       KJS::Object constr = interpreter->builtinFunction();
       KJS::List args;
 
-      static KJS::String eventString("event");
+      static ProtectedValue eventString = KJS::String("event");
 
       args.append(eventString);
       args.append(KJS::String(code));
@@ -276,7 +283,7 @@ Value KJS::getEventConstructor(ExecState *exec)
 
 const ClassInfo DOMEvent::info = { "Event", 0, &DOMEventTable, 0 };
 /*
-@begin DOMEventTable 7
+@begin DOMEventTable 12
   type		DOMEvent::Type		DontDelete|ReadOnly
   target	DOMEvent::Target	DontDelete|ReadOnly
   currentTarget	DOMEvent::CurrentTarget	DontDelete|ReadOnly
@@ -287,6 +294,8 @@ const ClassInfo DOMEvent::info = { "Event", 0, &DOMEventTable, 0 };
   timeStamp	DOMEvent::TimeStamp	DontDelete|ReadOnly
   returnValue   DOMEvent::ReturnValue   DontDelete
   cancelBubble  DOMEvent::CancelBubble  DontDelete
+  dataTransfer	DOMMouseEvent::DataTransfer DontDelete|ReadOnly
+  clipboardData  DOMEvent::ClipboardData  DontDelete|ReadOnly
 @end
 @begin DOMEventProtoTable 3
   stopPropagation 	DOMEvent::StopPropagation	DontDelete|Function 0
@@ -299,11 +308,19 @@ IMPLEMENT_PROTOFUNC(DOMEventProtoFunc)
 IMPLEMENT_PROTOTYPE(DOMEventProto, DOMEventProtoFunc)
 
 DOMEvent::DOMEvent(ExecState *exec, DOM::Event e)
-  : DOMObject(DOMEventProto::self(exec)), event(e) { }
+  : DOMObject(DOMEventProto::self(exec)), event(e), clipboard(0) { }
 
 DOMEvent::~DOMEvent()
 {
   ScriptInterpreter::forgetDOMObject(event.handle());
+}
+
+// pass marks through to JS objects we hold during garbage collection
+void DOMMouseEvent::mark()
+{
+    ObjectImp::mark();
+    if (clipboard && !clipboard->marked())
+        clipboard->mark();
 }
 
 Value DOMEvent::tryGet(ExecState *exec, const Identifier &p) const
@@ -336,6 +353,32 @@ Value DOMEvent::getValueProperty(ExecState *exec, int token) const
     return Boolean(event.cancelable());
   case TimeStamp:
     return Number((long unsigned int)event.timeStamp()); // ### long long ?
+  case ClipboardData:
+  {
+    DOM::EventImpl *ei = event.handle();
+    if (ei->isClipboardEvent()) {
+      DOM::ClipboardEventImpl *impl = static_cast<DOM::ClipboardEventImpl *>(event.handle());
+      if (!clipboard) {
+        clipboard = new Clipboard(exec, impl->clipboard());
+      }
+      return Object(clipboard);
+    } else {
+      return Undefined();
+    }
+  }
+  case DataTransfer:
+  {
+    DOM::EventImpl *ei = event.handle();
+    if (ei->isDragEvent()) {
+      DOM::MouseEventImpl *impl = static_cast<DOM::MouseEventImpl *>(event.handle());
+      if (!clipboard) {
+        clipboard = new Clipboard(exec, impl->clipboard());
+      }
+      return Object(clipboard);
+    } else {
+      return Undefined();
+    }
+  }
   default:
     kdWarning() << "Unhandled token in DOMEvent::getValueProperty : " << token << endl;
     return Value();
@@ -389,7 +432,7 @@ Value KJS::getDOMEvent(ExecState *exec, DOM::Event e)
   DOM::EventImpl *ei = e.handle();
   if (!ei)
     return Null();
-  ScriptInterpreter* interp = static_cast<ScriptInterpreter *>(exec->interpreter());
+  ScriptInterpreter* interp = static_cast<ScriptInterpreter *>(exec->dynamicInterpreter());
 
   KJS::Interpreter::lock();
 
@@ -523,7 +566,7 @@ Value DOMUIEventProtoFunc::tryCall(ExecState *exec, Object &thisObj, const List 
                                                      args[1].toBoolean(exec),
                                                      args[2].toBoolean(exec),
                                                      v,
-                                                     args[4].toInteger(exec));
+                                                     args[4].toInt32(exec));
       }
       return Undefined();
   }
@@ -535,7 +578,7 @@ Value DOMUIEventProtoFunc::tryCall(ExecState *exec, Object &thisObj, const List 
 const ClassInfo DOMMouseEvent::info = { "MouseEvent", &DOMUIEvent::info, &DOMMouseEventTable, 0 };
 
 /*
-@begin DOMMouseEventTable 2
+@begin DOMMouseEventTable 16
   screenX	DOMMouseEvent::ScreenX	DontDelete|ReadOnly
   screenY	DOMMouseEvent::ScreenY	DontDelete|ReadOnly
   clientX	DOMMouseEvent::ClientX	DontDelete|ReadOnly
@@ -653,16 +696,16 @@ Value DOMMouseEventProtoFunc::tryCall(ExecState *exec, Object &thisObj, const Li
                                 args[1].toBoolean(exec), // canBubbleArg
                                 args[2].toBoolean(exec), // cancelableArg
                                 toAbstractView(args[3]), // viewArg
-                                args[4].toInteger(exec), // detailArg
-                                args[5].toInteger(exec), // screenXArg
-                                args[6].toInteger(exec), // screenYArg
-                                args[7].toInteger(exec), // clientXArg
-                                args[8].toInteger(exec), // clientYArg
+                                args[4].toInt32(exec), // detailArg
+                                args[5].toInt32(exec), // screenXArg
+                                args[6].toInt32(exec), // screenYArg
+                                args[7].toInt32(exec), // clientXArg
+                                args[8].toInt32(exec), // clientYArg
                                 args[9].toBoolean(exec), // ctrlKeyArg
                                 args[10].toBoolean(exec), // altKeyArg
                                 args[11].toBoolean(exec), // shiftKeyArg
                                 args[12].toBoolean(exec), // metaKeyArg
-                                args[13].toInteger(exec), // buttonArg
+                                args[13].toInt32(exec), // buttonArg
                                 toNode(args[14])); // relatedTargetArg
       return Undefined();
   }
@@ -746,7 +789,7 @@ Value DOMKeyboardEventProtoFunc::tryCall(ExecState *exec, Object &thisObj, const
                               args[2].toBoolean(exec), // cancelableArg
                               toAbstractView(args[3]), // viewArg
                               args[4].toString(exec).string(), // keyIdentifier
-                              args[5].toInteger(exec), // keyLocationArg
+                              args[5].toInt32(exec), // keyLocationArg
                               args[6].toBoolean(exec), // ctrlKeyArg
                               args[7].toBoolean(exec), // altKeyArg
                               args[8].toBoolean(exec), // shiftKeyArg
@@ -847,8 +890,191 @@ Value DOMMutationEventProtoFunc::tryCall(ExecState *exec, Object &thisObj, const
                                       args[4].toString(exec).string(), // prevValueArg
                                       args[5].toString(exec).string(), // newValueArg
                                       args[6].toString(exec).string(), // attrNameArg
-                                      args[7].toInteger(exec)); // attrChangeArg
+                                      args[7].toInt32(exec)); // attrChangeArg
       return Undefined();
   }
   return Undefined();
 }
+
+// -------------------------------------------------------------------------
+
+const ClassInfo Clipboard::info = { "Clipboard", 0, &ClipboardTable, 0 };
+
+/* Source for ClipboardTable. Use "make hashtables" to regenerate.
+@begin ClipboardTable 3
+  dropEffect	Clipboard::DropEffect	DontDelete
+  effectAllowed	Clipboard::EffectAllowed	DontDelete
+  types         Clipboard::Types	DontDelete|ReadOnly
+@end
+@begin ClipboardProtoTable 4
+  clearData	Clipboard::ClearData	DontDelete|Function 0
+  getData	Clipboard::GetData	DontDelete|Function 1
+  setData	Clipboard::SetData	DontDelete|Function 2
+  setDragImage	Clipboard::SetDragImage	DontDelete|Function 3
+@end
+*/
+
+DEFINE_PROTOTYPE("Clipboard", ClipboardProto)
+IMPLEMENT_PROTOFUNC(ClipboardProtoFunc)
+IMPLEMENT_PROTOTYPE(ClipboardProto, ClipboardProtoFunc)
+
+Clipboard::Clipboard(ExecState *exec, DOM::ClipboardImpl *cb)
+: DOMObject(ClipboardProto::self(exec)), clipboard(cb)
+{
+    if (clipboard)
+        clipboard->ref();
+}
+
+Clipboard::~Clipboard()
+{
+    if (clipboard)
+        clipboard->deref();
+}
+
+static Value stringOrUndefined(const DOM::DOMString &str)
+{
+    if (str.isNull()) {
+        return Undefined();
+    } else {
+        return String(str);
+    }
+}
+
+// FIXME lookups of dropEffect and effectAllowed should fail if !clipboard->isForDragging
+
+Value Clipboard::tryGet(ExecState *exec, const Identifier &propertyName) const
+{
+    return DOMObjectLookupGetValue<Clipboard,DOMObject>(exec, propertyName, &ClipboardTable, this);
+}
+
+Value Clipboard::getValueProperty(ExecState *exec, int token) const
+{
+    switch (token) {
+        case DropEffect:
+            return stringOrUndefined(clipboard->dropEffect());
+        case EffectAllowed:
+            return stringOrUndefined(clipboard->effectAllowed());
+        case Types:
+        {
+            QStringList qTypes = clipboard->types();
+            if (qTypes.isEmpty()) {
+                return Null(); 
+            } else {
+                List list;
+                for (QStringList::Iterator it = qTypes.begin(); it != qTypes.end(); ++it) {
+                    list.append(String(UString(*it)));
+                }
+                return exec->lexicalInterpreter()->builtinArray().construct(exec, list);
+            }
+        }
+        default:
+            kdWarning() << "Clipboard::getValueProperty unhandled token " << token << endl;
+            return Value();
+    }
+}
+
+void Clipboard::tryPut(ExecState *exec, const Identifier &propertyName, const Value& value, int attr)
+{
+    DOMObjectLookupPut<Clipboard,DOMObject>(exec, propertyName, value, attr, &ClipboardTable, this );
+}
+
+void Clipboard::putValue(ExecState *exec, int token, const Value& value, int /*attr*/)
+{
+    switch (token) {
+        case DropEffect:
+            clipboard->setDropEffect(value.toString(exec).string());
+            break;
+        case EffectAllowed:
+            clipboard->setEffectAllowed(value.toString(exec).string());
+            break;
+        default:
+            kdWarning() << "Clipboard::putValue unhandled token " << token << endl;
+    }
+}
+
+Value ClipboardProtoFunc::tryCall(ExecState *exec, Object &thisObj, const List &args)
+{
+    if (!thisObj.inherits(&KJS::Clipboard::info)) {
+        Object err = Error::create(exec,TypeError);
+        exec->setException(err);
+        return err;
+    }
+
+    Clipboard *cb = static_cast<Clipboard *>(thisObj.imp());
+    switch (id) {
+        case Clipboard::ClearData:
+            if (args.size() == 0) {
+                cb->clipboard->clearAllData();
+                return Undefined();
+            } else if (args.size() == 1) {
+                cb->clipboard->clearData(args[0].toString(exec).string());
+                return Undefined();
+            } else {
+                Object err = Error::create(exec,SyntaxError,"clearData: Invalid number of arguments");
+                exec->setException(err);
+                return err;
+            }
+        case Clipboard::GetData:
+        {
+            if (args.size() == 1) {
+                bool success;
+                DOM::DOMString result = cb->clipboard->getData(args[0].toString(exec).string(), success);
+                if (success) {
+                    return String(result);
+                } else {
+                    return Undefined();
+                }
+            } else {
+                Object err = Error::create(exec,SyntaxError,"getData: Invalid number of arguments");
+                exec->setException(err);
+                return err;
+            }
+        }
+        case Clipboard::SetData:
+            if (args.size() == 2) {
+                return Boolean(cb->clipboard->setData(args[0].toString(exec).string(), args[1].toString(exec).string()));
+            } else {
+                Object err = Error::create(exec,SyntaxError,"setData: Invalid number of arguments");
+                exec->setException(err);
+                return err;
+            }
+        case Clipboard::SetDragImage:
+        {
+            if (args.size() != 3) {
+                Object err = Error::create(exec, SyntaxError,"setDragImage: Invalid number of arguments");
+                exec->setException(err);
+                return err;
+            }
+
+            int x = (int)args[1].toNumber(exec);
+            int y = (int)args[2].toNumber(exec);
+
+            // See if they passed us a node
+            DOM::Node node = toNode(args[0]);
+            if (!node.isNull()) {
+                if (node.nodeType() == DOM::Node::ELEMENT_NODE) {
+                    cb->clipboard->setDragImageElement(node, QPoint(x,y));                    
+                    return Undefined();
+                } else {
+                    Object err = Error::create(exec, SyntaxError,"setDragImageFromElement: Invalid first argument");
+                    exec->setException(err);
+                    return err;
+                }
+            }
+
+            // See if they passed us an Image object
+            ObjectImp *o = static_cast<ObjectImp*>(args[0].imp());
+            if (o->inherits(&Image::info)) {
+                Image *JSImage = static_cast<Image*>(o);
+                cb->clipboard->setDragImage(JSImage->image()->pixmap(), QPoint(x,y));                
+                return Undefined();
+            } else {
+                Object err = Error::create(exec,TypeError);
+                exec->setException(err);
+                return err;
+            }
+        }
+    }
+    return Undefined();
+}
+

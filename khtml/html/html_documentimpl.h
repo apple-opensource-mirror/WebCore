@@ -28,23 +28,12 @@
 #include "xml/dom_docimpl.h"
 #include "misc/loader_client.h"
 
-#include <qmap.h>
-
 class KHTMLView;
 class QString;
 
 namespace DOM {
 
-    class HTMLCollection;
-    class NodeList;
-    class Element;
-    class HTMLElement;
     class HTMLElementImpl;
-    class DOMString;
-    class CSSStyleSheetImpl;
-    class HTMLMapElementImpl;
-    class HTMLImageElementImpl;
-    class HTMLFormElementImpl;
 
 class HTMLDocumentImpl : public DOM::DocumentImpl, public khtml::CachedObjectClient
 {
@@ -54,6 +43,7 @@ public:
     ~HTMLDocumentImpl();
 
     virtual bool isHTMLDocument() const { return true; }
+    virtual ElementImpl *documentElement() const;
 
     DOMString referrer() const;
     DOMString lastModified() const;
@@ -64,18 +54,13 @@ public:
     void setPolicyBaseURL(const DOMString &s) { m_policyBaseURL = s; }
 #endif
 
-    DOMString designMode() const;
-    void setDesignMode(const DOMString &);
-
     void setBody(HTMLElementImpl *_body, int& exceptioncode);
 
-    virtual Tokenizer *createTokenizer();
+    virtual khtml::Tokenizer *createTokenizer();
 
     virtual bool childAllowed( NodeImpl *newChild );
 
     virtual ElementImpl *createElement ( const DOMString &tagName, int &exceptioncode );
-
-    HTMLMapElementImpl* getMap(const DOMString& url_);
 
     virtual void determineParseMode( const QString &str );
 
@@ -86,9 +71,6 @@ public:
 protected:
     HTMLElementImpl *bodyElement;
     HTMLElementImpl *htmlElement;
-    friend class HTMLMapElementImpl;
-    friend class HTMLImageElementImpl;
-    QMap<QString,HTMLMapElementImpl*> mapMap;
 
 protected slots:
     /**
@@ -99,7 +81,7 @@ private:
      // we actually store ints inside the pointer value itself; would use void *
     // but that makes the template unhappy.
     QDict<char> namedImageAndFormCounts;
-    
+
 #if APPLE_CHANGES
     DOMString m_policyBaseURL;
 #endif

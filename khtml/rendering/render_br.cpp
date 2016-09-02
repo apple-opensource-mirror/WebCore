@@ -20,12 +20,14 @@
  *
  */
 #include "render_br.h"
+#include "xml/dom_position.h"
 
 using namespace khtml;
-
+using DOM::Position;
 
 RenderBR::RenderBR(DOM::NodeImpl* node)
-    : RenderText(node, new DOM::DOMStringImpl(QChar('\n')))
+    : RenderText(node, new DOM::DOMStringImpl(QChar('\n'))), m_x(0), m_y(0), m_height(0),
+      m_lineHeight(-1)
 {
 }
 
@@ -33,43 +35,95 @@ RenderBR::~RenderBR()
 {
 }
 
-void RenderBR::cursorPos(int /*offset*/, int &_x, int &_y, int &height)
+void RenderBR::setPos(int xPos, int yPos)
 {
-    if (previousSibling() && !previousSibling()->isBR() && !previousSibling()->isFloating()) {
-        int offset = 0;
-        if (previousSibling()->isText())
-            offset = static_cast<RenderText*>(previousSibling())->length();
+    m_x = xPos;
+    m_y = yPos;
+}
 
-        previousSibling()->cursorPos(offset,_x,_y,height);
-        return;
+InlineBox* RenderBR::createInlineBox(bool makePlaceholder, bool isRootLineBox, bool isOnlyRun)
+{
+    // We only make a box for a <br> if we are on a line by ourself or in strict mode
+    // (Note the use of strict mode.  In "almost strict" mode, we don't make a box for <br>.)
+    if (isOnlyRun || document()->inStrictMode())
+        return RenderText::createInlineBox(makePlaceholder, isRootLineBox, isOnlyRun);
+    return 0;
+}
+
+void RenderBR::position(InlineBox* box, int from, int len, bool reverse)
+{
+    InlineTextBox *s = static_cast<InlineTextBox*>(box);
+    
+    // We want the box to be destroyed, but get the position of it first.
+    m_x = s->xPos();
+    m_y = s->yPos();
+    m_height = s->height();
+}
+
+short RenderBR::lineHeight(bool firstLine, bool isRootLineBox) const
+{
+    if (firstLine) {
+        RenderStyle* s = style(firstLine);
+        Length lh = s->lineHeight();
+        if (lh.value < 0) {
+            if (s == style()) {
+                if (m_lineHeight == -1)
+                    m_lineHeight = RenderObject::lineHeight(false);
+                return m_lineHeight;
+            }
+            return s->fontMetrics().lineSpacing();
+	}
+        if (lh.isPercent())
+            return lh.minWidth(s->font().pixelSize());
+        return lh.value;
     }
+    
+    if (m_lineHeight == -1)
+        m_lineHeight = RenderObject::lineHeight(false);
+    return m_lineHeight;
+}
+
+void RenderBR::setStyle(RenderStyle* _style)
+{
+    RenderText::setStyle(_style);
+    m_lineHeight = -1;
+}
+
+long RenderBR::caretMinOffset() const 
+{ 
+    return 0; 
+}
+
+long RenderBR::caretMaxOffset() const 
+{ 
+    return 1; 
+}
+
+unsigned long RenderBR::caretMaxRenderedOffset() const
+{
+    return 1;
+}
+
+Position RenderBR::positionForCoordinates(int _x, int _y)
+{
+    return Position(element(), 0);
+}
+
+void RenderBR::caretPos(int offset, bool override, int &_x, int &_y, int &_w, int &_h)
+{
+    // EDIT FIXME: This does not work yet. Some other changes are need before
+    // an accurate position can be determined.
+    _h = lineHeight(false);
+    _x = xPos();
+    _y = yPos();
 
     int absx, absy;
     absolutePosition(absx,absy);
-    if (absx == -1) {
-        // we don't know our absolute position, and there is no point returning just a relative one
-        _x = _y = -1;
-    }
-    else {
-        _x += absx;
-        _y += absy;
-    }
-    height = RenderText::verticalPositionHint( false );
-
+    _x += absx;
+    _y += absy;
 }
 
-FindSelectionResult RenderBR::checkSelectionPointIgnoringContinuations(int _x, int _y, int _tx, int _ty, DOM::NodeImpl*& node, int &offset)
+InlineBox *RenderBR::inlineBox(long offset)
 {
-    FindSelectionResult result = RenderText::checkSelectionPointIgnoringContinuations(_x, _y, _tx, _ty, node, offset);
-
-    // Since the DOM does not consider this to be a text element, we can't return an offset of 1,
-    // because that means after the first child (and we have none) rather than after the
-    // first character. Instead we return a result of "after" and an offset of 0.
-    if (offset == 1 && node == element()) {
-        offset = 0;
-        result = SelectionPointAfter;
-    }
-
-    return result;
+    return firstTextBox();
 }
-

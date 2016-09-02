@@ -88,14 +88,14 @@ unsigned long HTMLCollectionImpl::calcLength(NodeImpl *current) const
                     deep = false;
                 break;
             case TR_CELLS:
-                if(e->id() == ID_TD)
+                if(e->id() == ID_TD || e->id() == ID_TH)
                     len++;
                 else if(e->id() == ID_TABLE)
                     deep = false;
                 break;
             case TABLE_ROWS:
             case TSECTION_ROWS:
-                if(e->id() == ID_TR || e->id() == ID_TH)
+                if(e->id() == ID_TR)
                     len++;
                 else if(e->id() == ID_TABLE)
                     deep = false;
@@ -110,6 +110,10 @@ unsigned long HTMLCollectionImpl::calcLength(NodeImpl *current) const
                 break;
             case DOC_APPLETS:   // all OBJECT and APPLET elements
                 if(e->id() == ID_OBJECT || e->id() == ID_APPLET)
+                    len++;
+                break;
+            case DOC_EMBEDS:   // all EMBED elements
+                if(e->id() == ID_EMBED)
                     len++;
                 break;
             case DOC_LINKS:     // all A _and_ AREA elements with a value for href
@@ -173,14 +177,14 @@ NodeImpl *HTMLCollectionImpl::getItem(NodeImpl *current, int index, int &len) co
                     deep = false;
                 break;
             case TR_CELLS:
-                if(e->id() == ID_TD)
+                if(e->id() == ID_TD || e->id() == ID_TH)
                     len++;
                 else if(e->id() == ID_TABLE)
                     deep = false;
                 break;
             case TABLE_ROWS:
             case TSECTION_ROWS:
-                if(e->id() == ID_TR || e->id() == ID_TH)
+                if(e->id() == ID_TR)
                     len++;
                 else if(e->id() == ID_TABLE)
                     deep = false;
@@ -195,6 +199,10 @@ NodeImpl *HTMLCollectionImpl::getItem(NodeImpl *current, int index, int &len) co
                 break;
             case DOC_APPLETS:   // all OBJECT and APPLET elements
                 if(e->id() == ID_OBJECT || e->id() == ID_APPLET)
+                    len++;
+                break;
+            case DOC_EMBEDS:   // all EMBED elements
+                if(e->id() == ID_EMBED)
                     len++;
                 break;
             case DOC_LINKS:     // all A _and_ AREA elements with a value for href
@@ -297,14 +305,14 @@ NodeImpl *HTMLCollectionImpl::getNamedItem( NodeImpl *current, int attr_id,
                     deep = false;
                 break;
             case TR_CELLS:
-                if(e->id() == ID_TD)
+                if(e->id() == ID_TD || e->id() == ID_TH)
                     check = true;
                 else if(e->id() == ID_TABLE)
                     deep = false;
                 break;
             case TABLE_ROWS:
             case TSECTION_ROWS:
-                if(e->id() == ID_TR || e->id() == ID_TH)
+                if(e->id() == ID_TR)
                     check = true;
                 else if(e->id() == ID_TABLE)
                     deep = false;
@@ -319,6 +327,10 @@ NodeImpl *HTMLCollectionImpl::getNamedItem( NodeImpl *current, int attr_id,
                 break;
             case DOC_APPLETS:   // all OBJECT and APPLET elements
                 if(e->id() == ID_OBJECT || e->id() == ID_APPLET)
+                    check = true;
+                break;
+            case DOC_EMBEDS:   // all EMBED elements
+                if(e->id() == ID_EMBED)
                     check = true;
                 break;
             case DOC_LINKS:     // all A _and_ AREA elements with a value for href
@@ -347,7 +359,7 @@ NodeImpl *HTMLCollectionImpl::getNamedItem( NodeImpl *current, int attr_id,
                 if (caseSensitive)
                     found = e->getAttribute(attr_id) == name;
                 else
-                    found = e->getAttribute(attr_id).lower() == name.lower();
+                    found = e->getAttribute(attr_id).domString().lower() == name.lower();
                 if (found) {
                     //kdDebug( 6030 ) << "found node: " << e << " " << current << " " << e->id() << " " << e->tagName().string() << endl;
                     return current;
@@ -505,7 +517,7 @@ NodeImpl* HTMLFormCollectionImpl::getNamedFormItem(int attr_id, const DOMString&
                     if (caseSensitive)
                         found = e->getAttribute(attr_id) == name;
                     else
-                        found = e->getAttribute(attr_id).lower() == name.lower();
+                        found = e->getAttribute(attr_id).domString().lower() == name.lower();
                     if (found) {
                         if (!duplicateNumber)
                             return e;
@@ -534,7 +546,7 @@ NodeImpl* HTMLFormCollectionImpl::getNamedImgItem(NodeImpl* current, int attr_id
                 if (caseSensitive)
                     found = e->getAttribute(attr_id) == name;
                 else
-                    found = e->getAttribute(attr_id).lower() == name.lower();
+                    found = e->getAttribute(attr_id).domString().lower() == name.lower();
                 if (found)
                 {
                     if (!duplicateNumber)

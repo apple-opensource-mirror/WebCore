@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003 Apple Computer, Inc.  All rights reserved.
+ * Copyright (C) 2004 Apple Computer, Inc.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -43,7 +43,7 @@
 class NSView;
 #endif
 
-class QWidgetPrivate;
+class KWQWidgetPrivate;
 
 class QWidget : public QObject, public QPaintDevice {
 public:
@@ -123,7 +123,6 @@ public:
     QCursor cursor();
     void unsetCursor();
     bool event(QEvent *);
-    bool focusNextPrevChild(bool);
     bool hasMouseTracking() const;
 
     void show();
@@ -134,6 +133,7 @@ public:
     void wheelEvent(QWheelEvent *) { }
     void keyPressEvent(QKeyEvent *) { }
     void keyReleaseEvent(QKeyEvent *) { }
+    void focusInEvent(QFocusEvent *) { }
     void focusOutEvent(QFocusEvent *) { }
 
     enum BackgroundMode { NoBackground };    
@@ -144,7 +144,8 @@ public:
     NSView *getView() const;
     NSView *getOuterView() const;
     void setView(NSView *aView);
-    
+    virtual void populate() {};
+
     void displayRect(int x, int y, int w, int h);
     void lockDrawingFocus();
     void unlockDrawingFocus();
@@ -153,9 +154,11 @@ public:
     void setDrawingAlpha(float alpha);
 
     void sendConsumedMouseUp();
+    
+    void setIsSelected(bool isSelected);
 
 private:
-    QWidgetPrivate *data;
+    KWQWidgetPrivate *data;
 };
 
 #endif

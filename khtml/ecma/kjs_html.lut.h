@@ -3,76 +3,79 @@
 namespace KJS {
 
 const struct HashEntry HTMLDocumentTableEntries[] = {
-   { "width", HTMLDocument::Width, DontDelete|ReadOnly, 0, 0 },
-   { "links", HTMLDocument::Links, DontDelete|ReadOnly, 0, 0 },
+   { "images", HTMLDocument::Images, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[31] },
+   { 0, 0, 0, 0, 0 },
+   { "domain", HTMLDocument::Domain, DontDelete, 0, 0 },
+   { "URL", HTMLDocument::URL, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[38] },
+   { "cookie", HTMLDocument::Cookie, DontDelete, 0, &HTMLDocumentTableEntries[39] },
+   { "links", HTMLDocument::Links, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[34] },
    { "title", HTMLDocument::Title, DontDelete, 0, 0 },
-   { "vlinkColor", HTMLDocument::VlinkColor, DontDelete, 0, 0 },
+   { "lastModified", HTMLDocument::LastModified, DontDelete|ReadOnly, 0, 0 },
    { 0, 0, 0, 0, 0 },
-   { "writeln", HTMLDocument::WriteLn, DontDelete|Function, 1, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "forms", HTMLDocument::Forms, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[34] },
-   { "scripts", HTMLDocument::Scripts, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[38] },
-   { "captureEvents", HTMLDocument::CaptureEvents, DontDelete|Function, 0, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "write", HTMLDocument::Write, DontDelete|Function, 1, 0 },
-   { "fgColor", HTMLDocument::FgColor, DontDelete, 0, 0 },
-   { "linkColor", HTMLDocument::LinkColor, DontDelete, 0, 0 },
-   { "body", HTMLDocument::Body, DontDelete, 0, &HTMLDocumentTableEntries[33] },
-   { 0, 0, 0, 0, 0 },
+   { "clear", HTMLDocument::Clear, DontDelete|Function, 0, &HTMLDocumentTableEntries[37] },
+   { "body", HTMLDocument::Body, DontDelete, 0, 0 },
+   { "applets", HTMLDocument::Applets, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[30] },
    { 0, 0, 0, 0, 0 },
    { 0, 0, 0, 0, 0 },
    { "open", HTMLDocument::Open, DontDelete|Function, 0, 0 },
-   { "URL", HTMLDocument::URL, DontDelete|ReadOnly, 0, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "lastModified", HTMLDocument::LastModified, DontDelete|ReadOnly, 0, 0 },
-   { "images", HTMLDocument::Images, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[35] },
-   { 0, 0, 0, 0, 0 },
-   { "domain", HTMLDocument::Domain, DontDelete, 0, 0 },
-   { "location", HTMLDocument::Location, DontDelete, 0, &HTMLDocumentTableEntries[32] },
-   { "cookie", HTMLDocument::Cookie, DontDelete, 0, 0 },
-   { 0, 0, 0, 0, 0 },
+   { "write", HTMLDocument::Write, DontDelete|Function, 1, 0 },
+   { "releaseEvents", HTMLDocument::ReleaseEvents, DontDelete|Function, 0, 0 },
+   { "location", HTMLDocument::Location, DontDelete, 0, 0 },
+   { "alinkColor", HTMLDocument::AlinkColor, DontDelete, 0, 0 },
+   { "dir", HTMLDocument::Dir, DontDelete, 0, 0 },
    { 0, 0, 0, 0, 0 },
    { "referrer", HTMLDocument::Referrer, DontDelete|ReadOnly, 0, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "dir", HTMLDocument::Dir, DontDelete, 0, &HTMLDocumentTableEntries[41] },
-   { "applets", HTMLDocument::Applets, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[36] },
-   { "anchors", HTMLDocument::Anchors, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[39] },
-   { "clear", HTMLDocument::Clear, DontDelete|Function, 0, 0 },
-   { "close", HTMLDocument::Close, DontDelete|Function, 0, &HTMLDocumentTableEntries[37] },
-   { "getElementsByName", HTMLDocument::GetElementsByName, DontDelete|Function, 1, &HTMLDocumentTableEntries[40] },
-   { "releaseEvents", HTMLDocument::ReleaseEvents, DontDelete|Function, 0, 0 },
    { "bgColor", HTMLDocument::BgColor, DontDelete, 0, 0 },
-   { "alinkColor", HTMLDocument::AlinkColor, DontDelete, 0, 0 },
+   { "writeln", HTMLDocument::WriteLn, DontDelete|Function, 1, 0 },
+   { "embeds", HTMLDocument::Embeds, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[32] },
+   { 0, 0, 0, 0, 0 },
+   { "scripts", HTMLDocument::Scripts, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[35] },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "forms", HTMLDocument::Forms, DontDelete|ReadOnly, 0, &HTMLDocumentTableEntries[33] },
+   { "anchors", HTMLDocument::Anchors, DontDelete|ReadOnly, 0, 0 },
+   { "close", HTMLDocument::Close, DontDelete|Function, 0, 0 },
+   { "getElementsByName", HTMLDocument::GetElementsByName, DontDelete|Function, 1, &HTMLDocumentTableEntries[36] },
+   { "captureEvents", HTMLDocument::CaptureEvents, DontDelete|Function, 0, 0 },
+   { "fgColor", HTMLDocument::FgColor, DontDelete, 0, 0 },
+   { "linkColor", HTMLDocument::LinkColor, DontDelete, 0, 0 },
+   { "vlinkColor", HTMLDocument::VlinkColor, DontDelete, 0, 0 },
    { "height", HTMLDocument::Height, DontDelete|ReadOnly, 0, 0 },
-   { "designMode", HTMLDocument::DesignMode, DontDelete, 0, 0 }
+   { "width", HTMLDocument::Width, DontDelete|ReadOnly, 0, 0 }
 };
 
-const struct HashTable HTMLDocumentTable = { 2, 42, HTMLDocumentTableEntries, 32 };
+const struct HashTable HTMLDocumentTable = { 2, 40, HTMLDocumentTableEntries, 30 };
 
 } // namespace
 
 namespace KJS {
 
 const struct HashEntry HTMLElementTableEntries[] = {
-   { "lang", KJS::HTMLElement::ElementLang, DontDelete, 0, &HTMLElementTableEntries[12] },
-   { 0, 0, 0, 0, 0 },
-   { "innerHTML", KJS::HTMLElement::ElementInnerHTML, DontDelete, 0, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "innerText", KJS::HTMLElement::ElementInnerText, DontDelete, 0, 0 },
-   { "document", KJS::HTMLElement::ElementDocument, DontDelete|ReadOnly, 0, &HTMLElementTableEntries[13] },
-   { "className", KJS::HTMLElement::ElementClassName, DontDelete, 0, &HTMLElementTableEntries[14] },
-   { "id", KJS::HTMLElement::ElementId, DontDelete, 0, &HTMLElementTableEntries[11] },
-   { 0, 0, 0, 0, 0 },
-   { 0, 0, 0, 0, 0 },
-   { 0, 0, 0, 0, 0 },
-   { "title", KJS::HTMLElement::ElementTitle, DontDelete, 0, &HTMLElementTableEntries[15] },
-   { "dir", KJS::HTMLElement::ElementDir, DontDelete, 0, 0 },
+   { "title", KJS::HTMLElement::ElementTitle, DontDelete, 0, &HTMLElementTableEntries[17] },
    { "children", KJS::HTMLElement::ElementChildren, DontDelete|ReadOnly, 0, 0 },
+   { 0, 0, 0, 0, 0 },
    { "contentEditable", KJS::HTMLElement::ElementContentEditable, DontDelete, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "id", KJS::HTMLElement::ElementId, DontDelete, 0, &HTMLElementTableEntries[14] },
+   { 0, 0, 0, 0, 0 },
+   { "dir", KJS::HTMLElement::ElementDir, DontDelete, 0, 0 },
+   { "lang", KJS::HTMLElement::ElementLang, DontDelete, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "className", KJS::HTMLElement::ElementClassName, DontDelete, 0, &HTMLElementTableEntries[15] },
+   { "innerHTML", KJS::HTMLElement::ElementInnerHTML, DontDelete, 0, &HTMLElementTableEntries[16] },
+   { "innerText", KJS::HTMLElement::ElementInnerText, DontDelete, 0, &HTMLElementTableEntries[19] },
+   { "outerHTML", KJS::HTMLElement::ElementOuterHTML, DontDelete, 0, &HTMLElementTableEntries[18] },
+   { "outerText", KJS::HTMLElement::ElementOuterText, DontDelete, 0, 0 },
+   { "document", KJS::HTMLElement::ElementDocument, DontDelete|ReadOnly, 0, &HTMLElementTableEntries[20] },
    { "isContentEditable", KJS::HTMLElement::ElementIsContentEditable, DontDelete|ReadOnly, 0, 0 }
 };
 
-const struct HashTable HTMLElementTable = { 2, 16, HTMLElementTableEntries, 11 };
+const struct HashTable HTMLElementTable = { 2, 21, HTMLElementTableEntries, 14 };
 
 } // namespace
 
@@ -998,6 +1001,16 @@ const struct HashTable HTMLMarqueeElementTable = { 2, 3, HTMLMarqueeElementTable
 
 namespace KJS {
 
+const struct HashEntry HTMLCanvasElementTableEntries[] = {
+   { "getContext", KJS::HTMLElement::GetContext, DontDelete|Function, 0, 0 }
+};
+
+const struct HashTable HTMLCanvasElementTable = { 2, 1, HTMLCanvasElementTableEntries, 1 };
+
+} // namespace
+
+namespace KJS {
+
 const struct HashEntry HTMLCollectionProtoTableEntries[] = {
    { 0, 0, 0, 0, 0 },
    { "namedItem", HTMLCollection::NamedItem, DontDelete|Function, 1, 0 },
@@ -1019,5 +1032,57 @@ const struct HashEntry ImageTableEntries[] = {
 };
 
 const struct HashTable ImageTable = { 2, 4, ImageTableEntries, 3 };
+
+} // namespace
+
+namespace KJS {
+
+const struct HashEntry Context2DTableEntries[] = {
+   { 0, 0, 0, 0, 0 },
+   { "closePath", Context2D::ClosePath, DontDelete|Function, 0, &Context2DTableEntries[34] },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "rotate", Context2D::Rotate, DontDelete|Function, 2, 0 },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "strokePath", Context2D::StrokePath, DontDelete|Function, 0, 0 },
+   { "setLineCap", Context2D::SetLineCap, DontDelete|Function, 1, &Context2DTableEntries[32] },
+   { "moveToPoint", Context2D::MoveToPoint, DontDelete|Function, 2, 0 },
+   { "drawImageFromRect", Context2D::DrawImageFromRect, DontDelete|Function, 10, 0 },
+   { "addLineToPoint", Context2D::AddLineToPoint, DontDelete|Function, 2, 0 },
+   { "setAlpha", Context2D::SetAlpha, DontDelete|Function, 1, 0 },
+   { "translate", Context2D::Translate, DontDelete|Function, 1, &Context2DTableEntries[35] },
+   { "fillPath", Context2D::FillPath, DontDelete|Function, 0, &Context2DTableEntries[40] },
+   { "beginPath", Context2D::BeginPath, DontDelete|Function, 0, &Context2DTableEntries[38] },
+   { "setShadow", Context2D::SetShadow, DontDelete|Function, 3, 0 },
+   { "addArc", Context2D::AddArc, DontDelete|Function, 6, &Context2DTableEntries[41] },
+   { "setStrokeColor", Context2D::SetStrokeColor, DontDelete|Function, 1, &Context2DTableEntries[37] },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "addArcToPoint", Context2D::AddArcToPoint, DontDelete|Function, 5, &Context2DTableEntries[36] },
+   { 0, 0, 0, 0, 0 },
+   { "setMiterLimit", Context2D::SetMiterLimit, DontDelete|Function, 1, &Context2DTableEntries[42] },
+   { "scale", Context2D::Scale, DontDelete|Function, 2, 0 },
+   { "setFillColor", Context2D::SetFillColor, DontDelete|Function, 1, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "setLineWidth", Context2D::SetLineWidth, DontDelete|Function, 1, 0 },
+   { "save", Context2D::Save, DontDelete|Function, 0, &Context2DTableEntries[31] },
+   { 0, 0, 0, 0, 0 },
+   { 0, 0, 0, 0, 0 },
+   { "restore", Context2D::Restore, DontDelete|Function, 0, 0 },
+   { "setLineJoin", Context2D::SetLineJoin, DontDelete|Function, 1, &Context2DTableEntries[33] },
+   { "addQuadraticCurveToPoint", Context2D::AddQuadraticCurveToPoint, DontDelete|Function, 4, &Context2DTableEntries[39] },
+   { "addBezierCurveToPoint", Context2D::AddBezierCurveToPoint, DontDelete|Function, 6, 0 },
+   { "addRect", Context2D::AddRect, DontDelete|Function, 4, 0 },
+   { "clip", Context2D::Clip, DontDelete|Function, 0, 0 },
+   { "clearRect", Context2D::ClearRect, DontDelete|Function, 4, 0 },
+   { "fillRect", Context2D::FillRect, DontDelete|Function, 4, 0 },
+   { "strokeRect", Context2D::StrokeRect, DontDelete|Function, 4, 0 },
+   { "drawImage", Context2D::DrawImage, DontDelete|Function, 6, 0 },
+   { "clearShadow", Context2D::ClearShadow, DontDelete|Function, 0, 0 },
+   { "setCompositeOperation", Context2D::SetCompositeOperation, DontDelete|Function, 1, 0 }
+};
+
+const struct HashTable Context2DTable = { 2, 43, Context2DTableEntries, 31 };
 
 } // namespace

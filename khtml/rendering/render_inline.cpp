@@ -27,7 +27,9 @@
 #include "render_inline.h"
 #include "render_block.h"
 #include "xml/dom_docimpl.h"
+#include "xml/dom_position.h"
 
+using DOM::Position;
 using namespace khtml;
 
 RenderInline::RenderInline(DOM::NodeImpl* node)
@@ -59,6 +61,8 @@ void RenderInline::setStyle(RenderStyle* _style)
         currCont = currCont->continuation();
     }
 
+    m_lineHeight = -1;
+    
     // Update pseudos for :before and :after now.
     updatePseudoChild(RenderStyle::BEFORE, firstChild());
     updatePseudoChild(RenderStyle::AFTER, lastChild());
@@ -74,17 +78,14 @@ void RenderInline::addChildToFlow(RenderObject* newChild, RenderObject* beforeCh
     // Make sure we don't append things after :after-generated content if we have it.
     if (!beforeChild && lastChild() && lastChild()->style()->styleType() == RenderStyle::AFTER)
         beforeChild = lastChild();
-    
-    if (!newChild->isText() && newChild->style()->position() != STATIC)
-        setOverhangingContents();
-    
+
     if (!newChild->isInline() && !newChild->isFloatingOrPositioned() )
     {
         // We are placing a block inside an inline. We have to perform a split of this
         // inline into continuations.  This involves creating an anonymous block box to hold
         // |newChild|.  We then make that block box a continuation of this inline.  We take all of
         // the children after |beforeChild| and put them in a clone of this object.
-        RenderStyle *newStyle = new RenderStyle();
+        RenderStyle *newStyle = new (renderArena()) RenderStyle();
         newStyle->inheritFrom(style());
         newStyle->setDisplay(BLOCK);
 
@@ -255,52 +256,38 @@ void RenderInline::splitFlow(RenderObject* beforeChild, RenderBlock* newBlockBox
     block->setNeedsLayoutAndMinMaxRecalc();
 }
 
-void RenderInline::paint(QPainter *p, int _x, int _y, int _w, int _h,
-                      int _tx, int _ty, PaintAction paintAction)
-{
-    paintObject(p, _x, _y, _w, _h, _tx, _ty, paintAction);
-}
-
-void RenderInline::paintObject(QPainter *p, int _x, int _y,
-                             int _w, int _h, int _tx, int _ty, PaintAction paintAction)
+void RenderInline::paint(PaintInfo& i, int _tx, int _ty)
 {
 #ifdef DEBUG_LAYOUT
     //    kdDebug( 6040 ) << renderName() << "(RenderInline) " << this << " ::paintObject() w/h = (" << width() << "/" << height() << ")" << endl;
 #endif
-
-    // If we have an inline root, it has to call the special root box decoration painting
-    // function.
-    if (isRoot() &&
-        (paintAction == PaintActionElementBackground || paintAction == PaintActionChildBackground) &&
-        shouldPaintBackgroundOrBorder() && style()->visibility() == VISIBLE) {
-        paintRootBoxDecorations(p, _x, _y, _w, _h, _tx, _ty);
-    }
     
     // We're done.  We don't bother painting any children.
-    if (paintAction == PaintActionElementBackground)
+    if (i.phase == PaintActionElementBackground)
         return;
-    // We don't paint our own background, but we do let the kids paint their backgrounds.
-    if (paintAction == PaintActionChildBackgrounds)
-        paintAction = PaintActionChildBackground;
-
-    paintLineBoxBackgroundBorder(p, _x, _y, _w, _h, _tx, _ty, paintAction);
     
-    RenderObject *child = firstChild();
-    while(child != 0)
-    {
-        if(!child->layer() && !child->isFloating())
-            child->paint(p, _x, _y, _w, _h, _tx, _ty, paintAction);
-        child = child->nextSibling();
-    }
+    // We don't paint our own background, but we do let the kids paint their backgrounds.
+    PaintInfo paintInfo(i.p, i.r, i.phase, paintingRootForChildren(i));
+    if (i.phase == PaintActionChildBackgrounds)
+        paintInfo.phase = PaintActionChildBackground;
 
-    paintLineBoxDecorations(p, _x, _y, _w, _h, _tx, _ty, paintAction);
-    if (style()->visibility() == VISIBLE && paintAction == PaintActionOutline) {
+    paintLineBoxBackgroundBorder(paintInfo, _tx, _ty);
+    
+    paintLineBoxDecorations(paintInfo, _tx, _ty); // Underline/overline
+    
+    for (RenderObject *child = firstChild(); child; child = child->nextSibling())
+        if(!child->layer() && !child->isFloating())
+            child->paint(paintInfo, _tx, _ty);
+
+    paintLineBoxDecorations(paintInfo, _tx, _ty, true); // Strike-through
+    
+    if (style()->visibility() == VISIBLE && paintInfo.phase == PaintActionOutline) {
 #if APPLE_CHANGES
         if (style()->outlineStyleIsAuto())
-            paintFocusRing(p, _tx, _ty);
+            paintFocusRing(paintInfo.p, _tx, _ty);
         else
 #endif
-        paintOutlines(p, _tx, _ty);
+        paintOutlines(paintInfo.p, _tx, _ty);
     }
 }
 
@@ -482,11 +469,11 @@ bool RenderInline::requiresLayer() {
     return isRoot() || isRelPositioned() || style()->opacity() < 1.0f;
 }
 
-short RenderInline::width() const
+int RenderInline::width() const
 {
     // Return the width of the minimal left side and the maximal right side.
-    short leftSide = 0;
-    short rightSide = 0;
+    int leftSide = 0;
+    int rightSide = 0;
     for (InlineRunBox* curr = firstLineBox(); curr; curr = curr->nextLineBox()) {
         if (curr == firstLineBox() || curr->xPos() < leftSide)
             leftSide = curr->xPos();
@@ -573,3 +560,12 @@ bool RenderInline::nodeAtPoint(NodeInfo& info, int _x, int _y, int _tx, int _ty,
     return inside;
 }
 
+Position RenderInline::positionForCoordinates(int x, int y)
+{
+    for (RenderObject *c = continuation(); c; c = c->continuation()) {
+        if (c->isInline() || c->firstChild())
+            return c->positionForCoordinates(x, y);
+    }
+
+    return RenderFlow::positionForCoordinates(x, y);
+}

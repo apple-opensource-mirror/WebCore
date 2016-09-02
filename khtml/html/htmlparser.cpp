@@ -33,6 +33,7 @@
 
 #include "html/html_baseimpl.h"
 #include "html/html_blockimpl.h"
+#include "html/html_canvasimpl.h"
 #include "html/html_documentimpl.h"
 #include "html/html_elementimpl.h"
 #include "html/html_formimpl.h"
@@ -399,7 +400,7 @@ bool KHTMLParser::insertNode(NodeImpl *n, bool flat)
 		    for (unsigned long l = 0; map && l < map->length(); ++l) {
 			AttributeImpl* it = map->attributeItem(l);
 			changed = !bmap->getAttributeItem(it->id());
-			bmap->insertAttribute(new AttributeImpl(it->id(), it->val()));
+			bmap->insertAttribute(it->clone(false));
 		    }
 		    if ( changed )
 			doc()->recalcStyle( NodeImpl::Inherit );
@@ -445,7 +446,7 @@ bool KHTMLParser::insertNode(NodeImpl *n, bool flat)
                 for (unsigned long l = 0; map && l < map->length(); ++l) {
                     AttributeImpl* it = map->attributeItem(l);
                     changed = !bmap->getAttributeItem(it->id());
-                    bmap->insertAttribute(new AttributeImpl(it->id(), it->val()));
+                    bmap->insertAttribute(it->clone(false));
                 }
                 if ( changed )
                     doc()->recalcStyle( NodeImpl::Inherit );
@@ -505,43 +506,6 @@ bool KHTMLParser::insertNode(NodeImpl *n, bool flat)
             else
                 return false;
             return true;
-        }
-        case ID_CAPTION: {
-            switch (current->id()) {
-                case ID_THEAD:
-                case ID_TBODY:
-                case ID_TFOOT:
-                case ID_TR:
-                case ID_TH:
-                case ID_TD: {
-                    NodeImpl* tsection = current;
-                    if (current->id() == ID_TR)
-                        tsection = current->parent();
-                    else if (current->id() == ID_TD || current->id() == ID_TH)
-                        tsection = current->parent()->parent();
-                    NodeImpl* table = tsection->parent();
-                    int exceptioncode = 0;
-                    table->insertBefore(n, tsection, exceptioncode);
-                    pushBlock(id, tagPriority[id]);
-                    setCurrent(n);
-                    inStrayTableContent++;
-                    blockStack->strayTableContent = true;
-                    return true;
-                }
-                default:
-                    break;
-            }
-            break;
-        }
-        case ID_THEAD:
-        case ID_TBODY:
-        case ID_TFOOT:
-        case ID_COLGROUP: {
-            if (isTableRelatedTag(current->id())) {
-                while (current->id() != ID_TABLE && isTableRelatedTag(current->id()))
-                    popOneBlock();
-                return insertNode(n);
-            }
         }
         default:
             break;
@@ -624,7 +588,7 @@ bool KHTMLParser::insertNode(NodeImpl *n, bool flat)
                 popBlock(ID_TABLE); // end the table
                 handled = true;      // ...and start a new one
                 break;
-	    case ID_TEXT:
+            case ID_TEXT:
             {
                 TextImpl *t = static_cast<TextImpl *>(n);
                 if (t->containsOnlyWhitespace())
@@ -693,8 +657,7 @@ bool KHTMLParser::insertNode(NodeImpl *n, bool flat)
         case ID_OL:
         case ID_DIR:
         case ID_MENU:
-            e = new HTMLLIElementImpl(document);
-            e->addCSSProperty(CSS_PROP_LIST_STYLE_TYPE, CSS_VAL_NONE);
+            e = new HTMLDivElementImpl(document);
             insertNode(e);
             handled = true;
             break;
@@ -834,7 +797,7 @@ NodeImpl *KHTMLParser::getElement(Token* t)
             // no site actually relying on that detail (Dirk)
             if (static_cast<HTMLDocumentImpl*>(document->document())->body())
                 static_cast<HTMLDocumentImpl*>(document->document())->body()
-                    ->addCSSProperty(CSS_PROP_DISPLAY, "none");
+                    ->setAttribute(ATTR_STYLE, "display:none");
             inBody = false;
         }
         if ( (haveContent || haveFrameSet) && current->id() == ID_HTML)
@@ -984,6 +947,11 @@ NodeImpl *KHTMLParser::getElement(Token* t)
         popBlock(ID_A);
 
         n = new HTMLAnchorElementImpl(document);
+        break;
+
+// canvas
+    case ID_CANVAS:
+        n = new HTMLCanvasElementImpl(document);
         break;
 
 // images
@@ -1638,7 +1606,7 @@ NodeImpl *KHTMLParser::handleIsindex( Token *t )
     DOMString text = i18n("This is a searchable index. Enter search keywords: ");
 #endif
     if (a)
-        text = a->value() + " ";
+        text = DOMString(a->value()) + " ";
     child = new TextImpl(document, text);
     n->addChild( child );
     child = new HTMLIsIndexElementImpl(document, myform);

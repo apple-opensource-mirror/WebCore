@@ -56,15 +56,17 @@ public:
 
     virtual Id id() const;
 
-    virtual void parseAttribute(AttributeImpl *);
+    virtual bool mapToEntry(NodeImpl::Id attr, MappedAttributeEntry& result) const;
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *);
+
     virtual void insertedIntoDocument();
+
+    void createLinkDecl();
     
-    CSSStyleSheetImpl *sheet() const { return m_styleSheet; }
+    virtual bool isURLAttribute(AttributeImpl *attr) const;
 
 protected:
-    CSSStyleSheetImpl *m_styleSheet;
-    bool m_bgSet;
-    bool m_fgSet;
+    CSSStyleDeclarationImpl* m_linkDecl;
 };
 
 // -------------------------------------------------------------------------
@@ -81,7 +83,7 @@ public:
 
     virtual Id id() const;
 
-    virtual void parseAttribute(AttributeImpl *);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *);
     virtual void attach();
     virtual void detach();
     virtual bool rendererIsNeeded(khtml::RenderStyle *);
@@ -94,6 +96,8 @@ public:
     virtual void setFocus(bool);
 
     DocumentImpl* contentDocument() const;
+    
+    virtual bool isURLAttribute(AttributeImpl *attr) const;
 
 #if APPLE_CHANGES
     QScrollView::ScrollBarMode scrollingMode() const { return scrolling; }
@@ -102,11 +106,11 @@ public:
 #endif
 
 protected:
-    bool isURLAllowed(const DOMString &) const;
+    bool isURLAllowed(const AtomicString &) const;
     virtual void openURL();
 
-    DOMString url;
-    DOMString name;
+    AtomicString url;
+    AtomicString name;
 
     int marginWidth;
     int marginHeight;
@@ -132,7 +136,7 @@ public:
 
     virtual Id id() const;
 
-    virtual void parseAttribute(AttributeImpl *);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *);
     virtual void attach();
     virtual bool rendererIsNeeded(khtml::RenderStyle *);
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
@@ -148,7 +152,7 @@ public:
     virtual void detach();
 
     virtual void recalcStyle( StyleChange ch );
-
+    
 protected:
     khtml::Length* m_rows;
     khtml::Length* m_cols;
@@ -198,11 +202,15 @@ public:
 
     virtual Id id() const;
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual bool mapToEntry(NodeImpl::Id attr, MappedAttributeEntry& result) const;
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
+
     virtual void attach();
     virtual bool rendererIsNeeded(khtml::RenderStyle *);
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
     virtual void recalcStyle( StyleChange ch );
+    
+    virtual bool isURLAttribute(AttributeImpl *attr) const;
 
 protected:
     virtual void openURL();

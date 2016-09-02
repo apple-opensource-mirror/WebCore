@@ -29,6 +29,10 @@
 
 #include "render_flow.h"
 
+namespace DOM {
+    class Position;
+}
+
 namespace khtml {
 
 class RenderBlock : public RenderFlow
@@ -56,9 +60,9 @@ public:
     // of the block (e.g., a <div style="height:25px"> that has a 100px tall image inside
     // it would have an overflow height of borderTop() + paddingTop() + 100px.
     virtual int overflowHeight(bool includeInterior=true) const
-    { return (!includeInterior && style()->hidesOverflow()) ? m_height : m_overflowHeight; }
+    { return (!includeInterior && hasOverflowClip()) ? m_height : m_overflowHeight; }
     virtual int overflowWidth(bool includeInterior=true) const
-    { return (!includeInterior && style()->hidesOverflow()) ? m_width : m_overflowWidth; }
+    { return (!includeInterior && hasOverflowClip()) ? m_width : m_overflowWidth; }
     virtual void setOverflowHeight(int h) { m_overflowHeight = h; }
     virtual void setOverflowWidth(int w) { m_overflowWidth = w; }
 
@@ -93,18 +97,16 @@ public:
     virtual void addChildToFlow(RenderObject* newChild, RenderObject* beforeChild);
     virtual void removeChild(RenderObject *oldChild);
 
-#ifdef INCREMENTAL_REPAINTING
     virtual void repaintObjectsBeforeLayout();
     virtual void repaintFloatingDescendants();
     virtual void getAbsoluteRepaintRectIncludingFloats(QRect& bounds, QRect& fullBounds);
-#endif
 
     virtual void setStyle(RenderStyle* _style);
 
     virtual void layout();
     virtual void layoutBlock( bool relayoutChildren );
     void layoutBlockChildren( bool relayoutChildren );
-    void layoutInlineChildren( bool relayoutChildren );
+    QRect layoutInlineChildren( bool relayoutChildren );
 
     void layoutPositionedObjects( bool relayoutChildren );
     void insertPositionedObject(RenderObject *o);
@@ -115,20 +117,23 @@ public:
     
     // the implementation of the following functions is in bidi.cpp
     void bidiReorderLine(const BidiIterator &start, const BidiIterator &end, BidiState &bidi );
+    RootInlineBox* determineStartPosition(bool fullLayout, BidiIterator &start, BidiState &bidi);
+    RootInlineBox* determineEndPosition(RootInlineBox* startBox, BidiIterator& cleanLineStart, int& yPos);
+    bool matchedEndLine(const BidiIterator& start, const BidiIterator& endLineStart, 
+                        RootInlineBox*& endLine, int& endYPos);
     BidiIterator findNextLineBreak(BidiIterator &start, BidiState &info );
-    InlineFlowBox* constructLine(const BidiIterator& start, const BidiIterator& end);
+    RootInlineBox* constructLine(const BidiIterator& start, const BidiIterator& end);
     InlineFlowBox* createLineBoxes(RenderObject* obj);
-    void computeHorizontalPositionsForLine(InlineFlowBox* lineBox, BidiState &bidi);
-    void computeVerticalPositionsForLine(InlineFlowBox* lineBox);
+    void computeHorizontalPositionsForLine(RootInlineBox* lineBox, BidiState &bidi);
+    void computeVerticalPositionsForLine(RootInlineBox* lineBox);
+    void deleteEllipsisLineBoxes();
+    void checkLinesForTextOverflow();
     // end bidi.cpp functions
     
-    virtual void paint(QPainter *, int x, int y, int w, int h,
-                       int tx, int ty, PaintAction paintAction);
-    virtual void paintObject(QPainter *, int x, int y, int w, int h,
-                             int tx, int ty, PaintAction paintAction);
-    void paintFloats(QPainter *p, int _x, int _y,
-                     int _w, int _h, int _tx, int _ty, bool paintSelection = false);
-    
+    virtual void paint(PaintInfo& i, int tx, int ty);
+    void paintObject(PaintInfo& i, int tx, int ty);
+    void paintFloats(PaintInfo& i, int _tx, int _ty, bool paintSelection = false);
+    void paintEllipsisBoxes(PaintInfo& i, int _tx, int _ty);
 
     void insertFloatingObject(RenderObject *o);
     void removeFloatingObject(RenderObject *o);
@@ -138,7 +143,8 @@ public:
     void clearFloats();
     int getClearDelta(RenderObject *child);
     virtual void markAllDescendantsWithFloatsForLayout(RenderObject* floatToRemove = 0);
-    
+    void markPositionedObjectsForLayout();
+
     virtual bool containsFloats() { return m_floatingObjects!=0; }
     virtual bool containsFloat(RenderObject* o);
 
@@ -150,7 +156,7 @@ public:
     inline int leftBottom();
     inline int rightBottom();
 
-    virtual unsigned short lineWidth(int y) const;
+    virtual int lineWidth(int y) const;
     virtual int lowestPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
     virtual int rightmostPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
     virtual int leftmostPosition(bool includeOverflowInterior=true, bool includeSelf=true) const;
@@ -169,17 +175,18 @@ public:
                              HitTestAction hitTestAction = HitTestAll, bool inside=false);
 
     bool isPointInScrollbar(int x, int y, int tx, int ty);
+
+    virtual DOM::Position positionForCoordinates(int x, int y);
     
     virtual void calcMinMaxWidth();
     void calcInlineMinMaxWidth();
     void calcBlockMinMaxWidth();
 
-    virtual int getBaselineOfFirstLineBox();
-    virtual InlineFlowBox* getFirstLineBox();
-    
-    // overrides RenderObject
-    virtual bool requiresLayer();
-    
+    virtual int getBaselineOfFirstLineBox() const;
+
+    RootInlineBox* firstRootBox() { return static_cast<RootInlineBox*>(m_firstLineBox); }
+    RootInlineBox* lastRootBox() { return static_cast<RootInlineBox*>(m_lastLineBox); }
+
     // Obtains the nearest enclosing block (including this block) that contributes a first-line style to our inline
     // children.
     virtual RenderBlock* firstLineBlock() const;
@@ -187,14 +194,31 @@ public:
     
     bool inRootBlockContext() const;
     
+    void setLinesAppended(bool b=true) { m_linesAppended = b; }
+    bool linesAppended() const { return m_linesAppended; }
+
+    void setHasMarkupTruncation(bool b=true) { m_hasMarkupTruncation = b; }
+    bool hasMarkupTruncation() const { return m_hasMarkupTruncation; }
+
 #ifndef NDEBUG
     virtual void printTree(int indent=0) const;
     virtual void dump(QTextStream *stream, QString ind = "") const;
 #endif
-    
+
+    // Helper methods for computing line counts and heights for line counts.
+    RootInlineBox* lineAtIndex(int i);
+    int lineCount();
+    int heightForLineCount(int l);
+    void clearTruncation();
+
 protected:
     void newLine();
+    void removeChildrenFromLineBoxes();
 
+private:
+    DOM::Position positionForBox(InlineBox *box, bool start=true) const;
+    DOM::Position positionForRenderer(RenderObject *renderer, bool start=true) const;
+    
 protected:
     struct FloatingObject {
         enum Type {
@@ -215,8 +239,8 @@ protected:
         RenderObject* node;
         int startY;
         int endY;
-        short left;
-        short width;
+        int left;
+        int width;
         Type type : 1; // left or right aligned
         bool noPaint : 1;
     };
@@ -231,6 +255,8 @@ protected:
     EClear m_clearStatus  : 2; // used during layuting of paragraphs
     bool m_topMarginQuirk : 1;
     bool m_bottomMarginQuirk : 1;
+    bool m_linesAppended : 1; // Whether or not a block with inline children has had lines appended.
+    bool m_hasMarkupTruncation : 1;
 
     short m_maxTopPosMargin;
     short m_maxTopNegMargin;

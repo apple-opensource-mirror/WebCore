@@ -27,6 +27,10 @@
 class KHTMLView;
 class QWidget;
 
+namespace DOM {
+    class Position;
+}
+
 namespace khtml {
 
 class RenderReplaced : public RenderBox
@@ -41,12 +45,10 @@ public:
 
     virtual void calcMinMaxWidth();
 
-    virtual void paint(QPainter *, int x, int y, int w, int h,
-                       int tx, int ty, PaintAction paintAction);
-    virtual void paintObject(QPainter *p, int x, int y, int w, int h, int tx, int ty,
-                             PaintAction paintAction) = 0;
+    bool shouldPaint(PaintInfo& i, int& _tx, int& _ty);
+    virtual void paint(PaintInfo& i, int _tx, int _ty) = 0;
 
-    virtual short intrinsicWidth() const { return m_intrinsicWidth; }
+    virtual int intrinsicWidth() const { return m_intrinsicWidth; }
     virtual int intrinsicHeight() const { return m_intrinsicHeight; }
 
     void setIntrinsicWidth(int w) {  m_intrinsicWidth = w; }
@@ -54,9 +56,14 @@ public:
 
     virtual bool canHaveChildren() const;
 
+    virtual long caretMinOffset() const;
+    virtual long caretMaxOffset() const;
+    virtual unsigned long caretMaxRenderedOffset() const;
+    virtual DOM::Position positionForCoordinates(int x, int y);
+    
 private:
-    short m_intrinsicWidth;
-    short m_intrinsicHeight;
+    int m_intrinsicWidth;
+    int m_intrinsicHeight;
 };
 
 
@@ -69,8 +76,7 @@ public:
 
     virtual void setStyle(RenderStyle *style);
 
-    virtual void paintObject(QPainter *p, int x, int y, int w, int h, int tx, int ty,
-                             PaintAction paintAction);
+    virtual void paint(PaintInfo& i, int tx, int ty);
 
     virtual bool isWidget() const { return true; };
 
@@ -82,6 +88,9 @@ public:
 
     RenderArena *ref() { _ref++; return renderArena(); }
     void deref(RenderArena *arena);
+    
+    virtual SelectionState selectionState() const {return m_selectionState;}
+    virtual void setSelectionState(SelectionState s);
 
 #if APPLE_CHANGES 
     void sendConsumedMouseUp(const QPoint &mousePos, int button, int state);
@@ -100,6 +109,8 @@ protected:
     bool m_deleteWidget;
     QWidget *m_widget;
     KHTMLView* m_view;
+    
+    SelectionState m_selectionState : 3 ;
 };
 
 };

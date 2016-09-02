@@ -4,7 +4,7 @@
  * Copyright (C) 1999 Lars Knoll (knoll@kde.org)
  *           (C) 1999 Antti Koivisto (koivisto@kde.org)
  *           (C) 2000 Dirk Mueller (mueller@kde.org)
- * Copyright (C) 2003 Apple Computer, Inc.
+ * Copyright (C) 2004 Apple Computer, Inc.
  *
  * This library is free software; you can redistribute it and/or
  * modify it under the terms of the GNU Library General Public
@@ -44,6 +44,9 @@ namespace khtml
     class RenderLineEdit;
     class RenderRadioButton;
     class RenderFileButton;
+#if APPLE_CHANGES
+    class RenderSlider;
+#endif
 
     typedef QValueList<QCString> encodingList;
 }
@@ -54,6 +57,8 @@ class HTMLFormElement;
 class DOMString;
 class HTMLGenericFormElementImpl;
 class HTMLOptionElementImpl;
+class HTMLImageLoader;
+class HTMLOptionsCollectionImpl;
 
 // -------------------------------------------------------------------------
 
@@ -80,7 +85,7 @@ public:
 
     bool autoComplete() const { return m_autocomplete; }
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
 
     void radioClicked( HTMLGenericFormElementImpl *caller );
 
@@ -97,8 +102,11 @@ public:
     void setMalformed(bool malformed) { m_malformed = malformed; }
     virtual bool isMalformed() { return m_malformed; }
     
+    virtual bool isURLAttribute(AttributeImpl *attr) const;
+    
 #if APPLE_CHANGES
     void submitClick();
+    bool formWouldHaveSecureSubmission(const DOMString &url);
 #endif
    
     static void i18nData();
@@ -122,9 +130,6 @@ public:
  private:
     QString oldIdAttr;
     QString oldNameAttr;
-#if APPLE_CHANGES
-    bool formWouldHaveSecureSubmission(const DOMString &url);
-#endif
 };
 
 // -------------------------------------------------------------------------
@@ -142,8 +147,10 @@ public:
 
     virtual DOMString type() const = 0;
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
     virtual void attach();
+    virtual void removedFromDocument();
+
     virtual void reset() {}
 
     void onSelect();
@@ -212,7 +219,7 @@ public:
     virtual Id id() const;
     DOMString type() const;
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
     virtual void defaultEventHandler(EventImpl *evt);
     virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool);
 
@@ -259,6 +266,7 @@ class HTMLInputElementImpl : public HTMLGenericFormElementImpl
 
 #if APPLE_CHANGES
     friend class HTMLSelectElementImpl;
+    friend class khtml::RenderSlider;
 #endif
 
 public:
@@ -275,6 +283,10 @@ public:
         HIDDEN,
         IMAGE,
         BUTTON
+#if APPLE_CHANGES
+        ,SEARCH,
+        RANGE
+#endif
     };
 
     HTMLInputElementImpl(DocumentPtr *doc, HTMLFormElementImpl *f = 0);
@@ -308,7 +320,8 @@ public:
     virtual void click();
     virtual void accessKeyAction();
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual bool mapToEntry(NodeImpl::Id attr, MappedAttributeEntry& result) const;
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
 
     virtual void attach();
     virtual bool rendererIsNeeded(khtml::RenderStyle *);
@@ -330,7 +343,13 @@ public:
     virtual bool isEditable();
 
     DOMString altText() const;
+    
+    virtual bool isURLAttribute(AttributeImpl *attr) const;
 
+#if APPLE_CHANGES
+    long maxResults() const { return m_maxResults; }
+#endif
+    
 protected:
 
     DOMString m_value;
@@ -338,6 +357,12 @@ protected:
     short     m_maxLen;
     short     m_size;
     short     yPos;
+
+#if APPLE_CHANGES
+    short     m_maxResults;
+#endif
+
+    HTMLImageLoader* m_imageLoader;
 
     typeEnum m_type : 4;
     bool m_checked : 1;
@@ -360,7 +385,7 @@ public:
     
     virtual Id id() const;
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
 
     /**
      * the form element this label is associated to.
@@ -414,13 +439,15 @@ public:
 
     bool multiple() const { return m_multiple; }
 
-    void add ( const HTMLElement &element, const HTMLElement &before );
+    void add ( HTMLElementImpl *element, HTMLElementImpl *before );
     void remove ( long index );
     void blur();
     void focus();
 
     DOMString value();
     void setValue(DOMStringImpl* value);
+    
+    HTMLOptionsCollectionImpl *options();
 
     virtual bool maintainsState() { return true; }
     virtual QString state();
@@ -434,7 +461,7 @@ public:
 
     virtual void childrenChanged();
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
 
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
     virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool);
@@ -465,9 +492,10 @@ private:
 
 protected:
     mutable QMemArray<HTMLGenericFormElementImpl*> m_listItems;
+    HTMLOptionsCollectionImpl *m_options;
     short m_minwidth;
-    short m_size : 15;
-    bool m_multiple : 1;
+    short m_size;
+    bool m_multiple;
     bool m_recalcListItems;
 };
 
@@ -485,11 +513,11 @@ public:
     // ### this is just a rough guess
     virtual bool isEnumeratable() const { return false; }
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
     virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool);
 protected:
-    DOMString m_challenge;
-    DOMString m_keyType;
+    AtomicString m_challenge;
+    AtomicString m_keyType;
 };
 
 // -------------------------------------------------------------------------
@@ -510,7 +538,7 @@ public:
     virtual NodeImpl *removeChild ( NodeImpl *oldChild, int &exceptioncode );
     virtual NodeImpl *appendChild ( NodeImpl *newChild, int &exceptioncode );
     virtual NodeImpl *addChild( NodeImpl* newChild );
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
     void recalcSelectOptions();
 
 };
@@ -535,7 +563,7 @@ public:
 
     long index() const;
     void setIndex( long );
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
     DOMString value() const;
     void setValue(DOMStringImpl* value);
 
@@ -586,7 +614,7 @@ public:
 
     void select (  );
 
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
     virtual khtml::RenderObject *createRenderer(RenderArena *, khtml::RenderStyle *);
     virtual bool encoding(const QTextCodec*, khtml::encodingList&, bool);
     virtual void reset();
@@ -615,16 +643,32 @@ class HTMLIsIndexElementImpl : public HTMLInputElementImpl
 {
 public:
     HTMLIsIndexElementImpl(DocumentPtr *doc, HTMLFormElementImpl *f = 0);
-    ~HTMLIsIndexElementImpl();
 
     virtual Id id() const;
-    virtual void parseAttribute(AttributeImpl *attr);
+    virtual void parseHTMLAttribute(HTMLAttributeImpl *attr);
 
 protected:
     DOMString m_prompt;
 };
 
+// -------------------------------------------------------------------------
 
-}; //namespace
+class HTMLOptionsCollectionImpl : public khtml::Shared<HTMLOptionsCollectionImpl>
+{
+public:
+    HTMLOptionsCollectionImpl(HTMLSelectElementImpl *impl) : m_select(impl) { }
+
+    unsigned long length() const;
+    void setLength(unsigned long);
+    NodeImpl *item(unsigned long index) const;
+    NodeImpl *namedItem(const DOMString &name) const;
+
+    void detach() { m_select = 0; }
+
+private:
+    HTMLSelectElementImpl *m_select;
+};
+
+} //namespace
 
 #endif

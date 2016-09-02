@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003 Apple Computer, Inc.  All rights reserved.
+ * Copyright (C) 2004 Apple Computer, Inc.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -43,6 +43,7 @@ using khtml::RenderFileButton;
 using khtml::RenderFormElement;
 using khtml::RenderLineEdit;
 using khtml::RenderSelect;
+using khtml::RenderSlider;
 using khtml::RenderTextArea;
 using khtml::RenderWidget;
 using khtml::RenderScrollMediator;
@@ -52,21 +53,21 @@ using KJS::XMLHttpRequestQObject;
 
 enum FunctionNumber {
     signalFinishedParsing,
-    slotAutoScroll,
     slotChildCompleted,
     slotChildCompletedWithBool,
     slotChildStarted,
     slotClicked,
-    slotEndLifeSupport,
     slotFinishedParsing,
     slotLoaderRequestDone,
     slotLoaderRequestStarted,
     slotParentCompleted,
     slotParentDestroyed,
+    slotPerformSearch,
     slotRedirect,
     slotReturnPressed,
     slotSelected,
     slotSelectionChanged,
+    slotSliderValueChanged,
     slotStateChanged,
     slotSubmitFormAgain,
     slotTextChanged,
@@ -92,19 +93,19 @@ KWQSlot::KWQSlot(QObject *object, const char *member)
             m_function = function; \
         } else
     
-    CASE(slotAutoScroll, (), KHTMLPart)
     CASE(slotClicked, (), RenderFormElement)
     CASE(slotChildCompleted, (), KHTMLPart)
     CASE(slotChildStarted, (KIO::Job *), KHTMLPart)
-    CASE(slotEndLifeSupport, (), KHTMLPart)
     CASE(slotFinishedParsing, (), KHTMLPart)
     CASE(slotLoaderRequestDone, (khtml::DocLoader *, khtml::CachedObject *), KHTMLPart)
     CASE(slotLoaderRequestStarted, (khtml::DocLoader *, khtml::CachedObject *), KHTMLPart)
     CASE(slotParentCompleted, (), KHTMLPart)
+    CASE(slotPerformSearch, (), RenderLineEdit)
     CASE(slotRedirect, (), KHTMLPart)
     CASE(slotReturnPressed, (), RenderLineEdit)
     CASE(slotSelected, (int), RenderSelect)
     CASE(slotSelectionChanged, (), RenderSelect)
+    CASE(slotSliderValueChanged, (), RenderSlider)
     CASE(slotStateChanged, (int), RenderCheckBox)
     CASE(slotTextChanged, (), RenderTextArea)
     CASE(slotValueChanged, (int), RenderScrollMediator)
@@ -178,16 +179,16 @@ void KWQSlot::call() const
     
     switch (m_function) {
         CASE(signalFinishedParsing, DocumentImpl, m_finishedParsing.call)
-        CASE(slotAutoScroll, KHTMLPart, slotAutoScroll)
         CASE(slotChildCompleted, KHTMLPart, slotChildCompleted)
         CASE(slotClicked, RenderFormElement, slotClicked)
-        CASE(slotEndLifeSupport, KHTMLPart, slotEndLifeSupport)
         CASE(slotFinishedParsing, KHTMLPart, slotFinishedParsing)
         CASE(slotParentCompleted, KHTMLPart, slotParentCompleted)
         CASE(slotParentDestroyed, WindowQObject, parentDestroyed)
+        CASE(slotPerformSearch, RenderLineEdit, slotPerformSearch)
         CASE(slotRedirect, KHTMLPart, slotRedirect)
         CASE(slotReturnPressed, RenderLineEdit, slotReturnPressed)
         CASE(slotSelectionChanged, RenderSelect, slotSelectionChanged)
+        CASE(slotSliderValueChanged, RenderSlider, slotSliderValueChanged)
         CASE(slotSubmitFormAgain, KHTMLPart, submitFormAgain)
         CASE(slotTextChanged, RenderTextArea, slotTextChanged)
         CASE(slotWidgetDestructed, RenderWidget, slotWidgetDestructed)

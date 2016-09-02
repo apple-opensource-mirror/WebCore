@@ -38,18 +38,24 @@
 
 #include "dom/dom_string.h"
 #include "dom/dom_element.h"
+#include "editing/htmlediting.h"
 #include "html/html_documentimpl.h"
 #include "html/html_baseimpl.h"
 #include "html/html_miscimpl.h"
 #include "html/html_imageimpl.h"
+#include "rendering/render_block.h"
 #include "rendering/render_text.h"
 #include "rendering/render_frames.h"
 #include "misc/htmlhashes.h"
 #include "misc/loader.h"
+#include "xml/dom_selection.h"
 #include "xml/dom2_eventsimpl.h"
 #include "xml/xml_tokenizer.h"
 #include "css/cssstyleselector.h"
 #include "css/csshelper.h"
+#include "misc/khtml_text_operations.h"
+#include "css/css_computedstyle.h"
+
 using namespace DOM;
 
 #include "khtmlview.h"
@@ -92,17 +98,24 @@ using namespace DOM;
 
 #include "khtmlpart_p.h"
 
-#ifdef APPLE_CHANGES
+#if APPLE_CHANGES
 #include <CoreServices/CoreServices.h>
 #endif
 
-using khtml::ChildFrame;
+using khtml::ApplyStyleCommand;
 using khtml::Decoder;
+using khtml::DeleteSelectionCommand;
+using khtml::EditCommand;
+using khtml::InlineTextBox;
+using khtml::plainText;
 using khtml::RenderObject;
 using khtml::RenderText;
-using khtml::InlineTextBoxArray;
+using khtml::Tokenizer;
+using khtml::TypingCommand;
 
 using KParts::BrowserInterface;
+
+enum { CARET_BLINK_FREQUENCY = 500 };
 
 namespace khtml {
     class PartStyleSheetLoader : public CachedObjectClient
@@ -172,6 +185,7 @@ KHTMLPart::KHTMLPart( KHTMLView *view, QObject *parent, const char *name, GUIPro
 
 void KHTMLPart::init( KHTMLView *view, GUIProfile prof )
 {
+  AtomicString::init();
   if ( prof == DefaultGUI )
     setXMLFile( "khtml.rc" );
   else if ( prof == BrowserViewGUI )
@@ -183,7 +197,7 @@ void KHTMLPart::init( KHTMLView *view, GUIProfile prof )
 
   d->m_view = view;
   setWidget( d->m_view );
-
+  
 #if !APPLE_CHANGES
   d->m_guiProfile = prof;
 #endif
@@ -264,12 +278,12 @@ void KHTMLPart::init( KHTMLView *view, GUIProfile prof )
   connect( khtml::Cache::loader(), SIGNAL( requestFailed( khtml::DocLoader*, khtml::CachedObject *) ),
            this, SLOT( slotLoaderRequestDone( khtml::DocLoader*, khtml::CachedObject *) ) );
 
+#if !APPLE_CHANGES
   findTextBegin(); //reset find variables
+#endif
 
   connect( &d->m_redirectionTimer, SIGNAL( timeout() ),
            this, SLOT( slotRedirect() ) );
-
-  connect(&d->m_lifeSupportTimer, SIGNAL(timeout()), this, SLOT(slotEndLifeSupport()));
 
 #if !APPLE_CHANGES
   d->m_dcopobject = new KHTMLPartIface(this);
@@ -374,7 +388,7 @@ bool KHTMLPart::openURL( const KURL &url )
 {
   kdDebug( 6050 ) << "KHTMLPart(" << this << ")::openURL " << url.url() << endl;
 
-  if (d->m_scheduledRedirection == locationChangeScheduledDuringLoad){
+  if (d->m_scheduledRedirection == redirectionDuringLoad){
     // We're about to get a redirect that happened before the document was
     // created.  This can happen when one frame may change the location of a 
     // sibling.
@@ -382,7 +396,13 @@ bool KHTMLPart::openURL( const KURL &url )
   }
   
   cancelRedirection();
-
+  
+  // clear last edit command
+  d->m_lastEditCommand = EditCommand();
+#if APPLE_CHANGES
+  KWQ(this)->clearUndoRedoOperations();
+#endif
+  
 #if !APPLE_CHANGES
   // check to see if this is an "error://" URL. This is caused when an error
   // occurs before this part was loaded (e.g. KonqRun), and is passed to
@@ -436,8 +456,7 @@ bool KHTMLPart::openURL( const KURL &url )
         m_url = url;
         emit started( 0L );
 
-        if ( !gotoAnchor( url.encodedHtmlRef()) )
-           gotoAnchor( url.htmlRef() );
+        gotoAnchor();
 
         d->m_bComplete = true;
         d->m_doc->setParsing(false);
@@ -964,10 +983,10 @@ void KHTMLPart::clear()
         (*it).m_run->abort();
     }
   }
-#endif
 
 
   findTextBegin(); // resets d->m_findNode and d->m_findPos
+#endif
 
   d->m_mousePressNode = DOM::Node();
 
@@ -999,7 +1018,6 @@ void KHTMLPart::clear()
     {
       if ( (*it).m_part )
       {
-        disconnectChild(&*it);
 #if !APPLE_CHANGES
         partManager()->removePart( (*it).m_part );
 #endif
@@ -1042,17 +1060,15 @@ void KHTMLPart::clear()
 
   d->m_bMousePressed = false;
 
-  d->m_selectionStart = DOM::Node();
-  d->m_selectionEnd = DOM::Node();
-  d->m_startOffset = 0;
-  d->m_endOffset = 0;
 #ifndef QT_NO_CLIPBOARD
   connect( kapp->clipboard(), SIGNAL( selectionChanged()), SLOT( slotClearSelection()));
 #endif
 
+#if !APPLE_CHANGES
   d->m_totalObjectCount = 0;
   d->m_loadedObjects = 0;
   d->m_jobPercent = 0;
+#endif
 
   if ( !d->m_haveEncoding )
     d->m_encoding = QString::null;
@@ -1405,6 +1421,10 @@ void KHTMLPart::begin( const KURL &url, int xOffset, int yOffset )
 
   clear();
 
+#if APPLE_CHANGES
+  KWQ(this)->partClearedInBegin();
+#endif
+
   // Only do this after clearing the part, so that JavaScript can
   // clean up properly if it was on for the last load.
 #if !APPLE_CHANGES
@@ -1520,7 +1540,8 @@ void KHTMLPart::begin( const KURL &url, int xOffset, int yOffset )
 
   d->m_doc->open();
   // clear widget
-  d->m_view->resizeContents( 0, 0 );
+  if (d->m_view)
+    d->m_view->resizeContents( 0, 0 );
   connect(d->m_doc,SIGNAL(finishedParsing()),this,SLOT(slotFinishedParsing()));
 
 #if !APPLE_CHANGES
@@ -1573,8 +1594,12 @@ void KHTMLPart::write( const char *str, int len )
     jScript()->appendSourceFile(m_url.url(),decoded);
   Tokenizer* t = d->m_doc->tokenizer();
 
+  // parsing some of the page can result in running a script which
+  // could possibly destroy the part. To avoid this, ref it temporarily.
+  ref();
   if(t)
     t->write( decoded, true );
+  deref();
 }
 
 void KHTMLPart::write( const QString &str )
@@ -1627,24 +1652,39 @@ void KHTMLPart::stopAnimations()
     }
 }
 
+void KHTMLPart::gotoAnchor()
+{
+    if (m_url.hasRef()) {
+        QString ref = m_url.encodedHtmlRef();
+        if (!gotoAnchor(ref)) {
+            // Can't use htmlRef() here because it doesn't know which encoding to use to decode.
+            // Decoding here has to match encoding in completeURL, which means it has to use the
+            // page's encoding rather than UTF-8.
+            if (d->m_decoder)
+#if !APPLE_CHANGES
+                gotoAnchor(KURL::decode_string(ref, d->m_decoder->codec()->mibEnum()));
+#else
+                gotoAnchor(KURL::decode_string(ref, d->m_decoder->codec()));
+#endif
+        }
+    }
+}
+
 void KHTMLPart::slotFinishedParsing()
 {
   d->m_doc->setParsing(false);
-  checkEmitLoadEvent();
   disconnect(d->m_doc,SIGNAL(finishedParsing()),this,SLOT(slotFinishedParsing()));
 
   if (!d->m_view)
     return; // We are probably being destructed.
+    
+  checkCompleted();
+
   // check if the scrollbars are really needed for the content
   // if not, remove them, relayout, and repaint
 
   d->m_view->restoreScrollBar();
-
-  if ( !m_url.encodedHtmlRef().isEmpty() )
-    if ( !gotoAnchor( m_url.encodedHtmlRef()) )
-       gotoAnchor( m_url.htmlRef() );
-
-  checkCompleted();
+  gotoAnchor();
 }
 
 void KHTMLPart::slotLoaderRequestStarted( khtml::DocLoader* dl, khtml::CachedObject *obj )
@@ -1754,14 +1794,20 @@ void KHTMLPart::checkCompleted()
 
   checkEmitLoadEvent(); // if we didn't do it before
 
+#if APPLE_CHANGES
+  if (d->m_view) {
+#endif
+
 #if !APPLE_CHANGES
   // check that the view has not been moved by the user  
-  if ( m_url.encodedHtmlRef().isEmpty() && d->m_view->contentsY() == 0 )
+  if ( !m_url.hasRef() && d->m_view->contentsY() == 0 )
       d->m_view->setContentsPos( d->m_extension->urlArgs().xOffset,
                                  d->m_extension->urlArgs().yOffset );
 #endif
 
-  d->m_view->complete();
+#if APPLE_CHANGES
+  } // if (d->m_view)
+#endif
 
   if ( d->m_scheduledRedirection != noRedirectionScheduled )
   {
@@ -1875,71 +1921,41 @@ KURL KHTMLPart::completeURL( const QString &url )
   return KURL( d->m_doc->completeURL( url ) );
 }
 
-void KHTMLPart::scheduleRedirection( double delay, const QString &url, bool doLockHistory)
+void KHTMLPart::scheduleRedirection( double delay, const QString &url, bool doLockHistory, bool userGesture )
 {
     kdDebug(6050) << "KHTMLPart::scheduleRedirection delay=" << delay << " url=" << url << endl;
     if (delay < 0 || delay > INT_MAX / 1000)
       return;
-    if ( d->m_scheduledRedirection == noRedirectionScheduled || delay <= d->m_delayRedirect )
+    if ( d->m_scheduledRedirection == noRedirectionScheduled || delay < d->m_delayRedirect )
     {
-       d->m_scheduledRedirection = redirectionScheduled;
+       if (d->m_doc == 0){
+        // Handle a location change of a page with no document as a special case.
+        // This may happens when a frame changes the location of another frame.
+        d->m_scheduledRedirection = redirectionDuringLoad;
+       }
+       else
+         d->m_scheduledRedirection = redirectionScheduled;
        d->m_delayRedirect = delay;
        d->m_redirectURL = url;
        d->m_redirectLockHistory = doLockHistory;
-       d->m_redirectUserGesture = false;
+       d->m_redirectUserGesture = userGesture;
 
-       d->m_redirectionTimer.stop();
-       if ( d->m_bComplete )
+       if ( d->m_bComplete ) {
+         d->m_redirectionTimer.stop();
          d->m_redirectionTimer.start( (int)(1000 * d->m_delayRedirect), true );
+       }
     }
 }
-
-void KHTMLPart::scheduleLocationChange(const QString &url, bool lockHistory, bool userGesture)
-{
-    // Handle a location change of a page with no document as a special case.
-    // This may happen when a frame changes the location of another frame.
-    d->m_scheduledRedirection = d->m_doc ? locationChangeScheduled : locationChangeScheduledDuringLoad;
-    d->m_delayRedirect = 0;
-    d->m_redirectURL = url;
-    d->m_redirectLockHistory = lockHistory;
-    d->m_redirectUserGesture = userGesture;
-    d->m_redirectionTimer.stop();
-    if (d->m_bComplete)
-        d->m_redirectionTimer.start(0, true);
-}
-
-bool KHTMLPart::isScheduledLocationChangePending() const
-{
-    switch (d->m_scheduledRedirection) {
-        case noRedirectionScheduled:
-        case redirectionScheduled:
-            return false;
-        case historyNavigationScheduled:
-        case locationChangeScheduled:
-        case locationChangeScheduledDuringLoad:
-            return true;
-    }
-    return false;
-}
-
 
 void KHTMLPart::scheduleHistoryNavigation( int steps )
 {
-#if APPLE_CHANGES
-    // navigation will always be allowed in the 0 steps case, which is OK because
-    // that's supposed to force a reload
-    if(!KWQ(this)->canGoBackOrForward(steps)) {
-        cancelRedirection();
-        return;
-    }
-#endif
     d->m_scheduledRedirection = historyNavigationScheduled;
     d->m_delayRedirect = 0;
     d->m_redirectURL = QString::null;
     d->m_scheduledHistoryNavigationSteps = steps;
-    d->m_redirectionTimer.stop();
     if ( d->m_bComplete ) {
-        d->m_redirectionTimer.start(0, true );
+        d->m_redirectionTimer.stop();
+        d->m_redirectionTimer.start( (int)(1000 * d->m_delayRedirect), true );
     }
 }
 
@@ -2066,9 +2082,10 @@ bool KHTMLPart::gotoAnchor( const QString &name )
 
   d->m_doc->setCSSTarget(n); // Setting to null will clear the current target.
   
-  if(!n) {
-      kdDebug(6050) << "KHTMLPart::gotoAnchor node '" << name << "' not found" << endl;
-      return false;
+  // Implement the rule that "" and "top" both mean top of page as in other browsers.
+  if (!n && !(name.isEmpty() || name.lower() == "top")) {
+    kdDebug(6050) << "KHTMLPart::gotoAnchor node '" << name << "' not found" << endl;
+    return false;
   }
 
   // We need to update the layout before scrolling, otherwise we could
@@ -2082,14 +2099,15 @@ bool KHTMLPart::gotoAnchor( const QString &name )
   }
   
   int x = 0, y = 0;
-  HTMLElementImpl *a = static_cast<HTMLElementImpl *>(n);
-  a->getUpperLeftCorner(x, y);
+  if (n) {
+    static_cast<HTMLElementImpl *>(n)->getUpperLeftCorner(x, y);
+  }
+  // Scroll to actual top left of element with no slop, since some pages expect anchors to be exactly scrolled to.
 #if APPLE_CHANGES
-  // Remove the 50 pixel slop factor; some pages expect anchors to be exactly scrolled to.
-  // Also, call recursive version so this will expose correctly from within nested frames.
+  // Call recursive version so this will expose correctly from within nested frames.
   d->m_view->setContentsPosRecursive(x, y);
 #else
-  d->m_view->setContentsPos(x-50, y-50);
+  d->m_view->setContentsPos(x, y);
 #endif
 
   return true;
@@ -2136,29 +2154,7 @@ void KHTMLPart::setOnlyLocalReferences(bool enable)
   d->m_onlyLocalReferences = enable;
 }
 
-void KHTMLPart::setEditMode(TristateFlag flag)
-{
-    d->m_inEditMode = flag;
-}
-
-TristateFlag KHTMLPart::editMode() const
-{ 
-    if (d->m_inEditMode != FlagNone)
-        return d->m_inEditMode == FlagEnabled ? FlagEnabled : FlagDisabled;
-    
-    KHTMLPart *part = parentPart();
-    while (part) {
-        if (part->d->m_inEditMode != FlagNone)
-            return part->d->m_inEditMode == FlagEnabled ? FlagEnabled : FlagDisabled;
-        part = part->parentPart();
-    }
-    return FlagNone;
-}
-
-bool KHTMLPart::inEditMode() const
-{
-    return editMode() == FlagEnabled;
-}
+#if !APPLE_CHANGES
 
 void KHTMLPart::findTextBegin(NodeImpl *startNode, int startPos)
 {
@@ -2198,7 +2194,6 @@ bool KHTMLPart::findTextNext( const QString &str, bool forward, bool caseSensiti
             QConstString s(t->s, t->l);
 
             int matchLen = 0;
-#if !APPLE_CHANGES
             if ( isRegExp ) {
               QRegExp matcher( str );
               matcher.setCaseSensitive( caseSensitive );
@@ -2210,41 +2205,16 @@ bool KHTMLPart::findTextNext( const QString &str, bool forward, bool caseSensiti
               d->m_findPos = s.string().find(str, d->m_findPos+1, caseSensitive);
               matchLen = str.length();
             }
-#else
-            if (forward) {
-                d->m_findPos = s.string().find(str, d->m_findPos+1, caseSensitive);
-            } else {
-                if (d->m_findPos == -1) {
-                    // search from end of node
-                    d->m_findPos = s.string().findRev(str, -1, caseSensitive);
-                } else if (d->m_findPos != 0) {
-                    d->m_findPos = s.string().findRev(str, d->m_findPos-1, caseSensitive);
-                } else {
-                    // already at start of this node, on to the next node
-                    d->m_findPos = -1;
-                }
-            }
-            matchLen = str.length();
-#endif
 
             if(d->m_findPos != -1)
             {
-#if !APPLE_CHANGES
                 int x = 0, y = 0;
                 static_cast<khtml::RenderText *>(d->m_findNode->renderer())
                   ->posOfChar(d->m_findPos, x, y);
                 d->m_view->setContentsPos(x-50, y-50);
-#endif
-
-                d->m_selectionStart = d->m_findNode;
-                d->m_startOffset = d->m_findPos;
-                d->m_selectionEnd = d->m_findNode;
-                d->m_endOffset = d->m_findPos + matchLen;
-                d->m_startBeforeEnd = true;
-
-                d->m_doc->setSelection( d->m_selectionStart.handle(), d->m_startOffset,
-                                        d->m_selectionEnd.handle(), d->m_endOffset );
-                emitSelectionChanged();
+                Position p1(d->m_findNode, d->m_findPos);
+                Position p2(d->m_findNode, d->m_findPos + matchLen);
+                setSelection(Selection(p1, p2));
                 return true;
             }
         }
@@ -2284,230 +2254,191 @@ bool KHTMLPart::findTextNext( const QString &str, bool forward, bool caseSensiti
     }
 }
 
+#endif // APPLE_CHANGES
+
 QString KHTMLPart::text(const DOM::Range &r) const
 {
-  // FIXME: This whole function should use the render tree and not the DOM tree, since elements could
-  // be hidden using CSS, or additional generated content could be added.  For now, we just make sure
-  // text objects walk their renderers' InlineTextBox objects, so that we at least get the whitespace 
-  // stripped out properly and obey CSS visibility for text runs.
-
-  if (r.isNull())
-    return QString();
-
-  bool hasNewLine = true;
-  bool addedSpace = true;
-  bool needSpace = false;
-  QString text;
-  DOM::Node startNode = r.startContainer();
-  DOM::Node endNode = r.endContainer();
-  int startOffset = r.startOffset();
-  int endOffset = r.endOffset();
-  if (!startNode.isNull() && startNode.nodeType() == Node::ELEMENT_NODE) {
-      if (startOffset >= 0 && startOffset < (int)startNode.childNodes().length()) {
-          startNode = startNode.childNodes().item(r.startOffset());
-          startOffset = -1;
-      }
-  }
-  if (!endNode.isNull() && endNode.nodeType() == Node::ELEMENT_NODE) {
-      if (endOffset > 0 && endOffset <= (int)endNode.childNodes().length()) {
-          endNode = endNode.childNodes().item(endOffset - 1);
-          endOffset = -1;
-      }
-  }
-
-  DOM::Node n = startNode;
-  while(!n.isNull()) {
-      if(n.nodeType() == DOM::Node::TEXT_NODE) {
-          if (hasNewLine) {
-              addedSpace = true;
-              hasNewLine = false;
-          }
-          QString str = n.nodeValue().string();
-          int start = (n == startNode) ? startOffset : -1;
-          int end = (n == endNode) ? endOffset : -1;
-          RenderObject* renderer = n.handle()->renderer();
-          if (renderer && renderer->isText()) {
-              if (renderer->style()->whiteSpace() == khtml::PRE) {
-                  if (needSpace && !addedSpace)
-                      text += ' ';
-                  int runStart = (start == -1) ? 0 : start;
-                  int runEnd = (end == -1) ? str.length() : end;
-                  text += str.mid(runStart, runEnd-runStart);
-                  needSpace = false;
-                  addedSpace = str[runEnd-1].direction() == QChar::DirWS;
-              }
-              else {
-                  RenderText* textObj = static_cast<RenderText*>(n.handle()->renderer());
-                  InlineTextBoxArray runs = textObj->inlineTextBoxes();
-                  if (runs.count() == 0 && str.length() > 0) {
-                      // We have no runs, but we do have a length.  This means we must be
-                      // whitespace that collapsed away at the end of a line.
-                      needSpace = true;
-                  }
-                  else {
-                      for (unsigned i = 0; i < runs.count(); i++) {
-                          int runStart = (start == -1) ? runs[i]->m_start : start;
-                          int runEnd = (end == -1) ? runs[i]->m_start + runs[i]->m_len : end;
-                          runEnd = QMIN(runEnd, runs[i]->m_start + runs[i]->m_len);
-                          if (runStart >= runs[i]->m_start &&
-                              runStart < runs[i]->m_start + runs[i]->m_len) {
-                              if (i == 0 && runs[0]->m_start == runStart && runStart > 0)
-                                  needSpace = true; // collapsed space at the start
-                              if (needSpace && !addedSpace)
-                                  text += ' ';
-                              QString runText = str.mid(runStart, runEnd - runStart);
-                              runText.replace('\n', ' ');
-                              text += runText;
-                              int nextRunStart = (i+1 < runs.count()) ? runs[i+1]->m_start : str.length();
-                              needSpace = nextRunStart > runEnd; // collapsed space between runs or at the end
-                              addedSpace = str[runEnd-1].direction() == QChar::DirWS;
-                              start = -1;
-                          }
-                          if (end != -1 && runEnd >= end)
-                              break;
-                      }
-                  }
-              }
-          }
-      }
-      else {
-        // This is our simple HTML -> ASCII transformation:
-        unsigned short id = n.elementId();
-        switch(id) {
-          case ID_BR:
-            text += "\n";
-            hasNewLine = true;
-            break;
-
-          case ID_TD:
-          case ID_TH:
-          case ID_HR:
-          case ID_OL:
-          case ID_UL:
-          case ID_LI:
-          case ID_DD:
-          case ID_DL:
-          case ID_DT:
-          case ID_PRE:
-          case ID_BLOCKQUOTE:
-          case ID_DIV:
-            if (!hasNewLine)
-               text += "\n";
-            hasNewLine = true;
-            break;
-          case ID_P:
-          case ID_TR:
-          case ID_H1:
-          case ID_H2:
-          case ID_H3:
-          case ID_H4:
-          case ID_H5:
-          case ID_H6:
-            if (!hasNewLine)
-               text += "\n";
-            text += "\n";
-            hasNewLine = true;
-            break;
-        }
-      }
-      if(n == endNode) break;
-      DOM::Node next = n.firstChild();
-      if(next.isNull()) next = n.nextSibling();
-      while( next.isNull() && !n.parentNode().isNull() ) {
-        n = n.parentNode();
-        if(n == endNode) break;
-        next = n.nextSibling();
-        unsigned short id = n.elementId();
-        switch(id) {
-          case ID_TD:
-          case ID_TH:
-          case ID_HR:
-          case ID_OL:
-          case ID_UL:
-          case ID_LI:
-          case ID_DD:
-          case ID_DL:
-          case ID_DT:
-          case ID_PRE:
-          case ID_BLOCKQUOTE:
-          case ID_DIV:
-            if (!hasNewLine)
-               text += "\n";
-            hasNewLine = true;
-            break;
-          case ID_P:
-          case ID_TR:
-          case ID_H1:
-          case ID_H2:
-          case ID_H3:
-          case ID_H4:
-          case ID_H5:
-          case ID_H6:
-            if (!hasNewLine)
-               text += "\n";
-            // An extra newline is needed at the start, not the end, of these types of tags,
-            // so don't add another here.
-            hasNewLine = true;
-            break;
-        }
-      }
-
-      n = next;
-    }
-    int start = 0;
-    int end = text.length();
-
-    // Strip leading LFs
-    while ((start < end) && (text[start] == '\n'))
-       start++;
-
-    // Strip excessive trailing LFs
-    while ((start < (end-1)) && (text[end-1] == '\n') && (text[end-2] == '\n'))
-       end--;
-       
-    return text.mid(start, end-start);
+    return plainText(r);
 }
 
 QString KHTMLPart::selectedText() const
 {
-    return text(selection());
+    return text(selection().toRange());
 }
 
 bool KHTMLPart::hasSelection() const
 {
-  return ( !d->m_selectionStart.isNull() &&
-           !d->m_selectionEnd.isNull() );
+    return !d->m_selection.isEmpty();
 }
 
-DOM::Range KHTMLPart::selection() const
+const Selection &KHTMLPart::selection() const
 {
-    DOM::Range r = document().createRange();
-    if (hasSelection()) {
-        r.setStart( d->m_selectionStart, d->m_startOffset );
-        r.setEnd( d->m_selectionEnd, d->m_endOffset );
+    return d->m_selection;
+}
+
+const Selection &KHTMLPart::dragCaret() const
+{
+    return d->m_dragCaret;
+}
+
+void KHTMLPart::setSelection(const Selection &s, bool closeTyping)
+{
+    if (d->m_selection != s) {
+        clearCaretRectIfNeeded(); 
+        setFocusNodeIfNeeded(s);
+        d->m_selection = s;
+        notifySelectionChanged(closeTyping);
     }
-    return r;
 }
 
-
-void KHTMLPart::setSelection( const DOM::Range &r )
+void KHTMLPart::setDragCaret(const DOM::Selection &dragCaret)
 {
-    d->m_selectionStart = r.startContainer();
-    d->m_startOffset = r.startOffset();
-    d->m_selectionEnd = r.endContainer();
-    d->m_endOffset = r.endOffset();
-    d->m_doc->setSelection(d->m_selectionStart.handle(),d->m_startOffset,
-                           d->m_selectionEnd.handle(),d->m_endOffset);
+    if (d->m_dragCaret != dragCaret) {
+        d->m_dragCaret.needsCaretRepaint();
+        d->m_dragCaret = dragCaret;
+        d->m_dragCaret.needsCaretRepaint();
+    }
+}
+
+void KHTMLPart::clearSelection()
+{
+    clearCaretRectIfNeeded();
+    setFocusNodeIfNeeded(d->m_selection);
+    d->m_selection = Selection();
+    notifySelectionChanged();
+}
+
+void KHTMLPart::invalidateSelection()
+{
+    clearCaretRectIfNeeded();
+    d->m_selection.setNeedsLayout();
+    selectionLayoutChanged();
+}
+
+void KHTMLPart::setSelectionVisible(bool flag)
+{
+    if (d->m_caretVisible == flag)
+        return;
+
+    clearCaretRectIfNeeded();
+    setFocusNodeIfNeeded(d->m_selection);
+    d->m_caretVisible = flag;
+    notifySelectionChanged();
 }
 
 void KHTMLPart::slotClearSelection()
 {
-    d->m_selectionStart = 0;
-    d->m_startOffset = 0;
-    d->m_selectionEnd = 0;
-    d->m_endOffset = 0;
-    if ( d->m_doc ) d->m_doc->clearSelection();
+    clearCaretRectIfNeeded();
+    bool hadSelection = hasSelection();
+    d->m_selection.clear();
+    if (hadSelection)
+        notifySelectionChanged();
+}
+
+void KHTMLPart::clearCaretRectIfNeeded()
+{
+    if (d->m_caretPaint) {
+        d->m_caretPaint = false;
+        d->m_selection.needsCaretRepaint();
+    }        
+}
+
+void KHTMLPart::setFocusNodeIfNeeded(const Selection &s)
+{
+    if (!xmlDocImpl() || s.state() == Selection::NONE)
+        return;
+
+    NodeImpl *n = s.start().node();
+    NodeImpl *target = (n && n->isContentEditable()) ? n : 0;
+    if (!target) {
+        while (n && n != s.end().node()) {
+            if (n->isContentEditable()) {
+                target = n;
+                break;
+            }
+            n = n->traverseNextNode();
+        }
+    }
+    assert(target == 0 || target->isContentEditable());
+    
+    if (target) {
+        for ( ; target && !target->isFocusable(); target = target->parentNode()); // loop
+        if (target && target->isMouseFocusable())
+            xmlDocImpl()->setFocusNode(target);
+        else if (!target || !target->focused())
+            xmlDocImpl()->setFocusNode(0);
+    }
+}
+
+void KHTMLPart::selectionLayoutChanged()
+{
+    // kill any caret blink timer now running
+    if (d->m_caretBlinkTimer >= 0) {
+        killTimer(d->m_caretBlinkTimer);
+        d->m_caretBlinkTimer = -1;
+    }
+
+    // see if a new caret blink timer needs to be started
+    if (d->m_caretVisible && d->m_caretBlinks && 
+        d->m_selection.state() == Selection::CARET && d->m_selection.start().node()->isContentEditable()) {
+        d->m_caretBlinkTimer = startTimer(CARET_BLINK_FREQUENCY);
+        d->m_caretPaint = true;
+        d->m_selection.needsCaretRepaint();
+    }
+
+    if (d->m_doc)
+        d->m_doc->updateSelection();
+
+    // Always clear the x position used for vertical arrow navigation.
+    // It will be restored by the vertical arrow navigation code if necessary.
+    d->m_xPosForVerticalArrowNavigation = NoXPosForVerticalArrowNavigation;
+}
+
+void KHTMLPart::notifySelectionChanged(bool closeTyping)
+{
+    selectionLayoutChanged();
+    clearTypingStyle();
+
+    if (closeTyping)
+        TypingCommand::closeTyping(lastEditCommand());
+    
     emitSelectionChanged();
+    
+#if APPLE_CHANGES
+    KWQ(this)->respondToChangedSelection();
+#endif
+}
+
+void KHTMLPart::setXPosForVerticalArrowNavigation(int x)
+{
+    d->m_xPosForVerticalArrowNavigation = x;
+}
+
+int KHTMLPart::xPosForVerticalArrowNavigation() const
+{
+    return d->m_xPosForVerticalArrowNavigation;
+}
+
+void KHTMLPart::timerEvent(QTimerEvent *e)
+{
+    if (e->timerId() == d->m_caretBlinkTimer && 
+        d->m_caretVisible && 
+        d->m_caretBlinks && 
+        d->m_selection.state() == Selection::CARET) {
+        d->m_caretPaint = !d->m_caretPaint;
+        d->m_selection.needsCaretRepaint();
+    }
+}
+
+void KHTMLPart::paintCaret(QPainter *p, const QRect &rect) const
+{
+    if (d->m_caretPaint)
+        d->m_selection.paintCaret(p, rect);
+}
+
+void KHTMLPart::paintDragCaret(QPainter *p, const QRect &rect) const
+{
+    d->m_dragCaret.paintCaret(p, rect);
 }
 
 #if !APPLE_CHANGES
@@ -3064,7 +2995,7 @@ bool KHTMLPart::requestObject( khtml::ChildFrame *child, const KURL &url, const 
   if ( child->m_bPreloaded )
   {
     // kdDebug(6005) << "KHTMLPart::requestObject preload" << endl;
-    if ( child->m_frame && child->m_part )
+    if ( child->m_frame && child->m_part && child->m_part->widget() )
       child->m_frame->setWidget( child->m_part->widget() );
 
     child->m_bPreloaded = false;
@@ -3165,7 +3096,6 @@ bool KHTMLPart::processObjectRequest( khtml::ChildFrame *child, const KURL &_url
     //CRITICAL STUFF
     if ( child->m_part )
     {
-      disconnectChild(child);
 #if !APPLE_CHANGES
       partManager()->removePart( (KParts::ReadOnlyPart *)child->m_part );
 #endif
@@ -3173,7 +3103,7 @@ bool KHTMLPart::processObjectRequest( khtml::ChildFrame *child, const KURL &_url
     }
 
     child->m_serviceType = mimetype;
-    if ( child->m_frame )
+    if ( child->m_frame && part->widget() )
       child->m_frame->setWidget( part->widget() );
 
 #if !APPLE_CHANGES
@@ -3186,7 +3116,21 @@ bool KHTMLPart::processObjectRequest( khtml::ChildFrame *child, const KURL &_url
     child->m_part = part;
     assert( ((void*) child->m_part) != 0);
 
-    connectChild(child);
+    if ( child->m_type != khtml::ChildFrame::Object )
+    {
+      connect( part, SIGNAL( started( KIO::Job *) ),
+               this, SLOT( slotChildStarted( KIO::Job *) ) );
+      connect( part, SIGNAL( completed() ),
+               this, SLOT( slotChildCompleted() ) );
+      connect( part, SIGNAL( completed(bool) ),
+               this, SLOT( slotChildCompleted(bool) ) );
+      connect( part, SIGNAL( setStatusBarText( const QString & ) ),
+               this, SIGNAL( setStatusBarText( const QString & ) ) );
+      connect( this, SIGNAL( completed() ),
+               part, SLOT( slotParentCompleted() ) );
+      connect( this, SIGNAL( completed(bool) ),
+               part, SLOT( slotParentCompleted() ) );
+    }
 
 #if APPLE_CHANGES
   }
@@ -3616,8 +3560,8 @@ void KHTMLPart::slotChildCompleted( bool complete )
   child->m_bCompleted = true;
   child->m_args = KParts::URLArgs();
 
-  if ( complete && parentPart() == 0 )
-    d->m_bPendingChildRedirection = true;
+  if ( parentPart() == 0 )
+    d->m_bPendingChildRedirection = (d->m_bPendingChildRedirection || complete);
 
   checkCompleted();
 }
@@ -4321,6 +4265,12 @@ bool KHTMLPart::dndEnabled() const
   return d->m_bDnd;
 }
 
+bool KHTMLPart::shouldDragAutoNode(DOM::NodeImpl *node) const
+{
+    // No KDE impl yet
+    return false;
+}
+
 void KHTMLPart::customEvent( QCustomEvent *event )
 {
   if ( khtml::MousePressEvent::test( event ) )
@@ -4356,753 +4306,420 @@ void KHTMLPart::customEvent( QCustomEvent *event )
   KParts::ReadOnlyPart::customEvent( event );
 }
 
-#if APPLE_CHANGES
-
-static bool firstRunAt(RenderObject *renderNode, int y, NodeImpl *&startNode, long &startOffset)
-{
-    for (RenderObject *n = renderNode; n; n = n->nextSibling()) {
-        if (n->isText()) {
-            RenderText *textRenderer = static_cast<khtml::RenderText *>(n);
-            InlineTextBoxArray runs = textRenderer->inlineTextBoxes();
-            for (unsigned i = 0; i != runs.count(); i++) {
-                if (runs[i]->m_y == y) {
-                    startNode = textRenderer->element();
-                    startOffset = runs[i]->m_start;
-                    return true;
-                }
-            }
-        }
-        
-        if (firstRunAt(n->firstChild(), y, startNode, startOffset)) {
-            return true;
-        }
-    }
-    
-    return false;
-}
-
-static bool lastRunAt(RenderObject *renderNode, int y, NodeImpl *&endNode, long &endOffset)
-{
-    RenderObject *n = renderNode;
-    if (!n) {
-        return false;
-    }
-    RenderObject *next;
-    while ((next = n->nextSibling())) {
-        n = next;
-    }
-    
-    while (1) {
-        if (lastRunAt(n->firstChild(), y, endNode, endOffset)) {
-            return true;
-        }
-    
-        if (n->isText()) {
-            RenderText *textRenderer =  static_cast<khtml::RenderText *>(n);
-            InlineTextBoxArray runs = textRenderer->inlineTextBoxes();
-            for (int i = (int)runs.count()-1; i >= 0; i--) {
-                if (runs[i]->m_y == y) {
-                    endNode = textRenderer->element();
-                    endOffset = runs[i]->m_start + runs[i]->m_len;
-                    return true;
-                }
-            }
-        }
-        
-        if (n == renderNode) {
-            return false;
-        }
-        
-        n = n->previousSibling();
-    }
-}
-
-static bool startAndEndLineNodesIncludingNode (DOM::NodeImpl *node, int offset, DOM::Node &_startNode, long &startOffset, DOM::Node &_endNode, long &endOffset)
-{
-    if (node && (node->nodeType() == Node::TEXT_NODE || node->nodeType() == Node::CDATA_SECTION_NODE)){
-        int pos;
-        int selectionPointY;
-        khtml::RenderText *renderer = static_cast<khtml::RenderText *>(node->renderer());
-        khtml::InlineTextBox * run = renderer->findNextInlineTextBox( offset, pos );
-        DOMString t = node->nodeValue();
-        DOM::NodeImpl* startNode;
-        DOM::NodeImpl* endNode;
-        
-        if (!run)
-            return false;
-            
-        selectionPointY = run->m_y;
-        
-        // Go up to first non-inline element.
-        khtml::RenderObject *renderNode = renderer;
-        while (renderNode && renderNode->isInline())
-            renderNode = renderNode->parent();
-        
-        renderNode = renderNode->firstChild();
-        
-        // Look for all the first child in the block that is on the same line
-        // as the selection point.
-        if (!firstRunAt (renderNode, selectionPointY, startNode, startOffset))
-            return false;
-    
-        // Look for all the last child in the block that is on the same line
-        // as the selection point.
-        if (!lastRunAt (renderNode, selectionPointY, endNode, endOffset))
-            return false;
-        
-        _startNode = startNode;
-        _endNode = endNode;
-        return true;
-    }
-    return false;
-}
-
-static void findWordBoundary(QChar *chars, int len, int position, int *start, int *end)
-{
-    TextBreakLocatorRef breakLocator;
-    OSStatus status = UCCreateTextBreakLocator(NULL, 0, kUCTextBreakWordMask, &breakLocator);
-    if (status == noErr) {
-        UniCharArrayOffset startOffset, endOffset;
-        status = UCFindTextBreak(breakLocator, kUCTextBreakWordMask, 0, (const UniChar *)chars, len, position, &endOffset);
-        if (status == noErr) {
-            status = UCFindTextBreak(breakLocator, kUCTextBreakWordMask, kUCTextBreakGoBackwardsMask, (const UniChar *)chars, len, position, &startOffset);
-        }
-        UCDisposeTextBreakLocator(&breakLocator);
-        if (status == noErr) {
-            *start = startOffset;
-            *end = endOffset;
-            return;
-        }
-    }
-    
-    // If Carbon fails (why would it?), do a simple space/punctuation boundary check.
-    if (chars[position].isSpace()) {
-        int pos = position;
-        while (chars[pos].isSpace() && pos >= 0)
-            pos--;
-        *start = pos+1;
-        pos = position;
-        while (chars[pos].isSpace() && pos < (int)len)
-            pos++;
-        *end = pos;
-    } else if (chars[position].isPunct()) {
-        int pos = position;
-        while (chars[pos].isPunct() && pos >= 0)
-            pos--;
-        *start = pos+1;
-        pos = position;
-        while (chars[pos].isPunct() && pos < (int)len)
-            pos++;
-        *end = pos;
-    } else {
-        int pos = position;
-        while (!chars[pos].isSpace() && !chars[pos].isPunct() && pos >= 0)
-            pos--;
-        *start = pos+1;
-        pos = position;
-        while (!chars[pos].isSpace() && !chars[pos].isPunct() && pos < (int)len)
-            pos++;
-        *end = pos;
-    }
-}
-#endif
-
 bool KHTMLPart::isPointInsideSelection(int x, int y)
 {
-    // Treat an empty selection like no selection.
-    if (d->m_selectionStart == d->m_selectionEnd && d->m_startOffset == d->m_endOffset) {
+    // Treat a collapsed selection like no selection.
+    if (d->m_selection.state() == Selection::CARET)
         return false;
-    }
-    if (!xmlDocImpl()->renderer()) {
+    if (!xmlDocImpl()->renderer()) 
         return false;
-    }
     
     RenderObject::NodeInfo nodeInfo(true, true);
     xmlDocImpl()->renderer()->layer()->nodeAtPoint(nodeInfo, x, y);
-    DOM::NodeImpl* innerNode = nodeInfo.innerNode();
-    if (!innerNode || !innerNode->renderer()) {
+    NodeImpl *innerNode = nodeInfo.innerNode();
+    if (!innerNode || !innerNode->renderer())
         return false;
-    }
     
-    int offset = 0, ax, ay;
-    DOM::NodeImpl* node = 0;
-
-    // FIXME: Shouldn't be necessary to skip text nodes.
-    if (innerNode->nodeType() == Node::TEXT_NODE) {
-        innerNode = innerNode->parentNode();
-    }
-    innerNode->renderer()->absolutePosition (ax, ay);
-    innerNode->renderer()->checkSelectionPoint( x, y, ax-innerNode->renderer()->xPos(), ay-innerNode->renderer()->yPos(), node, offset);
-    if (!node) {
+    Position pos(innerNode->positionForCoordinates(x, y));
+    if (pos.isEmpty())
         return false;
-    }
 
-    DOM::Node n = d->m_selectionStart;
-    while(!n.isNull()) {
-        if (n == node) {
-            if ((n == d->m_selectionStart && offset < d->m_startOffset) ||
-                (n == d->m_selectionEnd && offset > d->m_endOffset)) {
+    NodeImpl *n = d->m_selection.start().node();
+    while (n) {
+        if (n == pos.node()) {
+            if ((n == d->m_selection.start().node() && pos.offset() < d->m_selection.start().offset()) ||
+                (n == d->m_selection.end().node() && pos.offset() > d->m_selection.end().offset())) {
                 return false;
             }
             return true;
         }
-        if (n == d->m_selectionEnd) {
+        if (n == d->m_selection.end().node())
             break;
-        }
-        DOM::Node next = n.firstChild();
-        if (next.isNull()) {
-            next = n.nextSibling();
-        }
-        while (next.isNull() && !n.parentNode().isNull()) {
-            n = n.parentNode();
-            next = n.nextSibling();
-        }
-        n = next;
+        n = n->traverseNextNode();
     }
-    return false;
+
+   return false;
 }
 
-void KHTMLPart::khtmlMousePressEvent( khtml::MousePressEvent *event )
+void KHTMLPart::handleMousePressEventDoubleClick(khtml::MousePressEvent *event)
 {
-  DOM::DOMString url = event->url();
-  QMouseEvent *_mouse = event->qmouseEvent();
-  DOM::Node innerNode = event->innerNode();
-  d->m_mousePressNode = innerNode;
+    QMouseEvent *mouse = event->qmouseEvent();
+    DOM::Node innerNode = event->innerNode();
+
+    Selection selection;
+
+    if (mouse->button() == LeftButton && !innerNode.isNull() && innerNode.handle()->renderer() &&
+        innerNode.handle()->renderer()->shouldSelect()) {
+        Position pos(innerNode.handle()->positionForCoordinates(event->x(), event->y()));
+        if (pos.node() && (pos.node()->nodeType() == Node::TEXT_NODE || pos.node()->nodeType() == Node::CDATA_SECTION_NODE)) {
+            selection.moveTo(pos);
+            selection.expandUsingGranularity(Selection::WORD);
+        }
+    }
     
-   d->m_dragStartPos = _mouse->pos();
-
-   if ( !event->url().isNull() ) {
-     d->m_strSelectedURL = event->url().string();
-     d->m_strSelectedURLTarget = event->target().string();
-   }
-   else
-     d->m_strSelectedURL = d->m_strSelectedURLTarget = QString::null;
-
-  if ( _mouse->button() == LeftButton ||
-       _mouse->button() == MidButton )
-  {
-    d->m_bMousePressed = true;
-
-#ifndef KHTML_NO_SELECTION
-#if APPLE_CHANGES
-    d->m_selectionInitiatedWithDoubleClick = false;
-    d->m_selectionInitiatedWithTripleClick = false;
-    d->m_mouseMovedSinceLastMousePress = false;
-
-    if (event->qmouseEvent()->clickCount() == 2){
-        QMouseEvent *_mouse = event->qmouseEvent();
-        DOM::Node innerNode = event->innerNode();
-        
-        d->m_selectionStart = 0;
-        d->m_selectionEnd = 0;
-        d->m_startOffset = 0;
-        d->m_endOffset = 0;
+    if (selection.state() != Selection::CARET) {
+        d->m_selectionGranularity = Selection::WORD;
+        d->m_beganSelectingText = true;
+    }
     
-        if ( _mouse->button() == LeftButton ){
-            if ( !innerNode.isNull()  && innerNode.handle()->renderer()) {
-                int startOffset = 0, endOffset = 0;
-                DOM::NodeImpl* node = 0;
-                
-                // FIXME: Shouldn't be necessary to skip text nodes.
-                if (innerNode.nodeType() == Node::TEXT_NODE)
-                    innerNode = innerNode.parentNode();
-                innerNode.handle()->renderer()->checkSelectionPoint( event->x(), event->y(),
-                                            event->absX()-innerNode.handle()->renderer()->xPos(),
-                                            event->absY()-innerNode.handle()->renderer()->yPos(), 
-                                            node, startOffset);
-                
-                if (node && (node->nodeType() == Node::TEXT_NODE || node->nodeType() == Node::CDATA_SECTION_NODE)){
-                    DOMString t = node->nodeValue();
-                    QChar *chars = t.unicode();
-                    uint len = t.length();
+    setSelection(selection);
+    startAutoScroll();
+}
 
-                    findWordBoundary (chars, len, startOffset, &startOffset, &endOffset);
+void KHTMLPart::handleMousePressEventTripleClick(khtml::MousePressEvent *event)
+{
+    QMouseEvent *mouse = event->qmouseEvent();
+    DOM::Node innerNode = event->innerNode();
+    
+    Selection selection;
+    
+    if (mouse->button() == LeftButton && !innerNode.isNull() && innerNode.handle()->renderer() &&
+        innerNode.handle()->renderer()->shouldSelect()) {
+        Position pos(innerNode.handle()->positionForCoordinates(event->x(), event->y()));
+        if (pos.node() && (pos.node()->nodeType() == Node::TEXT_NODE || pos.node()->nodeType() == Node::CDATA_SECTION_NODE)) {
+            selection.moveTo(pos);
+            selection.expandUsingGranularity(Selection::LINE);
+        }
+    }
+    
+    if (selection.state() != Selection::CARET) {
+        d->m_selectionGranularity = Selection::LINE;
+        d->m_beganSelectingText = true;
+    }
+    
+    setSelection(selection);
+    startAutoScroll();
+}
 
-                    d->m_startBeforeEnd = true;
-                    d->m_selectionStart = node;
-                    d->m_startOffset = startOffset;
-                    d->m_selectionEnd = d->m_selectionStart;
-                    d->m_endOffset = endOffset;
+void KHTMLPart::handleMousePressEventSingleClick(khtml::MousePressEvent *event)
+{
+    QMouseEvent *mouse = event->qmouseEvent();
+    DOM::Node innerNode = event->innerNode();
+    
+    if (mouse->button() == LeftButton) {
+        Selection sel;
+
+        if (!innerNode.isNull() && innerNode.handle()->renderer() &&
+            innerNode.handle()->renderer()->shouldSelect()) {
+            bool extendSelection = mouse->state() & ShiftButton;
+
+            // Don't restart the selection when the mouse is pressed on an
+            // existing selection so we can allow for text dragging.
+            if (!extendSelection && isPointInsideSelection(event->x(), event->y())) {
+                return;
+            }
+            Position pos(innerNode.handle()->positionForCoordinates(event->x(), event->y()));
+            if (pos.isEmpty())
+                pos = Position(innerNode.handle(), innerNode.handle()->caretMinOffset());
+
+            sel = selection();
+            if (extendSelection && sel.notEmpty()) {
+                sel.clearModifyBias();
+                sel.setExtent(pos);
+                if (d->m_selectionGranularity != Selection::CHARACTER) {
+                    sel.expandUsingGranularity(d->m_selectionGranularity);
                 }
+                d->m_beganSelectingText = true;
+            } else {
+                sel = pos;
+                d->m_selectionGranularity = Selection::CHARACTER;
             }
         }
-        if (d->m_selectionStart == 0 || d->m_selectionEnd == 0)
-            d->m_doc->clearSelection();
-        else{
-            d->m_initialSelectionStart = d->m_selectionStart;
-            d->m_initialSelectionStartOffset = d->m_startOffset;
-            d->m_initialSelectionEnd = d->m_selectionEnd;
-            d->m_initialSelectionEndOffset = d->m_endOffset;
-            d->m_selectionInitiatedWithDoubleClick = true;
-            d->m_doc->setSelection(d->m_selectionStart.handle(), d->m_startOffset,
-                    d->m_selectionEnd.handle(),d->m_endOffset);
-        }
-        emitSelectionChanged();
+
+        setSelection(sel);
         startAutoScroll();
     }
-    else if (event->qmouseEvent()->clickCount() >= 3){
-        QMouseEvent *_mouse = event->qmouseEvent();
-        DOM::Node innerNode = event->innerNode();
-        
-        d->m_selectionStart = 0;
-        d->m_selectionEnd = 0;
-        d->m_startOffset = 0;
-        d->m_endOffset = 0;
-    
-        if ( _mouse->button() == LeftButton ){
-            if ( !innerNode.isNull()  && innerNode.handle()->renderer()) {
-                int startOffset = 0;
-                DOM::NodeImpl* node = 0;
-                
-                // FIXME: Shouldn't be necessary to skip text nodes.
-                if (innerNode.nodeType() == Node::TEXT_NODE)
-                    innerNode = innerNode.parentNode();
-                innerNode.handle()->renderer()->checkSelectionPoint( event->x(), event->y(),
-                                            event->absX()-innerNode.handle()->renderer()->xPos(),
-                                            event->absY()-innerNode.handle()->renderer()->yPos(), 
-                                            node, startOffset);
-                
-                startAndEndLineNodesIncludingNode (node, startOffset, d->m_selectionStart, d->m_startOffset, d->m_selectionEnd, d->m_endOffset);
-            }
-        }
-        if (d->m_selectionStart == 0 || d->m_selectionEnd == 0)
-            d->m_doc->clearSelection();
-        else {
-            d->m_initialSelectionStart = d->m_selectionStart;
-            d->m_initialSelectionStartOffset = d->m_startOffset;
-            d->m_initialSelectionEnd = d->m_selectionEnd;
-            d->m_initialSelectionEndOffset = d->m_endOffset;
-            d->m_selectionInitiatedWithTripleClick = true;
-            d->m_doc->setSelection(d->m_selectionStart.handle(), d->m_startOffset,
-                    d->m_selectionEnd.handle(),d->m_endOffset);
-        }
-                    
-        emitSelectionChanged();
-        startAutoScroll();
+}
+
+void KHTMLPart::khtmlMousePressEvent(khtml::MousePressEvent *event)
+{
+    DOM::DOMString url = event->url();
+    QMouseEvent *mouse = event->qmouseEvent();
+    DOM::Node innerNode = event->innerNode();
+
+    d->m_mousePressNode = innerNode;
+    d->m_dragStartPos = mouse->pos();
+
+    if (!event->url().isNull()) {
+        d->m_strSelectedURL = d->m_strSelectedURLTarget = QString::null;
     }
     else {
-#endif
-        if ( _mouse->button() == LeftButton )
-        {
-            if ( !innerNode.isNull()  && innerNode.handle()->renderer()) {
-#if APPLE_CHANGES
-                // Don't restart the selection when the mouse is pressed on an
-                // existing selection so we can allow for text dragging.
-                if (isPointInsideSelection(event->x(), event->y())) {
-                    return;
-                }
-#endif
-                int offset = 0;
-                DOM::NodeImpl* node = 0;
-
-                // FIXME: Shouldn't be necessary to skip text nodes.
-                if (innerNode.nodeType() == Node::TEXT_NODE)
-                    innerNode = innerNode.parentNode();
-                innerNode.handle()->renderer()->checkSelectionPoint( event->x(), event->y(),
-                                                                    event->absX()-innerNode.handle()->renderer()->xPos(),
-                                                                    event->absY()-innerNode.handle()->renderer()->yPos(), node, offset);
-                
-                d->m_selectionStart = node;
-                d->m_startOffset = offset;
-                //           kdDebug(6005) << "KHTMLPart::khtmlMousePressEvent selectionStart=" << d->m_selectionStart.handle()->renderer()
-                //                         << " offset=" << d->m_startOffset << endl;
-                d->m_selectionEnd = d->m_selectionStart;
-                d->m_endOffset = d->m_startOffset;
-                d->m_doc->clearSelection();
-            }
-            else
-            {
-                d->m_selectionStart = DOM::Node();
-                d->m_selectionEnd = DOM::Node();
-            }
-            emitSelectionChanged();
-            startAutoScroll();
-        }
-#if APPLE_CHANGES
+        d->m_strSelectedURL = event->url().string();
+        d->m_strSelectedURLTarget = event->target().string();
     }
-#endif
-#else
-    d->m_dragLastPos = _mouse->globalPos();
-#endif
-  }
 
 #if !APPLE_CHANGES
-  if ( _mouse->button() == RightButton )
-  {
-    popupMenu( d->m_strSelectedURL );
-    d->m_strSelectedURL = d->m_strSelectedURLTarget = QString::null;
-  }
+    if (mouse->button() == RightButton) {
+        popupMenu(d->m_strSelectedURL);
+        d->m_strSelectedURL = d->m_strSelectedURLTarget = QString::null;
+    }
 #endif
+
+    if (mouse->button() == LeftButton || mouse->button() == MidButton) {
+        d->m_bMousePressed = true;
+
+#ifdef KHTML_NO_SELECTION
+        d->m_dragLastPos = mouse->globalPos();
+#else
+        d->m_beganSelectingText = false;
+
+        if (mouse->clickCount() == 2) {
+            handleMousePressEventDoubleClick(event);
+            return;
+        }
+        
+        if (mouse->clickCount() >= 3) {
+            handleMousePressEventTripleClick(event);
+            return;
+        }
+
+        handleMousePressEventSingleClick(event);
+#endif // KHTML_NO_SELECTION
+    }
 }
 
 void KHTMLPart::khtmlMouseDoubleClickEvent( khtml::MouseDoubleClickEvent *event)
 {
 }
 
-void KHTMLPart::khtmlMouseMoveEvent( khtml::MouseMoveEvent *event )
-{
-  QMouseEvent *_mouse = event->qmouseEvent();
-  DOM::Node innerNode = event->innerNode();
-
-#ifndef QT_NO_DRAGANDDROP
-  if( d->m_bMousePressed && (!d->m_strSelectedURL.isEmpty() || (!innerNode.isNull() && innerNode.elementId() == ID_IMG) ) &&
-      ( d->m_dragStartPos - _mouse->pos() ).manhattanLength() > KGlobalSettings::dndEventDelay() &&
-      d->m_bDnd && d->m_mousePressNode == innerNode ) {
-
-      QPixmap p;
-      QDragObject *drag = 0;
-      if( !d->m_strSelectedURL.isEmpty() ) {
-          KURL u( completeURL( d->m_strSelectedURL) );
-          KURLDrag* urlDrag = KURLDrag::newDrag( u, d->m_view->viewport() );
-          if ( !d->m_referrer.isEmpty() )
-            urlDrag->metaData()["referrer"] = d->m_referrer;
-          drag = urlDrag;
-          p = KMimeType::pixmapForURL(u, 0, KIcon::Desktop, KIcon::SizeMedium);
-      } else {
-          HTMLImageElementImpl *i = static_cast<HTMLImageElementImpl *>(innerNode.handle());
-          if( i ) {
-            KMultipleDrag *mdrag = new KMultipleDrag( d->m_view->viewport() );
-            mdrag->addDragObject( new QImageDrag( i->currentImage(), 0L ) );
-            KURL u( completeURL( khtml::parseURL(i->getAttribute(ATTR_SRC)).string() ) );
-            KURLDrag* urlDrag = KURLDrag::newDrag( u, 0L );
-            if ( !d->m_referrer.isEmpty() )
-              urlDrag->metaData()["referrer"] = d->m_referrer;
-            mdrag->addDragObject( urlDrag );
-            drag = mdrag;
-            p = KMimeType::mimeType("image/png")->pixmap(KIcon::Desktop);
-          }
-      }
-
-    if ( !p.isNull() )
-      drag->setPixmap(p);
-
-    stopAutoScroll();
-    if(drag)
-        drag->drag();
-
-    // when we finish our drag, we need to undo our mouse press
-    d->m_bMousePressed = false;
-    d->m_strSelectedURL = d->m_strSelectedURLTarget = QString::null;
-    return;
-  }
-#endif
-
-  DOM::DOMString url = event->url();
-  DOM::DOMString target = event->target();
-
-  // Not clicked -> mouse over stuff
-  if ( !d->m_bMousePressed )
-  {
 #if !APPLE_CHANGES
-    // The mouse is over something
-    if ( url.length() )
-    {
-      bool shiftPressed = ( _mouse->state() & ShiftButton );
 
-      // Image map
-      if ( !innerNode.isNull() && innerNode.elementId() == ID_IMG )
-      {
-        HTMLImageElementImpl *i = static_cast<HTMLImageElementImpl *>(innerNode.handle());
-        if ( i && i->isServerMap() )
-        {
-          khtml::RenderObject *r = i->renderer();
-          if(r)
-          {
-            int absx, absy, vx, vy;
-            r->absolutePosition(absx, absy);
-            view()->contentsToViewport( absx, absy, vx, vy );
+bool KHTMLPart::handleMouseMoveEventDrag(khtml::MouseMoveEvent *event)
+{
+#ifdef QT_NO_DRAGANDDROP
+	return false;
+#else
 
-            int x(_mouse->x() - vx), y(_mouse->y() - vy);
+	QMouseEvent *mouse = event->qmouseEvent();
+	DOM::Node innerNode = event->innerNode();
 
-            d->m_overURL = url.string() + QString("?%1,%2").arg(x).arg(y);
-            d->m_overURLTarget = target.string();
-            overURL( d->m_overURL, target.string(), shiftPressed );
-            return;
-          }
-        }
-      }
+	if (d->m_bMousePressed && (!d->m_strSelectedURL.isEmpty() || (!innerNode.isNull() && innerNode.elementId() == ID_IMG)) &&
+	   (d->m_dragStartPos - mouse->pos()).manhattanLength() > KGlobalSettings::dndEventDelay() &&
+	    d->m_bDnd && d->m_mousePressNode == innerNode) {
 
-      // normal link
-      if ( d->m_overURL.isEmpty() || d->m_overURL != url || d->m_overURLTarget != target )
-      {
-        d->m_overURL = url.string();
-        d->m_overURLTarget = target.string();
-        overURL( d->m_overURL, target.string(), shiftPressed );
-      }
-    }
-    else  // Not over a link...
-    {
-      if( !d->m_overURL.isEmpty() ) // and we were over a link  -> reset to "default statusbar text"
-      {
-        d->m_overURL = d->m_overURLTarget = QString::null;
-        emit onURL( QString::null );
-        // Default statusbar text can be set from javascript. Otherwise it's empty.
-        emit setStatusBarText( d->m_kjsDefaultStatusBarText );
-      }
-    }
+		QPixmap p;
+		QDragObject *drag = 0;
+		if (!d->m_strSelectedURL.isEmpty()) {
+			KURL u( completeURL( d->m_strSelectedURL) );
+			KURLDrag* urlDrag = KURLDrag::newDrag( u, d->m_view->viewport() );
+			if ( !d->m_referrer.isEmpty() )
+			urlDrag->metaData()["referrer"] = d->m_referrer;
+			drag = urlDrag;
+			p = KMimeType::pixmapForURL(u, 0, KIcon::Desktop, KIcon::SizeMedium);
+		} 
+		else {
+			HTMLImageElementImpl *i = static_cast<HTMLImageElementImpl *>(innerNode.handle());
+			if (i) {
+				KMultipleDrag *mdrag = new KMultipleDrag( d->m_view->viewport());
+				mdrag->addDragObject(new QImageDrag(i->currentImage(), 0L));
+				KURL u( completeURL( khtml::parseURL(i->getAttribute(ATTR_SRC)).string()));
+				KURLDrag* urlDrag = KURLDrag::newDrag(u, 0L);
+				if (!d->m_referrer.isEmpty())
+					urlDrag->metaData()["referrer"] = d->m_referrer;
+				mdrag->addDragObject( urlDrag );
+				drag = mdrag;
+				p = KMimeType::mimeType("image/png")->pixmap(KIcon::Desktop);
+			}
+		}
+		
+		if ( !p.isNull() )
+			drag->setPixmap(p);
+		
+		stopAutoScroll();
+		if(drag)
+			drag->drag();
+		
+		// when we finish our drag, we need to undo our mouse press
+		d->m_bMousePressed = false;
+		d->m_strSelectedURL = d->m_strSelectedURLTarget = QString::null;
+		return true;
+	}
+	
+	return false;
+#endif // QT_NO_DRAGANDDROP
+}
+
+bool KHTMLPart::handleMouseMoveEventOver(khtml::MouseMoveEvent *event)
+{
+	// Mouse clicked. Do nothing.
+	if (d->m_bMousePressed) {
+		return false;
+	}
+
+	// The mouse is over something
+	if (url.length()) {
+		bool shiftPressed = (mouse->state() & ShiftButton);
+
+		// Image map
+		if (!innerNode.isNull() && innerNode.elementId() == ID_IMG) {
+			HTMLImageElementImpl *i = static_cast<HTMLImageElementImpl *>(innerNode.handle());
+			if (i && i->isServerMap()) {
+				khtml::RenderObject *r = i->renderer();
+				if(r) {
+					int absx, absy, vx, vy;
+					r->absolutePosition(absx, absy);
+					view()->contentsToViewport( absx, absy, vx, vy );
+				
+					int x(mouse->x() - vx);
+					int y(mouse->y() - vy);
+				
+					d->m_overURL = url.string() + QString("?%1,%2").arg(x).arg(y);
+					d->m_overURLTarget = target.string();
+					overURL(d->m_overURL, target.string(), shiftPressed);
+					return true;
+				}
+			}
+		}
+		// normal link
+		if (d->m_overURL.isEmpty() || d->m_overURL != url || d->m_overURLTarget != target) {
+			d->m_overURL = url.string();
+			d->m_overURLTarget = target.string();
+			overURL(d->m_overURL, target.string(), shiftPressed);
+		}
+	}
+	else { // Not over a link...
+		if (!d->m_overURL.isEmpty()) { // and we were over a link  -> reset to "default statusbar text"
+			d->m_overURL = d->m_overURLTarget = QString::null;
+			emit onURL(QString::null);
+			// Default statusbar text can be set from javascript. Otherwise it's empty.
+			emit setStatusBarText(d->m_kjsDefaultStatusBarText);
+		}
+	}
+	
+	return true;
+}
+
 #endif // APPLE_CHANGES
-  }
-  else {
-#ifndef KHTML_NO_SELECTION
-    // selection stuff
-    if( d->m_bMousePressed && innerNode.handle() && innerNode.handle()->renderer() &&
-        ( _mouse->state() == LeftButton )) {
-        int offset = -1;
-        //kdDebug(6000) << "KHTMLPart::khtmlMouseMoveEvent x=" << event->x() << " y=" << event->y()
-        //              << " nodeAbsX=" << event->nodeAbsX() << " nodeAbsY=" << event->nodeAbsY()
-        //              << endl;
-        DOM::NodeImpl* node=0;
-        // FIXME: Shouldn't be necessary to skip text nodes.
-        if (innerNode.nodeType() == Node::TEXT_NODE)
-            innerNode = innerNode.parentNode();
-        innerNode.handle()->renderer()->checkSelectionPoint( event->x(), event->y(),
-                                                            event->absX()-innerNode.handle()->renderer()->xPos(),
-                                                            event->absY()-innerNode.handle()->renderer()->yPos(), node, offset);
-        //        if (d->m_selectionEnd.handle() && d->m_selectionEnd.handle()->renderer())
-        //          kdDebug( 6000 ) << "setting end of selection to " << d->m_selectionEnd.handle()->renderer() << "/"
-        //                          << d->m_endOffset << endl;
 
-#if APPLE_CHANGES
-        // Don't modify the selection if we're not on a node.
-        if (node == 0)
-            return;
+void KHTMLPart::handleMouseMoveEventSelection(khtml::MouseMoveEvent *event)
+{
+    // Mouse not pressed. Do nothing.
+    if (!d->m_bMousePressed)
+        return;
 
-        // Restart the selection if this is the first mouse move. This work is usually
-        // done in khtmlMousePressEvent, but not if the mouse press was on an existing selection.
-        if (!d->m_mouseMovedSinceLastMousePress) {
-            d->m_mouseMovedSinceLastMousePress = true;
-            d->m_selectionStart = node;
-            d->m_startOffset = offset;
-            d->m_selectionEnd = node;
-            d->m_endOffset = offset;
-            d->m_doc->clearSelection();
-        }
-#endif        
-        // we have to get to know if end is before start or not...
-        DOM::Node n = d->m_selectionStart;
-        d->m_startBeforeEnd = false;
-        while(!n.isNull()) {
-            if(n == node) {
-                d->m_startBeforeEnd = true;
-                break;
-            }
-            DOM::Node next = n.firstChild();
-            if(next.isNull()) next = n.nextSibling();
-            while( next.isNull() && !n.parentNode().isNull() ) {
-                n = n.parentNode();
-                next = n.nextSibling();
-            }
-            n = next;
-        }
-#if APPLE_CHANGES
-        if ( d->m_selectionInitiatedWithDoubleClick){
-            int wordStartOffset = offset, wordEndOffset = offset;
-            
-            if (node && (node->nodeType() == Node::TEXT_NODE || node->nodeType() == Node::CDATA_SECTION_NODE)){
-                DOMString t = node->nodeValue();
-                QChar *chars = t.unicode();
-                uint len = t.length();
-
-                findWordBoundary (chars, len, offset, &wordStartOffset, &wordEndOffset);
-            }
-            if (d->m_startBeforeEnd) {
-                if (node == d->m_initialSelectionStart.handle() && node == d->m_initialSelectionEnd.handle()){
-                    d->m_selectionStart = d->m_initialSelectionStart;
-                    d->m_startOffset = MIN(d->m_initialSelectionStartOffset, wordStartOffset);
-                    wordEndOffset = MAX(d->m_initialSelectionEndOffset, wordEndOffset);
-                    d->m_selectionEnd = node;
-                    d->m_endOffset = wordEndOffset;
-                }
-                else {
-                    d->m_selectionStart = d->m_initialSelectionStart;
-                    d->m_startOffset = d->m_initialSelectionStartOffset;
-                    d->m_selectionEnd = node;
-                    d->m_endOffset = wordEndOffset;
-                }
-            }
-            else {
-                d->m_selectionStart = d->m_initialSelectionEnd;
-                d->m_startOffset = d->m_initialSelectionEndOffset;
-                d->m_selectionEnd = node;
-                d->m_endOffset = wordStartOffset;
-            }
-        }
-        else if (d->m_selectionInitiatedWithTripleClick ){
-            DOM::Node lineStart, lineEnd;
-            long lineStartOffset, lineEndOffset;
-            
-            if (startAndEndLineNodesIncludingNode (node, offset, lineStart, lineStartOffset, lineEnd, lineEndOffset)){
-                if (d->m_startBeforeEnd) {
-                    if (node == d->m_initialSelectionStart.handle() && node == lineEnd.handle()){
-                        d->m_selectionStart = d->m_initialSelectionStart;
-                        d->m_startOffset = MIN(lineStartOffset, d->m_initialSelectionStartOffset);
-                        d->m_selectionEnd = lineEnd;
-                        d->m_endOffset = MAX(lineEndOffset, d->m_initialSelectionEndOffset);
-                    }
-                    else {
-                        d->m_selectionStart = d->m_initialSelectionStart;
-                        d->m_startOffset = d->m_initialSelectionStartOffset;
-                        d->m_selectionEnd = lineEnd;
-                        d->m_endOffset = lineEndOffset;
-                    }
-                }
-                else {
-                    d->m_selectionStart = d->m_initialSelectionEnd;
-                    d->m_startOffset = d->m_initialSelectionEndOffset;
-                    d->m_selectionEnd = lineStart;
-                    d->m_endOffset = lineStartOffset;
-                }
-            }
-        }
-        else {
-            d->m_selectionEnd = node;
-            d->m_endOffset = offset;
-        }
-#else
-        d->m_selectionEnd = node;
-        d->m_endOffset = offset;
-#endif        
-        if ( !d->m_selectionStart.isNull() && !d->m_selectionEnd.isNull() )
-        {
-            if (d->m_selectionEnd == d->m_selectionStart && d->m_endOffset < d->m_startOffset)
-                d->m_doc->setSelection(d->m_selectionStart.handle(),d->m_endOffset,
-                                d->m_selectionEnd.handle(),d->m_startOffset);
-            else if (d->m_startBeforeEnd)
-                d->m_doc->setSelection(d->m_selectionStart.handle(),d->m_startOffset,
-                                d->m_selectionEnd.handle(),d->m_endOffset);
-            else
-                d->m_doc->setSelection(d->m_selectionEnd.handle(),d->m_endOffset,
-                                d->m_selectionStart.handle(),d->m_startOffset);
-        }
-#else
-        if ( d->m_doc && d->m_view ) {
-            QPoint diff( _mouse->globalPos() - d->m_dragLastPos );
-            
-            if ( abs( diff.x() ) > 64 || abs( diff.y() ) > 64 ) {
-                d->m_view->scrollBy( -diff.x(), -diff.y() );
-                d->m_dragLastPos = _mouse->globalPos();
-            }
-        }   
-#endif
+#ifdef KHTML_NO_SELECTION
+    if (d->m_doc && d->m_view) {
+        QPoint diff( mouse->globalPos() - d->m_dragLastPos );
+		
+        if (abs(diff.x()) > 64 || abs(diff.y()) > 64) {
+            d->m_view->scrollBy(-diff.x(), -diff.y());
+            d->m_dragLastPos = mouse->globalPos();
         }
     }
+    return;   
+#else
+
+    QMouseEvent *mouse = event->qmouseEvent();
+    DOM::Node innerNode = event->innerNode();
+
+    if (mouse->state() != LeftButton || !innerNode.handle() || !innerNode.handle()->renderer() ||
+        !innerNode.handle()->renderer()->shouldSelect())
+    	return;
+
+    // handle making selection
+    Position pos(innerNode.handle()->positionForCoordinates(event->x(), event->y()));
+
+    // Don't modify the selection if we're not on a node.
+    if (pos.isEmpty())
+        return;
+
+    // Restart the selection if this is the first mouse move. This work is usually
+    // done in khtmlMousePressEvent, but not if the mouse press was on an existing selection.
+    Selection sel = selection();
+    sel.clearModifyBias();
+    if (!d->m_beganSelectingText) {
+        d->m_beganSelectingText = true;
+        sel.moveTo(pos);
+    }
+
+    sel.setExtent(pos);
+    if (d->m_selectionGranularity != Selection::CHARACTER) {
+        sel.expandUsingGranularity(d->m_selectionGranularity);
+    }
+    setSelection(sel);
+
+#endif // KHTML_NO_SELECTION
+}
+
+void KHTMLPart::khtmlMouseMoveEvent(khtml::MouseMoveEvent *event)
+{
+#if !APPLE_CHANGES
+    if (handleMouseMoveEventDrag(event))
+        return;
+
+    if (handleMouseMoveEventOver(event))
+        return;
+#endif
+
+    handleMouseMoveEventSelection(event);		
 }
 
 void KHTMLPart::khtmlMouseReleaseEvent( khtml::MouseReleaseEvent *event )
 {
-  DOM::Node innerNode = event->innerNode();
-  d->m_mousePressNode = DOM::Node();
-
-  if ( d->m_bMousePressed )
-    stopAutoScroll();
-
-  // Used to prevent mouseMoveEvent from initiating a drag before
-  // the mouse is pressed again.
-  d->m_bMousePressed = false;
+    if (d->m_bMousePressed)
+        stopAutoScroll();
+	
+    // Used to prevent mouseMoveEvent from initiating a drag before
+    // the mouse is pressed again.
+    d->m_bMousePressed = false;
 
 #ifndef QT_NO_CLIPBOARD
-  QMouseEvent *_mouse = event->qmouseEvent();
-  if ((d->m_guiProfile == BrowserViewGUI) && (_mouse->button() == MidButton) && (event->url().isNull()))
-  {
-    QClipboard *cb = QApplication::clipboard();
-    cb->setSelectionMode( true );
-    QCString plain("plain");
-    QString url = cb->text(plain).stripWhiteSpace();
-    KURL u(url);
-    if ( u.isMalformed() ) {
-      // some half-baked guesses for incomplete urls
-      // (the same code is in libkonq/konq_dirpart.cc)
-      if ( url.startsWith( "ftp." ) )
-      {
-        url.prepend( "ftp://" );
-        u = url;
-      }
-      else
-      {
-        url.prepend( "http://" );
-        u = url;
-      }
+    QMouseEvent *_mouse = event->qmouseEvent();
+    if ((d->m_guiProfile == BrowserViewGUI) && (_mouse->button() == MidButton) && (event->url().isNull())) {
+        QClipboard *cb = QApplication::clipboard();
+        cb->setSelectionMode(true);
+        QCString plain("plain");
+        QString url = cb->text(plain).stripWhiteSpace();
+        KURL u(url);
+        if (u.isMalformed()) {
+            // some half-baked guesses for incomplete urls
+            // (the same code is in libkonq/konq_dirpart.cc)
+            if (url.startsWith("ftp.")) {
+                url.prepend("ftp://");
+                u = url;
+            }
+            else {
+                url.prepend("http://");
+                u = url;
+            }
+        }
+        if (u.isValid()) {
+            QString savedReferrer = d->m_referrer;
+            d->m_referrer = QString::null; // Disable referrer.
+            urlSelected(url, 0,0, "_top");
+            d->m_referrer = savedReferrer; // Restore original referrer.
+        }
     }
-    if (u.isValid())
-    {
-      QString savedReferrer = d->m_referrer;
-      d->m_referrer = QString::null; // Disable referrer.
-      urlSelected(url, 0,0, "_top");
-      d->m_referrer = savedReferrer; // Restore original referrer.
-    }
-  }
 #endif
   
-#if APPLE_CHANGES
-  // Clear the selection if the mouse didn't move after the last mouse press.
-  // We do this so when clicking on the selection, the selection goes away.
-  if (d->m_dragStartPos.x() == event->qmouseEvent()->x() &&
-      d->m_dragStartPos.y() == event->qmouseEvent()->y() &&
-      !d->m_selectionInitiatedWithDoubleClick &&
-      !d->m_selectionInitiatedWithTripleClick) {
-      d->m_selectionStart = 0;
-      d->m_selectionEnd = 0;
-      d->m_startOffset = 0;
-      d->m_endOffset = 0;
-      d->m_doc->clearSelection();
-  }
-#endif
 #ifndef KHTML_NO_SELECTION
-  // delete selection in case start and end position are at the same point
-  if(d->m_selectionStart == d->m_selectionEnd && d->m_startOffset == d->m_endOffset) {
-    d->m_selectionStart = 0;
-    d->m_selectionEnd = 0;
-    d->m_startOffset = 0;
-    d->m_endOffset = 0;
-    emitSelectionChanged();
-  } else {
-    // we have to get to know if end is before start or not...
-    DOM::Node n = d->m_selectionStart;
-    d->m_startBeforeEnd = false;
-    if( d->m_selectionStart == d->m_selectionEnd ) {
-      if( d->m_startOffset < d->m_endOffset )
-        d->m_startBeforeEnd = true;
-    } else {
-      while(!n.isNull()) {
-        if(n == d->m_selectionEnd) {
-          d->m_startBeforeEnd = true;
-          break;
-        }
-        DOM::Node next = n.firstChild();
-        if(next.isNull()) next = n.nextSibling();
-        while( next.isNull() && !n.parentNode().isNull() ) {
-          n = n.parentNode();
-          next = n.nextSibling();
-        }
-        n = next;
-      }
+	
+    // Clear the selection if the mouse didn't move after the last mouse press.
+    // We do this so when clicking on the selection, the selection goes away.
+    // However, if we are editing, place the caret.
+    if (!d->m_beganSelectingText
+            && d->m_dragStartPos.x() == event->qmouseEvent()->x()
+            && d->m_dragStartPos.y() == event->qmouseEvent()->y()
+            && d->m_selection.state() == Selection::RANGE) {
+        Selection selection;
+        if (d->m_selection.base().node()->isContentEditable())
+            selection.moveTo(d->m_selection.base().node()->positionForCoordinates(event->x(), event->y()));
+        setSelection(selection);
     }
-    if(!d->m_startBeforeEnd)
-    {
-      DOM::Node tmpNode = d->m_selectionStart;
-      int tmpOffset = d->m_startOffset;
-      d->m_selectionStart = d->m_selectionEnd;
-      d->m_startOffset = d->m_endOffset;
-      d->m_selectionEnd = tmpNode;
-      d->m_endOffset = tmpOffset;
-      d->m_startBeforeEnd = true;
-    }
-    // get selected text and paste to the clipboard
+
 #ifndef QT_NO_CLIPBOARD
+    // get selected text and paste to the clipboard
     QString text = selectedText();
     text.replace(QRegExp(QChar(0xa0)), " ");
     QClipboard *cb = QApplication::clipboard();
-    cb->setSelectionMode( true );
-    disconnect( kapp->clipboard(), SIGNAL( selectionChanged()), this, SLOT( slotClearSelection()));
+    cb->setSelectionMode(true);
+    disconnect(kapp->clipboard(), SIGNAL(selectionChanged()), this, SLOT(slotClearSelection()));
     cb->setText(text);
-    connect( kapp->clipboard(), SIGNAL( selectionChanged()), SLOT( slotClearSelection()));
-    cb->setSelectionMode( false );
-#endif
-    //kdDebug( 6000 ) << "selectedText = " << text << endl;
-    emitSelectionChanged();
-  }
-#endif
+    connect(kapp->clipboard(), SIGNAL(selectionChanged()), SLOT(slotClearSelection()));
+    cb->setSelectionMode(false);
+#endif // QT_NO_CLIPBOARD
 
+#endif // KHTML_NO_SELECTION
 }
 
 void KHTMLPart::khtmlDrawContentsEvent( khtml::DrawContentsEvent * )
@@ -5233,6 +4850,7 @@ void KHTMLPart::stopAutoScroll()
 #endif
 }
 
+#if !APPLE_CHANGES
 
 void KHTMLPart::slotAutoScroll()
 {
@@ -5241,6 +4859,8 @@ void KHTMLPart::slotAutoScroll()
     else
       stopAutoScroll(); // Safety
 }
+
+#endif
 
 void KHTMLPart::selectAll()
 {
@@ -5290,16 +4910,100 @@ void KHTMLPart::selectAll()
     return;
   Q_ASSERT(first->renderer());
   Q_ASSERT(last->renderer());
-  d->m_selectionStart = first;
-  d->m_startOffset = 0;
-  d->m_selectionEnd = last;
-  d->m_endOffset = last->nodeValue().length();
-  d->m_startBeforeEnd = true;
+  Selection selection(Position(first, 0), Position(last, last->nodeValue().length()));
+  setSelection(selection);
+}
 
-  d->m_doc->setSelection( d->m_selectionStart.handle(), d->m_startOffset,
-                          d->m_selectionEnd.handle(), d->m_endOffset );
+bool KHTMLPart::shouldBeginEditing(const Range &range) const
+{
+#if APPLE_CHANGES
+    return KWQ(this)->shouldBeginEditing(range);
+#else
+    return true;
+#endif
+}
 
-  emitSelectionChanged();
+bool KHTMLPart::shouldEndEditing(const Range &range) const
+{
+#if APPLE_CHANGES
+    return KWQ(this)->shouldEndEditing(range);
+#else
+    return true;
+#endif
+}
+
+bool KHTMLPart::isContentEditable() const 
+{
+#if APPLE_CHANGES
+    return KWQ(this)->isContentEditable();
+#else
+    return false;
+#endif
+}
+
+EditCommand KHTMLPart::lastEditCommand()
+{
+    return d->m_lastEditCommand;
+}
+
+void KHTMLPart::appliedEditing(EditCommand &cmd)
+{
+    setSelection(cmd.endingSelection(), false);
+    // Command will be equal to last edit command only in the case of typing
+    if (d->m_lastEditCommand == cmd) {
+        assert(cmd.commandID() == khtml::TypingCommandID);
+    }
+    else {
+#if APPLE_CHANGES
+        // Only register a new undo command if the command passed in is
+        // different from the last command
+        KWQ(this)->registerCommandForUndo(cmd);
+#endif
+        d->m_lastEditCommand = cmd;
+    }
+#if APPLE_CHANGES
+    KWQ(this)->respondToChangedContents();
+#endif
+}
+
+void KHTMLPart::unappliedEditing(EditCommand &cmd)
+{
+    setSelection(cmd.startingSelection());
+#if APPLE_CHANGES
+    KWQ(this)->registerCommandForRedo(cmd);
+    KWQ(this)->respondToChangedContents();
+#endif
+    d->m_lastEditCommand = EditCommand::emptyCommand();
+}
+
+void KHTMLPart::reappliedEditing(EditCommand &cmd)
+{
+    setSelection(cmd.endingSelection());
+#if APPLE_CHANGES
+    KWQ(this)->registerCommandForUndo(cmd);
+    KWQ(this)->respondToChangedContents();
+#endif
+    d->m_lastEditCommand = EditCommand::emptyCommand();
+}
+
+CSSStyleDeclarationImpl *KHTMLPart::typingStyle() const
+{
+    return d->m_typingStyle;
+}
+
+void KHTMLPart::setTypingStyle(CSSStyleDeclarationImpl *style)
+{
+    CSSStyleDeclarationImpl *old = d->m_typingStyle;
+    d->m_typingStyle = style;
+    if (d->m_typingStyle)
+        d->m_typingStyle->ref();
+    if (old)
+        old->deref();
+}
+
+void KHTMLPart::clearTypingStyle()
+{
+    setTypingStyle(0);
 }
 
 #if !APPLE_CHANGES
@@ -5522,60 +5226,219 @@ bool KHTMLPart::tabsToAllControls() const
     return true;
 }
 
-void KHTMLPart::connectChild(const khtml::ChildFrame *child) const
+void KHTMLPart::copyToPasteboard()
 {
-    ReadOnlyPart *part = child->m_part;
-    if (part && child->m_type != ChildFrame::Object)
-    {
-        connect( part, SIGNAL( started( KIO::Job *) ),
-                 this, SLOT( slotChildStarted( KIO::Job *) ) );
-        connect( part, SIGNAL( completed() ),
-                 this, SLOT( slotChildCompleted() ) );
-        connect( part, SIGNAL( completed(bool) ),
-                 this, SLOT( slotChildCompleted(bool) ) );
-        connect( part, SIGNAL( setStatusBarText( const QString & ) ),
-                 this, SIGNAL( setStatusBarText( const QString & ) ) );
-        connect( this, SIGNAL( completed() ),
-                 part, SLOT( slotParentCompleted() ) );
-        connect( this, SIGNAL( completed(bool) ),
-                 part, SLOT( slotParentCompleted() ) );
+#if APPLE_CHANGES
+    KWQ(this)->issueCopyCommand();
+#endif
+}
+
+void KHTMLPart::cutToPasteboard()
+{
+#if APPLE_CHANGES
+    KWQ(this)->issueCutCommand();
+#endif
+}
+
+void KHTMLPart::redo()
+{
+#if APPLE_CHANGES
+    KWQ(this)->issueRedoCommand();
+#endif
+}
+
+void KHTMLPart::undo()
+{
+#if APPLE_CHANGES
+    KWQ(this)->issueUndoCommand();
+#endif
+}
+
+#if !APPLE_CHANGES
+
+bool KHTMLPart::canRedo() const
+{
+    // FIXME: Implement.
+    return true;
+}
+
+bool KHTMLPart::canUndo() const
+{
+    // FIXME: Implement.
+    return true;
+}
+
+#endif
+
+void KHTMLPart::applyStyle(CSSStyleDeclarationImpl *style)
+{
+    switch (selection().state()) {
+        case Selection::NONE:
+            // do nothing
+            break;
+        case Selection::CARET:
+            // FIXME: This blows away all the other properties of the typing style.
+            setTypingStyle(style);
+            break;
+        case Selection::RANGE:
+            if (xmlDocImpl() && style) {
+                ApplyStyleCommand cmd(xmlDocImpl(), style);
+                cmd.apply();
+            }
+            break;
     }
 }
 
-void KHTMLPart::disconnectChild(const khtml::ChildFrame *child) const
+static void updateState(CSSStyleDeclarationImpl *desiredStyle, CSSStyleDeclarationImpl *computedStyle, bool &atStart, KHTMLPart::TriState &state)
 {
-    ReadOnlyPart *part = child->m_part;
-    if (part && child->m_type != ChildFrame::Object)
-    {
-        disconnect( part, SIGNAL( started( KIO::Job *) ),
-                    this, SLOT( slotChildStarted( KIO::Job *) ) );
-        disconnect( part, SIGNAL( completed() ),
-                    this, SLOT( slotChildCompleted() ) );
-        disconnect( part, SIGNAL( completed(bool) ),
-                    this, SLOT( slotChildCompleted(bool) ) );
-        disconnect( part, SIGNAL( setStatusBarText( const QString & ) ),
-                    this, SIGNAL( setStatusBarText( const QString & ) ) );
-        disconnect( this, SIGNAL( completed() ),
-                    part, SLOT( slotParentCompleted() ) );
-        disconnect( this, SIGNAL( completed(bool) ),
-                    part, SLOT( slotParentCompleted() ) );
+    for (QPtrListIterator<CSSProperty> it(*desiredStyle->values()); it.current(); ++it) {
+        int propertyID = it.current()->id();
+        DOMString desiredProperty = desiredStyle->getPropertyValue(propertyID);
+        DOMString computedProperty = computedStyle->getPropertyValue(propertyID);
+        KHTMLPart::TriState propertyState = strcasecmp(desiredProperty, computedProperty) == 0
+            ? KHTMLPart::trueTriState : KHTMLPart::falseTriState;
+        if (atStart) {
+            state = propertyState;
+            atStart = false;
+        } else if (state != propertyState) {
+            state = KHTMLPart::mixedTriState;
+            break;
+        }
     }
 }
 
-void KHTMLPart::keepAlive()
+KHTMLPart::TriState KHTMLPart::selectionHasStyle(CSSStyleDeclarationImpl *style) const
 {
-    if (d->m_lifeSupportTimer.isActive())
-        return;
-    ref();
-    d->m_lifeSupportTimer.start(0, true);
+    bool atStart = true;
+    TriState state = falseTriState;
+
+    if (d->m_selection.state() != Selection::RANGE) {
+        NodeImpl *nodeToRemove;
+        CSSStyleDeclarationImpl *selectionStyle = selectionComputedStyle(nodeToRemove);
+        if (!selectionStyle)
+            return falseTriState;
+        selectionStyle->ref();
+        updateState(style, selectionStyle, atStart, state);
+        selectionStyle->deref();
+        if (nodeToRemove) {
+            int exceptionCode = 0;
+            nodeToRemove->remove(exceptionCode);
+            assert(exceptionCode == 0);
+        }
+    } else {
+        for (NodeImpl *node = d->m_selection.start().node(); node; node = node->traverseNextNode()) {
+            if (node->isHTMLElement()) {
+                CSSStyleDeclarationImpl *computedStyle = new CSSComputedStyleDeclarationImpl(node);
+                computedStyle->ref();
+                updateState(style, computedStyle, atStart, state);
+                computedStyle->deref();
+                if (state == mixedTriState)
+                    break;
+            }
+            if (node == d->m_selection.end().node())
+                break;
+        }
+    }
+
+    return state;
 }
 
-void KHTMLPart::slotEndLifeSupport()
+bool KHTMLPart::selectionStartHasStyle(CSSStyleDeclarationImpl *style) const
 {
-    d->m_lifeSupportTimer.stop();
-    deref();
+    NodeImpl *nodeToRemove;
+    CSSStyleDeclarationImpl *selectionStyle = selectionComputedStyle(nodeToRemove);
+    if (!selectionStyle)
+        return false;
+
+    selectionStyle->ref();
+
+    bool match = true;
+    for (QPtrListIterator<CSSProperty> it(*style->values()); it.current(); ++it) {
+        int propertyID = it.current()->id();
+        DOMString desiredProperty = style->getPropertyValue(propertyID);
+        DOMString selectionProperty = selectionStyle->getPropertyValue(propertyID);
+        if (strcasecmp(selectionProperty, desiredProperty) != 0) {
+            match = false;
+            break;
+        }
+    }
+
+    selectionStyle->deref();
+
+    if (nodeToRemove) {
+        int exceptionCode = 0;
+        nodeToRemove->remove(exceptionCode);
+        assert(exceptionCode == 0);
+    }
+
+    return match;
 }
+
+DOMString KHTMLPart::selectionStartStylePropertyValue(int stylePropertyID) const
+{
+    NodeImpl *nodeToRemove;
+    CSSStyleDeclarationImpl *selectionStyle = selectionComputedStyle(nodeToRemove);
+    if (!selectionStyle)
+        return DOMString();
+
+    selectionStyle->ref();
+    DOMString value = selectionStyle->getPropertyValue(stylePropertyID);
+    selectionStyle->deref();
+
+    if (nodeToRemove) {
+        int exceptionCode = 0;
+        nodeToRemove->remove(exceptionCode);
+        assert(exceptionCode == 0);
+    }
+
+    return value;
+}
+
+CSSStyleDeclarationImpl *KHTMLPart::selectionComputedStyle(NodeImpl *&nodeToRemove) const
+{
+    nodeToRemove = 0;
+
+    if (!xmlDocImpl())
+        return 0;
+
+    if (d->m_selection.state() == Selection::NONE)
+        return 0;
+
+    Range range(d->m_selection.toRange());
+    Position pos(range.startContainer().handle(), range.startOffset());
+    assert(pos.notEmpty());
+    ElementImpl *elem = pos.element();
+    ElementImpl *styleElement = elem;
+    int exceptionCode = 0;
+
+    if (d->m_typingStyle) {
+        styleElement = xmlDocImpl()->createHTMLElement("SPAN", exceptionCode);
+        assert(exceptionCode == 0);
+        
+        styleElement->setAttribute(ATTR_STYLE, d->m_typingStyle->cssText().implementation(), exceptionCode);
+        assert(exceptionCode == 0);
+        
+        TextImpl *text = xmlDocImpl()->createEditingTextNode("");
+        styleElement->appendChild(text, exceptionCode);
+        assert(exceptionCode == 0);
+
+        elem->appendChild(styleElement, exceptionCode);
+        assert(exceptionCode == 0);
+
+        nodeToRemove = styleElement;
+    }
+
+    return new CSSComputedStyleDeclarationImpl(styleElement);
+}
+
+#if !APPLE_CHANGES
+
+void KHTMLPart::print()
+{
+    // needs implementation
+}
+
+#endif
 
 using namespace KParts;
 #include "khtml_part.moc"
-

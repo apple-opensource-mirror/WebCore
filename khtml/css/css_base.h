@@ -20,13 +20,14 @@
  * the Free Software Foundation, Inc., 59 Temple Place - Suite 330,
  * Boston, MA 02111-1307, USA.
  *
- * $Id: css_base.h,v 1.2 2003/03/13 20:25:00 hyatt Exp $
+ * $Id: css_base.h,v 1.6 2004/06/14 18:26:33 trey Exp $
  */
 #ifndef _CSS_BASE_H
 #define _CSS_BASE_H
 
 #include "dom/dom_string.h"
 #include "dom/dom_misc.h"
+#include "xml/dom_nodeimpl.h"
 #include "misc/shared.h"
 #include <qdatetime.h>
 #include <qptrlist.h>
@@ -46,19 +47,47 @@ namespace DOM {
 
     class DocumentImpl;
 
+    struct CSSNamespace {
+        DOMString m_prefix;
+        DOMString m_uri;
+        CSSNamespace* m_parent;
+
+        CSSNamespace(const DOMString& p, const DOMString& u, CSSNamespace* parent) 
+            :m_prefix(p), m_uri(u), m_parent(parent) {}
+        ~CSSNamespace() { delete m_parent; }
+        
+        const DOMString& uri() { return m_uri; }
+        const DOMString& prefix() { return m_prefix; }
+        
+        CSSNamespace* namespaceForPrefix(const DOMString& prefix) {
+            if (prefix == m_prefix)
+                return this;
+            if (m_parent)
+                return m_parent->namespaceForPrefix(prefix);
+            return 0;
+        }
+    };
+    
 // this class represents a selector for a StyleRule
     class CSSSelector
     {
     public:
 	CSSSelector()
-	    : tagHistory(0), simpleSelector(0), attr(0), tag(-1), relation( Descendant ),
-	      match( None ), nonCSSHint( false ), pseudoId( 0 ), _pseudoType(PseudoNotParsed)
+	    : tagHistory(0), simpleSelector(0), nextSelector(0), attr(0), tag(anyQName),
+              relation( Descendant ), match( None ),
+              pseudoId( 0 ), _pseudoType(PseudoNotParsed)
         {}
 
 	~CSSSelector() {
 	    delete tagHistory;
             delete simpleSelector;
+            delete nextSelector;
 	}
+
+        void append(CSSSelector* n) {
+            if (!nextSelector) nextSelector = n; else nextSelector->append(n);
+        }
+        CSSSelector* next() { return nextSelector; }
 
 	/**
 	 * Print debug output for this selector
@@ -82,6 +111,7 @@ namespace DOM {
 	{
 	    None = 0,
 	    Id,
+            Class,
 	    Exact,
 	    Set,
 	    List,
@@ -112,7 +142,9 @@ namespace DOM {
 	    PseudoFirstLetter,
 	    PseudoLink,
 	    PseudoVisited,
+            PseudoAnyLink,
 	    PseudoHover,
+	    PseudoDrag,
 	    PseudoFocus,
 	    PseudoActive,
             PseudoTarget,
@@ -131,15 +163,15 @@ namespace DOM {
 		return _pseudoType;
 	    }
 
-	mutable DOM::DOMString value;
-	CSSSelector *tagHistory;
+	mutable DOM::AtomicString value;
+	CSSSelector* tagHistory;
         CSSSelector* simpleSelector; // Used for :not.
-	int          attr;
-	int          tag;
+        CSSSelector* nextSelector; // used for ,-chained selectors
+	Q_UINT32     attr;
+	Q_UINT32     tag;
 
-	Relation relation     : 2;
+        Relation relation     : 2;
 	Match 	 match         : 4;
-	bool	nonCSSHint : 1;
 	unsigned int pseudoId : 3;
 	mutable PseudoType _pseudoType : 5;
 
@@ -151,9 +183,9 @@ namespace DOM {
     class StyleBaseImpl : public khtml::TreeShared<StyleBaseImpl>
     {
     public:
-	StyleBaseImpl()  { m_parent = 0; hasInlinedDecl = false; strictParsing = true; multiLength = false; }
+	StyleBaseImpl()  { m_parent = 0; strictParsing = true; multiLength = false; }
 	StyleBaseImpl(StyleBaseImpl *p) {
-	    m_parent = p; hasInlinedDecl = false;
+	    m_parent = p;
 	    strictParsing = (m_parent ? m_parent->useStrictParsing() : true);
 	    multiLength = false;
 	}
@@ -185,7 +217,7 @@ namespace DOM {
 	void setParent(StyleBaseImpl *parent) { m_parent = parent; }
 
 	static void setParsedValue(int propId, const CSSValueImpl *parsedValue,
-				   bool important, bool nonCSSHint, QPtrList<CSSProperty> *propList);
+				   bool important, QPtrList<CSSProperty> *propList);
 
 	virtual bool parseString(const DOMString &/*cssString*/, bool = false) { return false; }
 
@@ -197,7 +229,6 @@ namespace DOM {
 	StyleSheetImpl* stylesheet();
 
     protected:
-	bool hasInlinedDecl : 1;
 	bool strictParsing : 1;
 	bool multiLength : 1;
     };

@@ -1,5 +1,5 @@
 /*
- * Copyright (C) 2003 Apple Computer, Inc.  All rights reserved.
+ * Copyright (C) 2004 Apple Computer, Inc.  All rights reserved.
  *
  * Redistribution and use in source and binary forms, with or without
  * modification, are permitted provided that the following conditions
@@ -16,8 +16,8 @@
  * PURPOSE ARE DISCLAIMED.  IN NO EVENT SHALL APPLE COMPUTER, INC. OR
  * CONTRIBUTORS BE LIABLE FOR ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL,
  * EXEMPLARY, OR CONSEQUENTIAL DAMAGES (INCLUDING, BUT NOT LIMITED TO,
-                                        * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
-                                        * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
+ * PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES; LOSS OF USE, DATA, OR
+ * PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY
  * OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
  * (INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
@@ -48,6 +48,7 @@
 #import "html_miscimpl.h"
 #import "qptrstack.h"
 
+using DOM::DocumentImpl;
 using DOM::ElementImpl;
 using DOM::HTMLAnchorElementImpl;
 using DOM::HTMLMapElementImpl;
@@ -435,7 +436,7 @@ static QRect boundingBoxRect(RenderObject* obj)
         return YES;
 
     if (m_renderer->isText())
-        return m_renderer->isBR() || static_cast<RenderText*>(m_renderer)->inlineTextBoxes().count() == 0;
+        return m_renderer->isBR() || !static_cast<RenderText*>(m_renderer)->firstTextBox();
     
     if (m_areaElement || (m_renderer->element() && m_renderer->element()->hasAnchor()))
         return NO;
