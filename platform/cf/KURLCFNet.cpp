@@ -29,12 +29,14 @@
 #include <wtf/RetainPtr.h>
 #include <CoreFoundation/CFURL.h>
 
-#include "RuntimeApplicationChecksIPhone.h"
+#include "RuntimeApplicationChecksIOS.h"
 #include <CoreFoundation/CFPriv.h>
 
 using namespace std;
 
 namespace WebCore {
+
+#if !USE(WTFURL)
 
 typedef Vector<char, 512> CharBuffer;
 
@@ -43,27 +45,16 @@ CFURLRef createCFURLFromBuffer(const CharBuffer&);
 KURL::KURL(CFURLRef url)
 {
     if (!url) {
-        parse(0, 0);
+        parse(0);
         return;
     }
 
     CFIndex bytesLength = CFURLGetBytes(url, 0, 0);
-    Vector<char, 512> buffer(bytesLength + 6); // 5 for "file:", 1 for null character to end C string
-    char* bytes = &buffer[5];
+    Vector<char, 512> buffer(bytesLength + 1);
+    char* bytes = &buffer[0];
     CFURLGetBytes(url, reinterpret_cast<UInt8*>(bytes), bytesLength);
     bytes[bytesLength] = '\0';
-    if (bytes[0] != '/') {
-        parse(bytes, 0);
-        return;
-    }
-
-    buffer[0] = 'f';
-    buffer[1] = 'i';
-    buffer[2] = 'l';
-    buffer[3] = 'e';
-    buffer[4] = ':';
-
-    parse(buffer.data(), 0);
+    parse(bytes);
 }
 
 CFURLRef createCFURLFromBuffer(const CharBuffer& buffer)
@@ -78,6 +69,19 @@ CFURLRef createCFURLFromBuffer(const CharBuffer& buffer)
     return result;
 }
 
+#if !PLATFORM(MAC) && !(PLATFORM(QT) && USE(QTKIT))
+CFURLRef KURL::createCFURL() const
+{
+    // FIXME: What should this return for invalid URLs?
+    // Currently it throws away the high bytes of the characters in the string in that case,
+    // which is clearly wrong.
+    CharBuffer buffer;
+    copyToBuffer(buffer);
+    return createCFURLFromBuffer(buffer);
+}
+#endif
+
+#if !(PLATFORM(QT) && USE(QTKIT))
 String KURL::fileSystemPath() const
 {
     RetainPtr<CFURLRef> cfURL(AdoptCF, createCFURL());
@@ -91,5 +95,22 @@ String KURL::fileSystemPath() const
 #endif
     return RetainPtr<CFStringRef>(AdoptCF, CFURLCopyFileSystemPath(cfURL.get(), pathStyle)).get();
 }
+#endif
+
+#else // USE(WTFURL)
+
+KURL::KURL(CFURLRef)
+{
+    // FIXME: Add WTFURL Implementation.
+    invalidate();
+}
+
+CFURLRef KURL::createCFURL() const
+{
+    // FIXME: Add WTFURL Implementation.
+    return 0;
+}
+
+#endif // USE(WTFURL)
 
 }

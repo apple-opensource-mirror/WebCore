@@ -62,6 +62,11 @@ bool AccessibilityMenuListPopup::isEnabled() const
     return m_parent->isEnabled();
 }
 
+bool AccessibilityMenuListPopup::accessibilityIsIgnored() const
+{
+    return accessibilityPlatformIncludesObject() != IgnoreObject;
+}
+
 AccessibilityMenuListOption* AccessibilityMenuListPopup::menuListOptionAccessibilityObject(HTMLElement* element) const
 {
     if (!element || !element->hasTagName(optionTag))
@@ -96,14 +101,10 @@ void AccessibilityMenuListPopup::addChildren()
 
     m_haveChildren = true;
 
-    ASSERT(selectNode->hasTagName(selectTag));
-
-    const Vector<Element*>& listItems = static_cast<HTMLSelectElement*>(selectNode)->listItems();
+    const Vector<HTMLElement*>& listItems = toHTMLSelectElement(selectNode)->listItems();
     unsigned length = listItems.size();
     for (unsigned i = 0; i < length; i++) {
-        // The cast to HTMLElement below is safe because the only other possible listItem type
-        // would be a WMLElement, but WML builds don't use accessbility features at all.
-        AccessibilityMenuListOption* option = menuListOptionAccessibilityObject(toHTMLElement(listItems[i]));
+        AccessibilityMenuListOption* option = menuListOptionAccessibilityObject(listItems[i]);
         if (option) {
             option->setParent(this);
             m_children.append(option);
@@ -119,9 +120,24 @@ void AccessibilityMenuListPopup::childrenChanged()
         if (child->actionElement() && !child->actionElement()->attached()) {
             child->detachFromParent();
             cache->remove(child->axObjectID());
-            m_children.remove(i - 1);
         }
     }
+    
+    m_children.clear();
+    m_haveChildren = false;
+    addChildren();
+}
+
+void AccessibilityMenuListPopup::didUpdateActiveOption(int optionIndex)
+{
+    ASSERT_ARG(optionIndex, optionIndex >= 0);
+    ASSERT_ARG(optionIndex, optionIndex < static_cast<int>(m_children.size()));
+
+    AXObjectCache* cache = axObjectCache();
+    RefPtr<AccessibilityObject> child = m_children[optionIndex].get();
+
+    cache->postNotification(child.get(), document(), AXObjectCache::AXFocusedUIElementChanged, true, PostSynchronously);
+    cache->postNotification(child.get(), document(), AXObjectCache::AXMenuListItemSelected, true, PostSynchronously);
 }
 
 } // namespace WebCore

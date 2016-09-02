@@ -31,10 +31,12 @@
 #include "BitmapImage.h"
 #include "GraphicsContext.h"
 #include "IntRect.h"
+#include "Length.h"
 #include "MIMETypeRegistry.h"
 #include "SharedBuffer.h"
 #include "WKGraphics.h"
 #include <math.h>
+#include <wtf/MainThread.h>
 #include <wtf/StdLibExtras.h>
 
 #if USE(CG)
@@ -97,7 +99,7 @@ void Image::drawTiled(GraphicsContext* ctxt, const FloatRect& destRect, const Fl
 
     // See <https://webkit.org/b/59043>.
 #if !PLATFORM(WX)
-    ASSERT(!isBitmapImage() || static_cast<BitmapImage*>(this)->notSolidColor());
+    ASSERT(!isBitmapImage() || notSolidColor());
 #endif
 
     FloatSize intrinsicTileSize = size();
@@ -213,5 +215,11 @@ void Image::drawTiled(GraphicsContext* ctxt, const FloatRect& dstRect, const Flo
     startAnimation(false);
 }
 
+void Image::computeIntrinsicDimensions(Length& intrinsicWidth, Length& intrinsicHeight, FloatSize& intrinsicRatio)
+{
+    intrinsicRatio = size();
+    intrinsicWidth = Length(intrinsicRatio.width(), Fixed);
+    intrinsicHeight = Length(intrinsicRatio.height(), Fixed);
+}
 
 }
