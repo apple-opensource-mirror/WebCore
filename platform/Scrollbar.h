@@ -23,193 +23,95 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
  */
 
-#ifndef Scrollbar_h
-#define Scrollbar_h
+#ifndef ScrollBar_h
+#define ScrollBar_h
 
-#include "ScrollbarThemeClient.h"
+#include "Shared.h"
 #include "ScrollTypes.h"
-#include "Timer.h"
-#include "Widget.h"
 #include <wtf/MathExtras.h>
-#include <wtf/PassRefPtr.h>
 
 namespace WebCore {
 
 class GraphicsContext;
 class IntRect;
+class Scrollbar;
 class PlatformMouseEvent;
-class ScrollableArea;
-class ScrollbarTheme;
 
-#if ENABLE(GESTURE_EVENTS)
-class PlatformGestureEvent;
-#endif
+// These match the numbers we use over in WebKit (WebFrameView.m).
+#define LINE_STEP   40
+#define PAGE_KEEP   40
 
-class Scrollbar : public Widget,
-                  public ScrollbarThemeClient {
+enum ScrollbarControlSize { RegularScrollbar, SmallScrollbar, MiniScrollbar };
+
+class ScrollbarClient {
+public:
+    virtual ~ScrollbarClient() {}
+    virtual void valueChanged(Scrollbar*) = 0;
+
+    // Used to obtain a window clip rect.
+    virtual IntRect windowClipRect() const = 0;
+};
+
+class Scrollbar : public Shared<Scrollbar> {
+protected:
+    Scrollbar(ScrollbarClient*, ScrollbarOrientation, ScrollbarControlSize);
 
 public:
-    // Must be implemented by platforms that can't simply use the Scrollbar base class.  Right now the only platform that is not using the base class is GTK.
-    static PassRefPtr<Scrollbar> createNativeScrollbar(ScrollableArea*, ScrollbarOrientation orientation, ScrollbarControlSize size);
+    virtual ~Scrollbar() {}
 
-    virtual ~Scrollbar();
+    virtual bool isWidget() const = 0;
 
-    // ScrollbarThemeClient implementation.
-    virtual int x() const { return Widget::x(); }
-    virtual int y() const { return Widget::y(); }
-    virtual int width() const { return Widget::width(); }
-    virtual int height() const { return Widget::height(); }
-    virtual IntSize size() const { return Widget::size(); }
-    virtual IntPoint location() const { return Widget::location(); }
-
-    virtual ScrollView* parent() const { return Widget::parent(); }
-    virtual ScrollView* root() const { return Widget::root(); }
-
-    virtual void setFrameRect(const IntRect&);
-    virtual IntRect frameRect() const { return Widget::frameRect(); }
-
-    virtual void invalidate() { Widget::invalidate(); }
-    virtual void invalidateRect(const IntRect&);
-
-    virtual ScrollbarOverlayStyle scrollbarOverlayStyle() const;
-    virtual void getTickmarks(Vector<IntRect>&) const;
-    virtual bool isScrollableAreaActive() const;
-    virtual bool isScrollViewScrollbar() const;
-
-    virtual IntPoint convertFromContainingWindow(const IntPoint& windowPoint) { return Widget::convertFromContainingWindow(windowPoint); }
-
-    virtual bool isCustomScrollbar() const { return false; }
-    virtual ScrollbarOrientation orientation() const { return m_orientation; }
-
-    virtual int value() const { return lroundf(m_currentPos); }
-    virtual float currentPos() const { return m_currentPos; }
-    virtual int visibleSize() const { return m_visibleSize; }
-    virtual int totalSize() const { return m_totalSize; }
-    virtual int maximum() const { return m_totalSize - m_visibleSize; }
-    virtual ScrollbarControlSize controlSize() const { return m_controlSize; }
-
-    virtual int lineStep() const { return m_lineStep; }
-    virtual int pageStep() const { return m_pageStep; }
-
-    virtual ScrollbarPart pressedPart() const { return m_pressedPart; }
-    virtual ScrollbarPart hoveredPart() const { return m_hoveredPart; }
-
-    virtual void styleChanged() { }
-
-    virtual bool enabled() const { return m_enabled; }
-    virtual void setEnabled(bool);
-
-    // Called by the ScrollableArea when the scroll offset changes.
-    void offsetDidChange();
-
-    static int pixelsPerLineStep() { return 40; }
-    static float minFractionToStepWhenPaging() { return 0.875f; }
-    static int maxOverlapBetweenPages();
-
-    void disconnectFromScrollableArea() { m_scrollableArea = 0; }
-    ScrollableArea* scrollableArea() const { return m_scrollableArea; }
-
-    int pressedPos() const { return m_pressedPos; }
-
-    float pixelStep() const { return m_pixelStep; }
-
-    virtual void setHoveredPart(ScrollbarPart);
-    virtual void setPressedPart(ScrollbarPart);
+    ScrollbarOrientation orientation() const { return m_orientation; }
+    int value() const { return lroundf(m_currentPos); } 
+    
+    ScrollbarControlSize controlSize() const { return m_controlSize; }
 
     void setSteps(int lineStep, int pageStep, int pixelsPerStep = 1);
+    
+    bool setValue(int);
     void setProportion(int visibleSize, int totalSize);
-    void setPressedPos(int p) { m_pressedPos = p; }
 
-    virtual void paint(GraphicsContext*, const IntRect& damageRect);
+    bool scroll(ScrollDirection, ScrollGranularity, float multiplier = 1.0);
+    
+    virtual int width() const = 0;
+    virtual int height() const = 0;
+    virtual void setRect(const IntRect&) = 0;
+    virtual void setEnabled(bool) = 0;
+    virtual void paint(GraphicsContext*, const IntRect& damageRect) = 0;
 
-    virtual bool isOverlayScrollbar() const;
-    bool shouldParticipateInHitTesting();
-
-    bool isWindowActive() const;
-
-#if ENABLE(GESTURE_EVENTS)
-    bool gestureEvent(const PlatformGestureEvent&);
-#endif
+    static bool hasPlatformScrollbars() {
+        // To use the platform's built-in scrollbars by default, return true.  We may
+        // support styled engine scrollbars someday, and some platforms may wish to not
+        // implement a platform scrollbar at all by default.  That's what this method is for.
+        return true;
+    }
 
     // These methods are used for platform scrollbars to give :hover feedback.  They will not get called
     // when the mouse went down in a scrollbar, since it is assumed the scrollbar will start
     // grabbing all events in that case anyway.
-#if !PLATFORM(IOS)
-    bool mouseMoved(const PlatformMouseEvent&);
-#endif
-    void mouseEntered();
-    bool mouseExited();
+    virtual bool handleMouseMoveEvent(const PlatformMouseEvent&) { return false; }
+    virtual bool handleMouseOutEvent(const PlatformMouseEvent&) { return false; }
 
     // Used by some platform scrollbars to know when they've been released from capture.
-    bool mouseUp(const PlatformMouseEvent&);
-
-    bool mouseDown(const PlatformMouseEvent&);
-
-    ScrollbarTheme* theme() const { return m_theme; }
-
-    virtual void setParent(ScrollView*);
-
-    bool suppressInvalidation() const { return m_suppressInvalidation; }
-    void setSuppressInvalidation(bool s) { m_suppressInvalidation = s; }
-
-    virtual IntRect convertToContainingView(const IntRect&) const;
-    virtual IntRect convertFromContainingView(const IntRect&) const;
-
-    virtual IntPoint convertToContainingView(const IntPoint&) const;
-    virtual IntPoint convertFromContainingView(const IntPoint&) const;
-
-    void moveThumb(int pos, bool draggingDocument = false);
-
-    virtual bool isAlphaLocked() const { return m_isAlphaLocked; }
-    virtual void setIsAlphaLocked(bool flag) { m_isAlphaLocked = flag; }
-
+    virtual bool handleMouseReleaseEvent(const PlatformMouseEvent&) { return false; }
+   
 protected:
-    Scrollbar(ScrollableArea*, ScrollbarOrientation, ScrollbarControlSize, ScrollbarTheme* = 0);
+    virtual void updateThumbPosition() = 0;
+    virtual void updateThumbProportion() = 0;
 
-    void updateThumb();
-    virtual void updateThumbPosition();
-    virtual void updateThumbProportion();
+    ScrollbarClient* client() const { return m_client; }
 
-    void autoscrollTimerFired(Timer<Scrollbar>*);
-    void startTimerIfNeeded(double delay);
-    void stopTimerIfNeeded();
-    void autoscrollPressedPart(double delay);
-    ScrollDirection pressedPartScrollDirection();
-    ScrollGranularity pressedPartScrollGranularity();
-
-    ScrollableArea* m_scrollableArea;
+    ScrollbarClient* m_client;
     ScrollbarOrientation m_orientation;
     ScrollbarControlSize m_controlSize;
-    ScrollbarTheme* m_theme;
-
     int m_visibleSize;
     int m_totalSize;
     float m_currentPos;
-    float m_dragOrigin;
     int m_lineStep;
     int m_pageStep;
     float m_pixelStep;
-
-    ScrollbarPart m_hoveredPart;
-    ScrollbarPart m_pressedPart;
-    int m_pressedPos;
-    float m_scrollPos;
-    bool m_draggingDocument;
-    int m_documentDragPos;
-
-    bool m_enabled;
-
-    Timer<Scrollbar> m_scrollTimer;
-    bool m_overlapsResizer;
-
-    bool m_suppressInvalidation;
-
-    bool m_isAlphaLocked;
-
-private:
-    virtual bool isScrollbar() const { return true; }
 };
 
-} // namespace WebCore
+}
 
-#endif // Scrollbar_h
+#endif
