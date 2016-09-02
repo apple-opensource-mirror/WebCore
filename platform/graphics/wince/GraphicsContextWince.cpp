@@ -1,5 +1,6 @@
 /*
  *  Copyright (C) 2007-2009 Torch Mobile Inc.
+ *  Copyright (C) 2010 Patrick Gansterer <paroga@paroga.com>
  *
  *  This library is free software; you can redistribute it and/or
  *  modify it under the terms of the GNU Library General Public
@@ -22,19 +23,18 @@
 #include "GraphicsContext.h"
 
 #include "AffineTransform.h"
-#include "CharacterNames.h"
 #include "Font.h"
+#include "GDIExtras.h"
 #include "GlyphBuffer.h"
 #include "Gradient.h"
-#include "GraphicsContextPrivate.h"
 #include "NotImplemented.h"
 #include "Path.h"
-#include "PlatformPathWince.h"
+#include "PlatformPathWinCE.h"
 #include "SharedBitmap.h"
 #include "SimpleFontData.h"
-#include <wtf/OwnPtr.h>
-
 #include <windows.h>
+#include <wtf/OwnPtr.h>
+#include <wtf/unicode/CharacterNames.h>
 
 namespace WebCore {
 
@@ -61,7 +61,7 @@ static inline int stableRound(double d)
 // Unlike enclosingIntRect(), this function does strict rounding.
 static inline IntRect roundRect(const FloatRect& r)
 {
-    return IntRect(stableRound(r.x()), stableRound(r.y()), stableRound(r.right()) - stableRound(r.x()), stableRound(r.bottom()) - stableRound(r.y()));
+    return IntRect(stableRound(r.x()), stableRound(r.y()), stableRound(r.maxX()) - stableRound(r.x()), stableRound(r.maxY()) - stableRound(r.y()));
 }
 
 // Rotation transformation
@@ -128,8 +128,8 @@ template<class Transform, class Rect, class Value> static inline Rect mapRect(co
 {
     Value x[4], y[4];
     Value l, t, r, b;
-    r = rect.right() - 1;
-    b = rect.bottom() - 1;
+    r = rect.maxX() - 1;
+    b = rect.maxY() - 1;
     transform.map(rect.x(), rect.y(), x, y);
     transform.map(rect.x(), b, x + 1, y + 1);
     transform.map(r, b, x + 2, y + 2);
@@ -171,7 +171,6 @@ public:
 
     AffineTransform m_transform;
     float m_opacity;
-    Vector<Path> m_paths;
 };
 
 enum AlphaPaintType {
@@ -192,11 +191,6 @@ public:
             restore();
     }
 
-    IntPoint origin() const
-    {
-        return IntPoint(stableRound(-m_transform.e()), stableRound(-m_transform.f()));
-    }
-
     void translate(float x, float y)
     {
         m_transform.translate(x, y);
@@ -212,9 +206,14 @@ public:
         m_transform.rotate(rad2deg(radians));
     }
 
-    void  concatCTM(const AffineTransform& transform)
+    void concatCTM(const AffineTransform& transform)
     {
-        m_transform = transform * m_transform;
+        m_transform *= transform;
+    }
+
+    void setCTM(const AffineTransform& transform)
+    {
+        m_transform = transform;
     }
 
     IntRect mapRect(const IntRect& rect) const
@@ -281,7 +280,7 @@ public:
                     return 0;
             }
 
-            RefPtr<SharedBitmap> bmp = SharedBitmap::createInstance(alphaPaint == AlphaPaintNone, origRect.width(), origRect.height(), false);
+            RefPtr<SharedBitmap> bmp = SharedBitmap::create(origRect.size(), alphaPaint == AlphaPaintNone ? BitmapInfo::BitCount16 : BitmapInfo::BitCount32, false);
             SetRect(&bmpRect, 0, 0, origRect.width(), origRect.height());
             if (bmp) {
                 switch (alphaPaint) {
@@ -322,8 +321,7 @@ public:
         if (hdc == m_dc)
             return;
 
-#if !defined(NO_ALPHABLEND)
-        if (alphaPaint == AlphaPaintOther) {
+        if (alphaPaint == AlphaPaintOther && hasAlphaBlendSupport()) {
             ASSERT(bmp && bmp->bytes() && bmp->is32bit());
             unsigned* pixels = (unsigned*)bmp->bytes();
             const unsigned* const pixelsEnd = pixels + bmp->bitmapInfo().numPixels();
@@ -332,13 +330,13 @@ public:
                 ++pixels;
             }
         }
-        if (m_opacity < 1. || alphaPaint == AlphaPaintOther) {
+        if ((m_opacity < 1. || alphaPaint == AlphaPaintOther) && hasAlphaBlendSupport()) {
             const BLENDFUNCTION blend = { AC_SRC_OVER, 0
                 , m_opacity >= 1. ? 255 : (BYTE)(m_opacity * 255)
                 , alphaPaint == AlphaPaintNone ? 0 : AC_SRC_ALPHA };
-            AlphaBlend(m_dc, origRect.x(), origRect.y(), origRect.width(), origRect.height(), hdc, 0, 0, bmpRect.right, bmpRect.bottom, blend);
+            bool success = alphaBlendIfSupported(m_dc, origRect.x(), origRect.y(), origRect.width(), origRect.height(), hdc, 0, 0, bmpRect.right, bmpRect.bottom, blend);
+            ASSERT_UNUSED(success, success);
         } else
-#endif
             StretchBlt(m_dc, origRect.x(), origRect.y(), origRect.width(), origRect.height(), hdc, 0, 0, bmpRect.right, bmpRect.bottom, SRCCOPY);
     }
 
@@ -347,7 +345,7 @@ public:
     Vector<GraphicsContextPlatformPrivateData> m_backupData;
 };
 
-static HPEN createPen(const Color& col, double fWidth, StrokeStyle style)
+static PassOwnPtr<HPEN> createPen(const Color& col, double fWidth, StrokeStyle style)
 {
     int width = stableRound(fWidth);
     if (width < 1)
@@ -367,12 +365,12 @@ static HPEN createPen(const Color& col, double fWidth, StrokeStyle style)
             break;
     }
 
-    return CreatePen(penStyle, width, RGB(col.red(), col.green(), col.blue()));
+    return adoptPtr(CreatePen(penStyle, width, RGB(col.red(), col.green(), col.blue())));
 }
 
-static inline HGDIOBJ createBrush(const Color& col)
+static inline PassOwnPtr<HBRUSH> createBrush(const Color& col)
 {
-    return CreateSolidBrush(RGB(col.red(), col.green(), col.blue()));
+    return adoptPtr(CreateSolidBrush(RGB(col.red(), col.green(), col.blue())));
 }
 
 template <typename PixelType, bool Is16bit> static void _rotateBitmap(SharedBitmap* destBmp, const SharedBitmap* sourceBmp, const RotationTransform& transform)
@@ -444,7 +442,8 @@ static void rotateBitmap(SharedBitmap* destBmp, const SharedBitmap* sourceBmp, c
         _rotateBitmap<unsigned, false>(destBmp, sourceBmp, transform);
 }
 
-class TransparentLayerDC : Noncopyable {
+class TransparentLayerDC {
+    WTF_MAKE_NONCOPYABLE(TransparentLayerDC);
 public:
     TransparentLayerDC(GraphicsContextPlatformPrivate* data, IntRect& origRect, const IntRect* rectBeforeTransform = 0, int alpha = 255, bool paintImage = false);
     ~TransparentLayerDC();
@@ -462,8 +461,7 @@ private:
     RefPtr<SharedBitmap> m_bitmap;
     RefPtr<SharedBitmap> m_rotatedBitmap;
     RECT m_bmpRect;
-    unsigned m_key1;
-    unsigned m_key2;
+    unsigned m_key;
     RotationTransform m_rotation;
     float m_oldOpacity;
     AlphaPaintType m_alphaPaintType;
@@ -509,10 +507,10 @@ TransparentLayerDC::TransparentLayerDC(GraphicsContextPlatformPrivate* data, Int
             m_rotation.m_postShiftX -= m_origRect.x();
             m_rotation.m_postShiftY -= m_origRect.y();
 
-            FloatPoint topLeft = m_data->m_transform.mapPoint(FloatPoint(rectBeforeTransform->topLeft()));
-            FloatPoint topRight(rectBeforeTransform->right() - 1, rectBeforeTransform->y());
+            FloatPoint topLeft = m_data->m_transform.mapPoint(FloatPoint(rectBeforeTransform->location()));
+            FloatPoint topRight(rectBeforeTransform->maxX() - 1, rectBeforeTransform->y());
             topRight = m_data->m_transform.mapPoint(topRight);
-            FloatPoint bottomLeft(rectBeforeTransform->x(), rectBeforeTransform->bottom() - 1);
+            FloatPoint bottomLeft(rectBeforeTransform->x(), rectBeforeTransform->maxY() - 1);
             bottomLeft = m_data->m_transform.mapPoint(bottomLeft);
             FloatSize sideTop = topRight - topLeft;
             FloatSize sideLeft = bottomLeft - topLeft;
@@ -522,7 +520,7 @@ TransparentLayerDC::TransparentLayerDC(GraphicsContextPlatformPrivate* data, Int
             origRect.inflateX(stableRound((width - origRect.width()) * 0.5));
             origRect.inflateY(stableRound((height - origRect.height()) * 0.5));
 
-            m_bitmap = SharedBitmap::createInstance(m_rotatedBitmap->is16bit(), m_origRect.width(), m_origRect.height(), true);
+            m_bitmap = SharedBitmap::create(m_origRect.size(), m_rotatedBitmap->is16bit() ? BitmapInfo::BitCount16 : BitmapInfo::BitCount32, true);
             if (m_bitmap)
                 rotateBitmap(m_bitmap.get(), m_rotatedBitmap.get(), -m_rotation);
             else
@@ -531,7 +529,7 @@ TransparentLayerDC::TransparentLayerDC(GraphicsContextPlatformPrivate* data, Int
     } else
         m_bitmap = m_data->getTransparentLayerBitmap(m_origRect, m_alphaPaintType, m_bmpRect, true, mustCreateLayer);
     if (m_bitmap)
-        m_memDc = m_bitmap->getDC(&m_key1, &m_key2);
+        m_memDc = m_bitmap->getDC(&m_key);
     else
         m_memDc = m_data->m_dc;
 }
@@ -539,15 +537,15 @@ TransparentLayerDC::TransparentLayerDC(GraphicsContextPlatformPrivate* data, Int
 TransparentLayerDC::~TransparentLayerDC()
 {
     if (m_rotatedBitmap) {
-        m_bitmap->releaseDC(m_memDc, m_key1, m_key2);
-        m_key1 = m_key2 = 0;
+        m_bitmap->releaseDC(m_memDc, m_key);
+        m_key = 0;
         rotateBitmap(m_rotatedBitmap.get(), m_bitmap.get(), m_rotation);
-        m_memDc = m_rotatedBitmap->getDC(&m_key1, &m_key2);
+        m_memDc = m_rotatedBitmap->getDC(&m_key);
         m_data->paintBackTransparentLayerBitmap(m_memDc, m_rotatedBitmap.get(), m_rotatedOrigRect, m_alphaPaintType, m_bmpRect);
-        m_rotatedBitmap->releaseDC(m_memDc, m_key1, m_key2);
+        m_rotatedBitmap->releaseDC(m_memDc, m_key);
     } else if (m_bitmap) {
         m_data->paintBackTransparentLayerBitmap(m_memDc, m_bitmap.get(), m_origRect, m_alphaPaintType, m_bmpRect);
-        m_bitmap->releaseDC(m_memDc, m_key1, m_key2);
+        m_bitmap->releaseDC(m_memDc, m_key);
     }
     m_data->m_opacity = m_oldOpacity;
 }
@@ -565,37 +563,35 @@ void TransparentLayerDC::fillAlphaChannel()
     }
 }
 
-class ScopeDCProvider : Noncopyable {
+class ScopeDCProvider {
+    WTF_MAKE_NONCOPYABLE(ScopeDCProvider);
 public:
     explicit ScopeDCProvider(GraphicsContextPlatformPrivate* data)
         : m_data(data)
     {
         if (m_data->m_bitmap)
-            m_data->m_dc = m_data->m_bitmap->getDC(&m_key1, &m_key2);
+            m_data->m_dc = m_data->m_bitmap->getDC(&m_key);
     }
     ~ScopeDCProvider()
     {
         if (m_data->m_bitmap) {
-            m_data->m_bitmap->releaseDC(m_data->m_dc, m_key1, m_key2);
+            m_data->m_bitmap->releaseDC(m_data->m_dc, m_key);
             m_data->m_dc = 0;
         }
     }
 private:
     GraphicsContextPlatformPrivate* m_data;
-    unsigned m_key1;
-    unsigned m_key2;
+    unsigned m_key;
 };
 
 
-GraphicsContext::GraphicsContext(PlatformGraphicsContext* dc)
-: m_common(createGraphicsContextPrivate())
-, m_data(new GraphicsContextPlatformPrivate(dc))
+void GraphicsContext::platformInit(PlatformGraphicsContext* dc)
 {
+    m_data = new GraphicsContextPlatformPrivate(dc);
 }
 
-GraphicsContext::~GraphicsContext()
+void GraphicsContext::platformDestroy()
 {
-    destroyGraphicsContextPrivate(m_common);
     delete m_data;
 }
 
@@ -607,15 +603,13 @@ void GraphicsContext::setBitmap(PassRefPtr<SharedBitmap> bmp)
 
 HDC GraphicsContext::getWindowsContext(const IntRect& dstRect, bool supportAlphaBlend, bool mayCreateBitmap)
 {
-    notImplemented();
-    ASSERT_NOT_REACHED();
-    return 0;
+    // FIXME: Add support for AlphaBlend.
+    ASSERT(!supportAlphaBlend);
+    return m_data->m_dc;
 }
 
 void GraphicsContext::releaseWindowsContext(HDC hdc, const IntRect& dstRect, bool supportAlphaBlend, bool mayCreateBitmap)
 {
-    notImplemented();
-    ASSERT_NOT_REACHED();
 }
 
 void GraphicsContext::savePlatformState()
@@ -644,41 +638,33 @@ void GraphicsContext::drawRect(const IntRect& rect)
         return;
     trRect.move(transparentDC.toShift());
 
-    HGDIOBJ brush = 0;
+    OwnPtr<HBRUSH> brush;
     HGDIOBJ oldBrush;
     if (fillColor().alpha()) {
         brush = createBrush(fillColor());
-        oldBrush = SelectObject(dc, brush);
+        oldBrush = SelectObject(dc, brush.get());
     } else
-        SelectObject(dc, GetStockObject(NULL_BRUSH));
+        oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
 
-    HGDIOBJ pen = 0;
+    OwnPtr<HPEN> pen;
     HGDIOBJ oldPen;
     if (strokeStyle() != NoStroke) {
         pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
-        oldPen = SelectObject(dc, pen);
+        oldPen = SelectObject(dc, pen.get());
     } else
-        SelectObject(dc, GetStockObject(NULL_PEN));
+        oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
 
-    if (!brush && !pen)
-        return;
+    if (brush || pen) {
+        if (trRect.width() <= 0)
+            trRect.setWidth(1);
+        if (trRect.height() <= 0)
+            trRect.setHeight(1);
 
-    if (trRect.width() <= 0)
-        trRect.setWidth(1);
-    if (trRect.height() <= 0)
-        trRect.setHeight(1);
-
-    Rectangle(dc, trRect.x(), trRect.y(), trRect.right(), trRect.bottom());
-
-    if (pen) {
-        SelectObject(dc, oldPen);
-        DeleteObject(pen);
+        Rectangle(dc, trRect.x(), trRect.y(), trRect.maxX(), trRect.maxY());
     }
 
-    if (brush) {
-        SelectObject(dc, oldBrush);
-        DeleteObject(brush);
-    }
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
 }
 
 void GraphicsContext::drawLine(const IntPoint& point1, const IntPoint& point2)
@@ -702,14 +688,13 @@ void GraphicsContext::drawLine(const IntPoint& point1, const IntPoint& point2)
     trPoint1 += transparentDC.toShift();
     trPoint2 += transparentDC.toShift();
 
-    HGDIOBJ pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
-    HGDIOBJ oldPen = SelectObject(dc, pen);
+    OwnPtr<HPEN> pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
+    HGDIOBJ oldPen = SelectObject(dc, pen.get());
 
     MoveToEx(dc, trPoint1.x(), trPoint1.y(), 0);
     LineTo(dc, trPoint2.x(), trPoint2.y());
 
     SelectObject(dc, oldPen);
-    DeleteObject(pen);
 }
 
 void GraphicsContext::drawEllipse(const IntRect& rect)
@@ -728,32 +713,27 @@ void GraphicsContext::drawEllipse(const IntRect& rect)
         return;
     trRect.move(transparentDC.toShift());
 
-    HGDIOBJ brush = 0;
+    OwnPtr<HBRUSH> brush;
     HGDIOBJ oldBrush;
     if (fillColor().alpha()) {
         brush = createBrush(fillColor());
-        oldBrush = SelectObject(dc, brush);
+        oldBrush = SelectObject(dc, brush.get());
     } else
-        SelectObject(dc, GetStockObject(NULL_BRUSH));
-    HGDIOBJ pen = 0;
-    HGDIOBJ oldPen;
+        oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
+
+    OwnPtr<HPEN> pen;
+    HGDIOBJ oldPen = 0;
     if (strokeStyle() != NoStroke) {
         pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
-        oldPen = SelectObject(dc, pen);
+        oldPen = SelectObject(dc, pen.get());
     } else
-        SelectObject(dc, GetStockObject(NULL_PEN));
+        oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
 
-    Ellipse(dc, trRect.x(), trRect.y(), trRect.right(), trRect.bottom());
+    if (brush || pen)
+        Ellipse(dc, trRect.x(), trRect.y(), trRect.maxX(), trRect.maxY());
 
-    if (pen) {
-        SelectObject(dc, oldPen);
-        DeleteObject(pen);
-    }
-
-    if (brush) {
-        SelectObject(dc, oldBrush);
-        DeleteObject(brush);
-    }
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
 }
 
 static inline bool equalAngle(double a, double b) 
@@ -815,8 +795,8 @@ void GraphicsContext::strokeArc(const IntRect& rect, int startAngle, int angleSp
         return;
     trRect.move(transparentDC.toShift());
 
-    HGDIOBJ pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
-    HGDIOBJ oldPen = SelectObject(dc, pen);
+    OwnPtr<HPEN> pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
+    HGDIOBJ oldPen = SelectObject(dc, pen.get());
 
     double a = trRect.width() * 0.5;
     double b = trRect.height() * 0.5;
@@ -851,11 +831,11 @@ void GraphicsContext::strokeArc(const IntRect& rect, int startAngle, int angleSp
         clipRect.bottom = startY;
     }
 
-    OwnPtr<HRGN> clipRgn(CreateRectRgn(0, 0, 0, 0));
+    OwnPtr<HRGN> clipRgn = adoptPtr(CreateRectRgn(0, 0, 0, 0));
     bool newClip;
     if (GetClipRgn(dc, clipRgn.get()) <= 0) {
         newClip = true;
-        clipRgn.set(CreateRectRgn(clipRect.left, clipRect.top, clipRect.right, clipRect.bottom));
+        clipRgn = adoptPtr(CreateRectRgn(clipRect.left, clipRect.top, clipRect.right, clipRect.bottom));
         SelectClipRgn(dc, clipRgn.get());
     } else {
         newClip = false;
@@ -863,7 +843,7 @@ void GraphicsContext::strokeArc(const IntRect& rect, int startAngle, int angleSp
     }
 
     HGDIOBJ oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
-    Ellipse(dc, trRect.x(), trRect.y(), trRect.right(), trRect.bottom());
+    Ellipse(dc, trRect.x(), trRect.y(), trRect.maxX(), trRect.maxY());
     SelectObject(dc, oldBrush);
 
     if (newClip)
@@ -872,7 +852,6 @@ void GraphicsContext::strokeArc(const IntRect& rect, int startAngle, int angleSp
         SelectClipRgn(dc, clipRgn.get());
 
     SelectObject(dc, oldPen);
-    DeleteObject(pen);
 }
 
 void GraphicsContext::drawConvexPolygon(size_t npoints, const FloatPoint* points, bool shouldAntialias)
@@ -916,36 +895,38 @@ void GraphicsContext::drawConvexPolygon(size_t npoints, const FloatPoint* points
         winPoints[i].y += transparentDC.toShift().height();
     }
 
-    HGDIOBJ brush = 0;
+    OwnPtr<HBRUSH> brush;
     HGDIOBJ oldBrush;
     if (fillColor().alpha()) {
         brush = createBrush(fillColor());
-        oldBrush = SelectObject(dc, brush);
+        oldBrush = SelectObject(dc, brush.get());
     } else
-        SelectObject(dc, GetStockObject(NULL_BRUSH));
+        oldBrush = SelectObject(dc, GetStockObject(NULL_BRUSH));
 
-    HGDIOBJ pen = 0;
+    OwnPtr<HPEN> pen;
     HGDIOBJ oldPen;
     if (strokeStyle() != NoStroke) {
         pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
-        oldPen = SelectObject(dc, pen);
+        oldPen = SelectObject(dc, pen.get());
     } else
-        SelectObject(dc, GetStockObject(NULL_PEN));
+        oldPen = SelectObject(dc, GetStockObject(NULL_PEN));
 
-    if (!brush && !pen)
+    if (brush || pen)
+        Polygon(dc, winPoints.data(), npoints);
+
+    SelectObject(dc, oldPen);
+    SelectObject(dc, oldBrush);
+}
+
+void GraphicsContext::clipConvexPolygon(size_t numPoints, const FloatPoint* points, bool antialiased)
+{
+    if (paintingDisabled())
         return;
 
-    Polygon(dc, winPoints.data(), npoints);
-
-    if (pen) {
-        SelectObject(dc, oldPen);
-        DeleteObject(pen);
-    }
-
-    if (brush) {
-        SelectObject(dc, oldBrush);
-        DeleteObject(brush);
-    }
+    if (numPoints <= 1)
+        return;
+    
+    // FIXME: IMPLEMENT!!
 }
 
 void GraphicsContext::fillRect(const FloatRect& rect, const Color& color, ColorSpace colorSpace)
@@ -967,7 +948,7 @@ void GraphicsContext::fillRect(const FloatRect& rect, const Color& color, ColorS
     if (!transparentDC.hdc())
         return;
 
-    OwnPtr<HBRUSH> hbrush(CreateSolidBrush(RGB(color.red(), color.green(), color.blue())));
+    OwnPtr<HBRUSH> hbrush = adoptPtr(CreateSolidBrush(RGB(color.red(), color.green(), color.blue())));
     FillRect(transparentDC.hdc(), &transparentDC.rect(), hbrush.get());
 }
 
@@ -981,11 +962,11 @@ void GraphicsContext::clip(const FloatRect& rect)
 
     IntRect trRect = enclosingIntRect(m_data->mapRect(rect));
 
-    OwnPtr<HRGN> clipRgn(CreateRectRgn(0, 0, 0, 0));
+    OwnPtr<HRGN> clipRgn = adoptPtr(CreateRectRgn(0, 0, 0, 0));
     if (GetClipRgn(m_data->m_dc, clipRgn.get()) > 0)
-        IntersectClipRect(m_data->m_dc, trRect.x(), trRect.y(), trRect.right(), trRect.bottom());
+        IntersectClipRect(m_data->m_dc, trRect.x(), trRect.y(), trRect.maxX(), trRect.maxY());
     else {
-        clipRgn.set(CreateRectRgn(trRect.x(), trRect.y(), trRect.right(), trRect.bottom()));
+        clipRgn = adoptPtr(CreateRectRgn(trRect.x(), trRect.y(), trRect.maxX(), trRect.maxY()));
         SelectClipRgn(m_data->m_dc, clipRgn.get());
     }
 }
@@ -1000,10 +981,10 @@ void GraphicsContext::clipOut(const IntRect& rect)
 
     IntRect trRect = m_data->mapRect(rect);
 
-    ExcludeClipRect(m_data->m_dc, trRect.x(), trRect.y(), trRect.right(), trRect.bottom());
+    ExcludeClipRect(m_data->m_dc, trRect.x(), trRect.y(), trRect.maxX(), trRect.maxY());
 }
 
-void GraphicsContext::drawFocusRing(const Vector<Path>& paths, int width, int offset, const Color& color)
+void GraphicsContext::drawFocusRing(const Path& path, int width, int offset, const Color& color)
 {
     // FIXME: implement
 }
@@ -1040,18 +1021,18 @@ void GraphicsContext::drawFocusRing(const Vector<IntRect>& rects, int width, int
     DrawFocusRect(dc, &rect);
 }
 
-void GraphicsContext::drawLineForText(const IntPoint& origin, int width, bool printing)
+void GraphicsContext::drawLineForText(const FloatPoint& origin, float width, bool printing)
 {
     if (paintingDisabled())
         return;
 
     StrokeStyle oldStyle = strokeStyle();
     setStrokeStyle(SolidStroke);
-    drawLine(origin, origin + IntSize(width, 0));
+    drawLine(roundedIntPoint(origin), roundedIntPoint(origin + FloatSize(width, 0)));
     setStrokeStyle(oldStyle);
 }
 
-void GraphicsContext::drawLineForMisspellingOrBadGrammar(const IntPoint&, int width, bool grammar)
+void GraphicsContext::drawLineForTextChecking(const FloatPoint&, float width, TextCheckingLineStyle style)
 {
     notImplemented();
 }
@@ -1093,7 +1074,7 @@ void GraphicsContext::clearRect(const FloatRect& rect)
         return;
     } 
 
-    fillRect(rect, Color(Color::white), DeviceColorSpace);
+    fillRect(rect, Color(Color::white), ColorSpaceDeviceRGB);
 }
 
 void GraphicsContext::strokeRect(const FloatRect& rect, float width)
@@ -1113,11 +1094,11 @@ void GraphicsContext::strokeRect(const FloatRect& rect, float width)
         return;
     trRect.move(transparentDC.toShift());
 
-    HGDIOBJ pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
-    HGDIOBJ oldPen = SelectObject(dc, pen);
+    OwnPtr<HPEN> pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
+    HGDIOBJ oldPen = SelectObject(dc, pen.get());
 
-    int right = trRect.right() - 1;
-    int bottom = trRect.bottom() - 1;
+    int right = trRect.maxX() - 1;
+    int bottom = trRect.maxY() - 1;
     const POINT intPoints[5] =
     {
         { trRect.x(), trRect.y() },
@@ -1130,7 +1111,6 @@ void GraphicsContext::strokeRect(const FloatRect& rect, float width)
     Polyline(dc, intPoints, 5);
 
     SelectObject(dc, oldPen);
-    DeleteObject(pen);
 }
 
 void GraphicsContext::beginTransparencyLayer(float opacity)
@@ -1149,12 +1129,17 @@ void GraphicsContext::concatCTM(const AffineTransform& transform)
     m_data->concatCTM(transform);
 }
 
-TransformationMatrix& GraphicsContext::affineTransform()
+void GraphicsContext::setCTM(const AffineTransform& transform)
+{
+    m_data->setCTM(transform);
+}
+
+AffineTransform& GraphicsContext::affineTransform()
 {
     return m_data->m_transform;
 }
 
-const TransformationMatrix& GraphicsContext::affineTransform() const
+const AffineTransform& GraphicsContext::affineTransform() const
 {
     return m_data->m_transform;
 }
@@ -1172,11 +1157,6 @@ void GraphicsContext::translate(float x, float y)
 void GraphicsContext::rotate(float radians)
 {
     m_data->rotate(radians);
-}
-
-IntPoint GraphicsContext::origin()
-{
-    return m_data->origin();
 }
 
 void GraphicsContext::scale(const FloatSize& size)
@@ -1204,19 +1184,9 @@ void GraphicsContext::setAlpha(float alpha)
     m_data->m_opacity = alpha;
 }
 
-void GraphicsContext::setCompositeOperation(CompositeOperator op)
+void GraphicsContext::setPlatformCompositeOperation(CompositeOperator op)
 {
     notImplemented();
-}
-
-void GraphicsContext::beginPath()
-{
-    m_data->m_paths.clear();
-}
-
-void GraphicsContext::addPath(const Path& path)
-{
-    m_data->m_paths.append(path);
 }
 
 void GraphicsContext::clip(const Path& path)
@@ -1234,11 +1204,6 @@ void GraphicsContext::clipOut(const Path&)
     notImplemented();
 }
 
-void GraphicsContext::clipOutEllipseInRect(const IntRect&)
-{
-    notImplemented();
-}
-
 static inline IntPoint rectCenterPoint(const RECT& rect)
 {
     return IntPoint(rect.left + (rect.right - rect.left) / 2, rect.top + (rect.bottom - rect.top) / 2);
@@ -1249,16 +1214,17 @@ void GraphicsContext::fillRoundedRect(const IntRect& fillRect, const IntSize& to
     if (!m_data->m_dc)
         return;
 
-    IntSize shadowSize;
-    int shadowBlur = 0;
+    FloatSize shadowOffset;
+    float shadowBlur = 0;
     Color shadowColor;
+    ColorSpace shadowColorSpace;
         
-    getShadow(shadowSize, shadowBlur, shadowColor);
+    getShadow(shadowOffset, shadowBlur, shadowColor, shadowColorSpace);
     
     IntRect dstRect = fillRect;
     
-    dstRect.move(shadowSize);
-    dstRect.inflate(shadowBlur);
+    dstRect.move(stableRound(shadowOffset.width()), stableRound(shadowOffset.height()));
+    dstRect.inflate(stableRound(shadowBlur));
     dstRect = m_data->mapRect(dstRect);
   
     FloatSize newTopLeft(m_data->mapSize(topLeft));
@@ -1275,9 +1241,9 @@ void GraphicsContext::fillRoundedRect(const IntRect& fillRect, const IntSize& to
 
     RECT rectWin = dstRect;
 
-    HGDIOBJ brush = createBrush(shadowColor);
-    HGDIOBJ oldBrush = SelectObject(dc, brush);
-   
+    OwnPtr<HBRUSH> brush = createBrush(shadowColor);
+    HGDIOBJ oldBrush = SelectObject(dc, brush.get());
+
     SelectObject(dc, GetStockObject(NULL_PEN));
 
     IntPoint centerPoint = rectCenterPoint(rectWin);
@@ -1286,7 +1252,7 @@ void GraphicsContext::fillRoundedRect(const IntRect& fillRect, const IntSize& to
     clipRect.right = centerPoint.x();
     clipRect.bottom = centerPoint.y();
 
-    OwnPtr<HRGN> clipRgn(CreateRectRgn(0, 0, 0, 0));
+    OwnPtr<HRGN> clipRgn = adoptPtr(CreateRectRgn(0, 0, 0, 0));
     bool needsNewClip = (GetClipRgn(dc, clipRgn.get()) <= 0);
     
     drawRoundCorner(needsNewClip, clipRect, rectWin, dc, stableRound(newTopLeft.width() * 2), stableRound(newTopLeft.height() * 2));
@@ -1313,7 +1279,6 @@ void GraphicsContext::fillRoundedRect(const IntRect& fillRect, const IntSize& to
     drawRoundCorner(needsNewClip, clipRect, rectWin, dc, stableRound(newBottomRight.width() * 2), stableRound(newBottomRight.height() * 2));
 
     SelectObject(dc, oldBrush);
-    DeleteObject(brush);
 }
 
 
@@ -1322,20 +1287,20 @@ void GraphicsContext::drawRoundCorner(bool needsNewClip, RECT clipRect, RECT rec
     if (!dc)
         return;
 
-    OwnPtr<HRGN> clipRgn(CreateRectRgn(0, 0, 0, 0));
-    if (needsNewClip)  {
-        clipRgn.set(CreateRectRgn(clipRect.left, clipRect.top, clipRect.right, clipRect.bottom));
+    OwnPtr<HRGN> clipRgn = adoptPtr(CreateRectRgn(0, 0, 0, 0));
+    if (needsNewClip) {
+        clipRgn = adoptPtr(CreateRectRgn(clipRect.left, clipRect.top, clipRect.right, clipRect.bottom));
         SelectClipRgn(dc, clipRgn.get());
-    } else 
+    } else
         IntersectClipRect(dc, clipRect.left, clipRect.top, clipRect.right, clipRect.bottom);
-    
+
     ::RoundRect(dc, rectWin.left , rectWin.top , rectWin.right , rectWin.bottom , width, height);
-    
+
     SelectClipRgn(dc, needsNewClip ? 0 : clipRgn.get());
 }
 
 
-FloatRect GraphicsContext::roundToDevicePixels(const FloatRect& frect)
+FloatRect GraphicsContext::roundToDevicePixels(const FloatRect& frect, RoundingMode)
 {
     notImplemented();
     return frect;
@@ -1358,10 +1323,10 @@ Color gradientAverageColor(const Gradient* gradient)
         , (stop.alpha + lastStop.alpha) * 0.5f);
 }
 
-void GraphicsContext::fillPath()
+void GraphicsContext::fillPath(const Path& path)
 {
-    Color c = m_common->state.fillGradient
-        ? gradientAverageColor(m_common->state.fillGradient.get())
+    Color c = m_state.fillGradient
+        ? gradientAverageColor(m_state.fillGradient.get())
         : fillColor();
 
     if (!c.alpha() || !m_data->m_opacity)
@@ -1371,38 +1336,33 @@ void GraphicsContext::fillPath()
     if (!m_data->m_dc)
         return;
 
+    OwnPtr<HBRUSH> brush = createBrush(c);
+
     if (m_data->m_opacity < 1.0f || m_data->hasAlpha()) {
-        HGDIOBJ brush = createBrush(c);
-        for (Vector<Path>::const_iterator i = m_data->m_paths.begin(); i != m_data->m_paths.end(); ++i) {
-            IntRect trRect = enclosingIntRect(m_data->mapRect(i->boundingRect()));
-            trRect.inflate(1);
-            TransparentLayerDC transparentDC(m_data, trRect);
-            HDC dc = transparentDC.hdc();
-            if (!dc)
-                continue;
+        IntRect trRect = enclosingIntRect(m_data->mapRect(path.boundingRect()));
+        trRect.inflate(1);
+        TransparentLayerDC transparentDC(m_data, trRect);
+        HDC dc = transparentDC.hdc();
+        if (!dc)
+            return;
 
-            AffineTransform tr = m_data->m_transform;
-            tr.translate(transparentDC.toShift().width(), transparentDC.toShift().height());
+        AffineTransform tr = m_data->m_transform;
+        tr.translate(transparentDC.toShift().width(), transparentDC.toShift().height());
 
-            SelectObject(dc, GetStockObject(NULL_PEN));
-            HGDIOBJ oldBrush = SelectObject(dc, brush);
-            i->platformPath()->fillPath(dc, &tr);
-            SelectObject(dc, oldBrush);
-        }
-        DeleteObject(brush);
+        SelectObject(dc, GetStockObject(NULL_PEN));
+        HGDIOBJ oldBrush = SelectObject(dc, brush.get());
+        path.platformPath()->fillPath(dc, &tr);
+        SelectObject(dc, oldBrush);
     } else {
         SelectObject(m_data->m_dc, GetStockObject(NULL_PEN));
-        HGDIOBJ brush = createBrush(c);
-        HGDIOBJ oldBrush = SelectObject(m_data->m_dc, brush);
-        for (Vector<Path>::const_iterator i = m_data->m_paths.begin(); i != m_data->m_paths.end(); ++i)
-            i->platformPath()->fillPath(m_data->m_dc, &m_data->m_transform);
+        HGDIOBJ oldBrush = SelectObject(m_data->m_dc, brush.get());
+        path.platformPath()->fillPath(m_data->m_dc, &m_data->m_transform);
         SelectObject(m_data->m_dc, oldBrush);
-        DeleteObject(brush);
     }
 }
 
 
-void GraphicsContext::strokePath()
+void GraphicsContext::strokePath(const Path& path)
 {
     if (!m_data->m_opacity)
         return;
@@ -1411,33 +1371,28 @@ void GraphicsContext::strokePath()
     if (!m_data->m_dc)
         return;
 
+    OwnPtr<HPEN> pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
+
     if (m_data->m_opacity < 1.0f || m_data->hasAlpha()) {
-        HGDIOBJ pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
-        for (Vector<Path>::const_iterator i = m_data->m_paths.begin(); i != m_data->m_paths.end(); ++i) {
-            IntRect trRect = enclosingIntRect(m_data->mapRect(i->boundingRect()));
-            trRect.inflate(1);
-            TransparentLayerDC transparentDC(m_data, trRect);
-            HDC dc = transparentDC.hdc();
-            if (!dc)
-                continue;
+        IntRect trRect = enclosingIntRect(m_data->mapRect(path.boundingRect()));
+        trRect.inflate(1);
+        TransparentLayerDC transparentDC(m_data, trRect);
+        HDC dc = transparentDC.hdc();
+        if (!dc)
+            return;
 
-            AffineTransform tr = m_data->m_transform;
-            tr.translate(transparentDC.toShift().width(), transparentDC.toShift().height());
+        AffineTransform tr = m_data->m_transform;
+        tr.translate(transparentDC.toShift().width(), transparentDC.toShift().height());
 
-            SelectObject(dc, GetStockObject(NULL_BRUSH));
-            HGDIOBJ oldPen = SelectObject(dc, pen);
-            i->platformPath()->strokePath(dc, &tr);
-            SelectObject(dc, oldPen);
-        }
-        DeleteObject(pen);
+        SelectObject(dc, GetStockObject(NULL_BRUSH));
+        HGDIOBJ oldPen = SelectObject(dc, pen.get());
+        path.platformPath()->strokePath(dc, &tr);
+        SelectObject(dc, oldPen);
     } else {
         SelectObject(m_data->m_dc, GetStockObject(NULL_BRUSH));
-        HGDIOBJ pen = createPen(strokeColor(), strokeThickness(), strokeStyle());
-        HGDIOBJ oldPen = SelectObject(m_data->m_dc, pen);
-        for (Vector<Path>::const_iterator i = m_data->m_paths.begin(); i != m_data->m_paths.end(); ++i)
-            i->platformPath()->strokePath(m_data->m_dc, &m_data->m_transform);
+        HGDIOBJ oldPen = SelectObject(m_data->m_dc, pen.get());
+        path.platformPath()->strokePath(m_data->m_dc, &m_data->m_transform);
         SelectObject(m_data->m_dc, oldPen);
-        DeleteObject(pen);
     }
 }
 
@@ -1454,7 +1409,7 @@ void GraphicsContext::fillRect(const FloatRect& r, const Gradient* gradient)
     if (numStops == 1) {
         const Gradient::ColorStop& stop = stops.first();
         Color color(stop.red, stop.green, stop.blue, stop.alpha);
-        fillRect(r, color, DeviceColorSpace);
+        fillRect(r, color, ColorSpaceDeviceRGB);
         return;
     } 
     
@@ -1481,8 +1436,8 @@ void GraphicsContext::fillRect(const FloatRect& r, const Gradient* gradient)
         if (g_radialGradientFiller) {
             // FIXME: don't support 2D scaling at this time
             double scale = (m_data->m_transform.a() + m_data->m_transform.d()) * 0.5;
-            float r0 = gradient->r0() * scale;
-            float r1 = gradient->r1() * scale;
+            float r0 = gradient->startRadius() * scale;
+            float r1 = gradient->endRadius() * scale;
             g_radialGradientFiller(dc, rect, p0, p1, r0, r1, gradient->getStops());
             return;
         }
@@ -1502,7 +1457,7 @@ void GraphicsContext::fillRect(const FloatRect& r, const Gradient* gradient)
     int width = rect.width();
     int height = rect.height();
     FloatSize d = gradient->p1() - gradient->p0();
-    bool vertical = abs(d.height()) > abs(d.width());
+    bool vertical = fabs(d.height()) > fabs(d.width());
     for (size_t i = 0; i < numStops; ++i) {
         const Gradient::ColorStop& stop = stops[i];
         int iTv = i ? 2 * i - 1 : 0;
@@ -1537,20 +1492,19 @@ AffineTransform GraphicsContext::getCTM() const
     return m_data->m_transform;
 }
 
-void GraphicsContext::clipToImageBuffer(const FloatRect&, const ImageBuffer*)
-{
-    notImplemented();
-}
-
 void GraphicsContext::fillRect(const FloatRect& rect)
 {
-    if (m_common->state.fillGradient)
-        fillRect(rect, m_common->state.fillGradient.get());
+    savePlatformState();
+
+    if (m_state.fillGradient)
+        fillRect(rect, m_state.fillGradient.get());
     else
-        fillRect(rect, fillColor(), DeviceColorSpace);
+        fillRect(rect, fillColor(), ColorSpaceDeviceRGB);
+
+    restorePlatformState();
 }
 
-void GraphicsContext::setPlatformShadow(const IntSize&, int, const Color&, ColorSpace)
+void GraphicsContext::setPlatformShadow(const FloatSize&, float, const Color&, ColorSpace)
 {
     notImplemented();
 }
@@ -1558,6 +1512,12 @@ void GraphicsContext::setPlatformShadow(const IntSize&, int, const Color&, Color
 void GraphicsContext::clearPlatformShadow()
 {
     notImplemented();
+}
+
+InterpolationQuality GraphicsContext::imageInterpolationQuality() const
+{
+    notImplemented();
+    return InterpolationDefault;
 }
 
 void GraphicsContext::setImageInterpolationQuality(InterpolationQuality)
@@ -1570,7 +1530,7 @@ static inline bool isCharVisible(UChar c)
     return c && c != zeroWidthSpace;
 }
 
-void GraphicsContext::drawText(const Font& font, const TextRun& run, const IntPoint& point, int from, int to)
+void GraphicsContext::drawText(const Font& font, const TextRun& run, const FloatPoint& point, int from, int to)
 {
     if (paintingDisabled() || !fillColor().alpha() || !m_data->m_opacity)
         return;
@@ -1585,8 +1545,8 @@ void GraphicsContext::drawText(const Font& font, const TextRun& run, const IntPo
     float oldOpacity = m_data->m_opacity;
     m_data->m_opacity *= fillColor().alpha() / 255.0;
 
-    FloatRect textRect = font.selectionRectForText(run, point, font.height(), from, to);
-    textRect.setY(textRect.y() - font.ascent());
+    FloatRect textRect = font.selectionRectForText(run, point, font.fontMetrics().height(), from, to);
+    textRect.setY(textRect.y() - font.fontMetrics().ascent());
     IntRect trRect = enclosingIntRect(m_data->mapRect(textRect));
     RECT bmpRect;
     AlphaPaintType alphaPaintType = mustSupportAlpha ? AlphaPaintOther : AlphaPaintNone;
@@ -1595,13 +1555,13 @@ void GraphicsContext::drawText(const Font& font, const TextRun& run, const IntPo
             GraphicsContext gc(0);
             gc.setBitmap(bmp);
             gc.scale(FloatSize(m_data->m_transform.a(), m_data->m_transform.d()));
-            font.drawText(&gc, run, IntPoint(0, font.ascent()), from, to);
+            font.drawText(&gc, run, IntPoint(0, font.fontMetrics().ascent()), from, to);
         }
-        unsigned key1, key2;
-        HDC memDC = bmp->getDC(&key1, &key2);
+        unsigned key1;
+        HDC memDC = bmp->getDC(&key1);
         if (memDC) {
             m_data->paintBackTransparentLayerBitmap(memDC, bmp.get(), trRect, alphaPaintType, bmpRect);
-            bmp->releaseDC(memDC, key1, key2);
+            bmp->releaseDC(memDC, key1);
         }
     }
 
@@ -1640,7 +1600,7 @@ void GraphicsContext::drawText(const SimpleFontData* fontData, const GlyphBuffer
         ? fontData->platformData().getScaledFontHandle(height, scaleX == scaleY ? 0 : width)
         : 0;
 
-    FloatPoint startPoint(point.x(), point.y() - fontData->ascent());
+    FloatPoint startPoint(point.x(), point.y() - fontData->fontMetrics().ascent());
     FloatPoint trPoint = m_data->mapPoint(startPoint);
     int y = stableRound(trPoint.y());
 
@@ -1662,7 +1622,7 @@ void GraphicsContext::drawText(const SimpleFontData* fontData, const GlyphBuffer
 
         offset += width;
 
-        OwnPtr<HPEN> hPen(CreatePen(PS_DASH, 1, fontColor));
+        OwnPtr<HPEN> hPen = adoptPtr(CreatePen(PS_DASH, 1, fontColor));
         HGDIOBJ oldPen = SelectObject(m_data->m_dc, hPen.get());
 
         MoveToEx(m_data->m_dc, stableRound(trPoint.x()), y, 0);
@@ -1672,17 +1632,18 @@ void GraphicsContext::drawText(const SimpleFontData* fontData, const GlyphBuffer
         return;
     }
 
-    IntSize shadowSize;
-    int shadowBlur = 0;
+    FloatSize shadowOffset;
+    float shadowBlur = 0;
     Color shadowColor;
-    bool hasShadow = textDrawingMode() == cTextFill
-        && getShadow(shadowSize, shadowBlur, shadowColor)
+    ColorSpace shadowColorSpace;
+    bool hasShadow = textDrawingMode() == TextModeFill
+        && getShadow(shadowOffset, shadowBlur, shadowColor, shadowColorSpace)
         && shadowColor.alpha();
     COLORREF shadowRGBColor;
     FloatPoint trShadowPoint;
     if (hasShadow) {
         shadowRGBColor = RGB(shadowColor.red(), shadowColor.green(), shadowColor.blue());
-        trShadowPoint = m_data->mapPoint(startPoint + shadowSize);
+        trShadowPoint = m_data->mapPoint(startPoint + shadowOffset);
     }
 
     HGDIOBJ hOldFont = SelectObject(m_data->m_dc, hFont);
@@ -1798,7 +1759,7 @@ void GraphicsContext::drawFrameControl(const IntRect& rect, unsigned type, unsig
     RECT rectWin = trRect;
 
     if ((rectWin.right - rectWin.left) < boxWidthBest) {
-        RefPtr<SharedBitmap> bmp = SharedBitmap::createInstance(true, boxWidthBest, boxHeightBest, true);
+        RefPtr<SharedBitmap> bmp = SharedBitmap::create(IntSize(boxWidthBest, boxHeightBest), BitmapInfo::BitCount16, true);
         SharedBitmap::DCHolder memDC(bmp.get());
         if (memDC.get()) {
             RECT tempRect = {0, 0, boxWidthBest, boxHeightBest};
@@ -1853,7 +1814,7 @@ void GraphicsContext::paintTextField(const IntRect& rect, unsigned state)
     FillRect(dc, &rectWin, reinterpret_cast<HBRUSH>(((state & DFCS_INACTIVE) ? COLOR_BTNFACE : COLOR_WINDOW) + 1));
 }
 
-void GraphicsContext::drawBitmap(SharedBitmap* bmp, const IntRect& dstRectIn, const IntRect& srcRect, CompositeOperator compositeOp)
+void GraphicsContext::drawBitmap(SharedBitmap* bmp, const IntRect& dstRectIn, const IntRect& srcRect, ColorSpace styleColorSpace, CompositeOperator compositeOp)
 {
     if (!m_data->m_opacity)
         return;
@@ -1876,7 +1837,7 @@ void GraphicsContext::drawBitmap(SharedBitmap* bmp, const IntRect& dstRectIn, co
 }
 
 void GraphicsContext::drawBitmapPattern(SharedBitmap* bmp, const FloatRect& tileRectIn, const AffineTransform& patternTransform,
-                const FloatPoint& phase, CompositeOperator op, const FloatRect& destRectIn, const IntSize& origSourceSize)
+                const FloatPoint& phase, ColorSpace styleColorSpace, CompositeOperator op, const FloatRect& destRectIn, const IntSize& origSourceSize)
 {
     if (!m_data->m_opacity)
         return;
@@ -1897,7 +1858,7 @@ void GraphicsContext::drawBitmapPattern(SharedBitmap* bmp, const FloatRect& tile
     AffineTransform transform = m_data->m_transform;
     transform.translate(moved.width(), moved.height());
 
-    bmp->drawPattern(dc, transform, tileRectIn, patternTransform, phase, op, destRectIn, origSourceSize);
+    bmp->drawPattern(dc, transform, tileRectIn, patternTransform, phase, styleColorSpace, op, destRectIn, origSourceSize);
 
     if (!bmp->hasAlpha())
         transparentDC.fillAlphaChannel();
@@ -1932,7 +1893,7 @@ void GraphicsContext::setLineDash(const DashArray&, float)
     notImplemented();
 }
 
-void GraphicsContext::clipPath(WindRule)
+void GraphicsContext::clipPath(const Path&, WindRule)
 {
     notImplemented();
 }

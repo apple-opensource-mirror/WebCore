@@ -23,7 +23,7 @@
 #include "AffineTransform.h"
 #include "FloatRect.h"
 #include "NotImplemented.h"
-#include "PlatformPathWince.h"
+#include "PlatformPathWinCE.h"
 #include "PlatformString.h"
 #include <wtf/OwnPtr.h>
 
@@ -123,11 +123,6 @@ bool Path::isEmpty() const
     return m_path->isEmpty();
 }
 
-String Path::debugString() const
-{
-    return m_path->debugString();
-}
-
 void Path::apply(void* info, PathApplierFunction function) const
 {
     m_path->apply(info, function);
@@ -138,7 +133,7 @@ void Path::transform(const AffineTransform& t)
     m_path->transform(t);
 }
 
-FloatRect Path::strokeBoundingRect(StrokeStyleApplier *)
+FloatRect Path::strokeBoundingRect(StrokeStyleApplier*) const
 {
     notImplemented();
     return FloatRect();
@@ -160,4 +155,9 @@ bool Path::hasCurrentPoint() const
     return !isEmpty();
 }
 
+FloatPoint Path::currentPoint() const
+{
+    return m_path->lastPoint();
 }
+
+} // namespace WebCore

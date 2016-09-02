@@ -51,7 +51,7 @@ static IMLangFontLink2* langFontLink = 0;
 static IMLangFontLink* langFontLink = 0;
 #endif
 
-IMultiLanguage* getMultiLanguageInterface()
+IMultiLanguage* FontCache::getMultiLanguageInterface()
 {
     if (!multiLanguage)
         CoCreateInstance(CLSID_CMultiLanguage, 0, CLSCTX_INPROC_SERVER, IID_IMultiLanguage, (void**)&multiLanguage);
@@ -308,7 +308,7 @@ const SimpleFontData* FontCache::getFontDataForCharacters(const Font& font, cons
 
         FontPlatformData* result = getCachedFontPlatformData(fontDescription, familyName);
         if (result && result->hash() != origFont.hash()) {
-            if (SimpleFontData* fontData = getCachedFontData(result))
+            if (SimpleFontData* fontData = getCachedFontData(result, DoNotRetain))
                 return fontData;
         }
     }
@@ -348,5 +348,4 @@ void FontCache::getTraitsInFamily(const AtomicString& familyName, Vector<unsigne
     copyToVector(procData.m_traitsMasks, traitsMasks);
 }
 
-}
-
+} // namespace WebCore

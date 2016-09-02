@@ -27,7 +27,6 @@
  * THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  */
 
-
 #include "config.h"
 #include "SimpleFontData.h"
 
@@ -35,9 +34,8 @@
 #include "Font.h"
 #include "FontCache.h"
 #include "FontDescription.h"
-#include <wtf/MathExtras.h>
 #include <mlang.h>
-#include <tchar.h>
+#include <wtf/MathExtras.h>
 
 namespace WebCore {
 
@@ -51,31 +49,50 @@ void SimpleFontData::platformInit()
     const TEXTMETRIC& tm = m_platformData.metrics();
     m_isSystemFont = m_platformData.isSystemFont();
 
-    m_ascent = (tm.tmAscent * m_platformData.size() + 36) / 72;
-    m_descent = (tm.tmDescent * m_platformData.size() + 36) / 72;
-    m_lineGap = (tm.tmExternalLeading * m_platformData.size() + 36) / 72;
-    m_lineSpacing = m_ascent + m_descent + m_lineGap;
-    m_xHeight = m_ascent * 0.56f;
+    float ascent = (tm.tmAscent * m_platformData.size() + 36) / 72.0f;
+    float descent = (tm.tmDescent * m_platformData.size() + 36) / 72.0f;
+    float lineGap = (tm.tmExternalLeading * m_platformData.size() + 36) / 72.0f;
+    m_fontMetrics.setAscent(ascent);
+    m_fontMetrics.setDescent(descent);
+    m_fontMetrics.setLineGap(lineGap);
+    m_fontMetrics.setLineSpacing(lroundf(ascent) + lroundf(descent) + lroundf(lineGap));
+    m_fontMetrics.setXHeight(ascent * 0.56f);
 }
 
 void SimpleFontData::platformDestroy()
 {
-    delete m_smallCapsFontData;
-    m_smallCapsFontData = 0;
+}
+
+PassOwnPtr<SimpleFontData> SimpleFontData::createScaledFontData(const FontDescription& fontDescription, float scaleFactor) const
+{
+    FontDescription fontDesc(fontDescription);
+    fontDesc.setComputedSize(lroundf(scaleFactor * fontDesc.computedSize()));
+    fontDesc.setSpecifiedSize(lroundf(scaleFactor * fontDesc.specifiedSize()));
+    fontDesc.setKeywordSize(lroundf(scaleFactor * fontDesc.keywordSize()));
+    FontPlatformData* result = fontCache()->getCachedFontPlatformData(fontDesc, m_platformData.family());
+    if (!result)
+        return nullptr;
+    return adoptPtr(new SimpleFontData(*result));
 }
 
 SimpleFontData* SimpleFontData::smallCapsFontData(const FontDescription& fontDescription) const
 {
-    if (!m_smallCapsFontData) {
-        FontDescription fontDesc(fontDescription);
-        fontDesc.setComputedSize(lroundf(0.70f * fontDesc.computedSize()));
-        fontDesc.setSpecifiedSize(lroundf(0.70f * fontDesc.specifiedSize()));
-        fontDesc.setKeywordSize(lroundf(0.70f * fontDesc.keywordSize()));
-        FontPlatformData* result = fontCache()->getCachedFontPlatformData(fontDesc, m_platformData.family());
-        if (result)
-            m_smallCapsFontData = new SimpleFontData(*result);
-    }
-    return m_smallCapsFontData;
+    if (!m_derivedFontData)
+        m_derivedFontData = DerivedFontData::create(isCustomFont());
+    if (!m_derivedFontData->smallCaps)
+        m_derivedFontData->smallCaps = createScaledFontData(fontDescription, .7);
+
+    return m_derivedFontData->smallCaps.get();
+}
+
+SimpleFontData* SimpleFontData::emphasisMarkFontData(const FontDescription& fontDescription) const
+{
+    if (!m_derivedFontData)
+        m_derivedFontData = DerivedFontData::create(isCustomFont());
+    if (!m_derivedFontData->emphasisMark)
+        m_derivedFontData->emphasisMark = createScaledFontData(fontDescription, .5);
+
+    return m_derivedFontData->emphasisMark.get();
 }
 
 DWORD getKnownFontCodePages(const wchar_t* family);
@@ -163,4 +180,4 @@ void SimpleFontData::platformCharWidthInit()
     m_maxCharWidth = (tm.tmMaxCharWidth * m_platformData.size() + 36) / 72;
 }
 
-}
+} // namespace WebCore

@@ -24,11 +24,12 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE. 
  */
 
-#ifndef MediaPlayerPrivateWince_h
-#define MediaPlayerPrivateWince_h
+#ifndef MediaPlayerPrivateWinCE_h
+#define MediaPlayerPrivateWinCE_h
 
 #if ENABLE(VIDEO)
 
+#include <wtf/Forward.h>
 #include "MediaPlayerPrivate.h"
 #include "Timer.h"
 #include <wtf/OwnPtr.h>
@@ -38,7 +39,6 @@ namespace WebCore {
     class GraphicsContext;
     class IntSize;
     class IntRect;
-    class String;
 
     class MediaPlayerPrivate : public MediaPlayerPrivateInterface {
     public:
@@ -97,7 +97,7 @@ namespace WebCore {
 #endif
 
         // engine support
-        static MediaPlayerPrivateInterface* create(MediaPlayer*);
+        static PassOwnPtr<MediaPlayerPrivateInterface> create(MediaPlayer*);
         static void getSupportedTypes(HashSet<String>& types);
         static MediaPlayer::SupportsType supportsType(const String& type, const String& codecs);
         static bool isAvailable();
@@ -120,6 +120,6 @@ namespace WebCore {
 
 }
 
-#endif
+#endif // ENABLE(VIDEO)
 
-#endif
+#endif // MediaPlayerPrivateWinCE_h
