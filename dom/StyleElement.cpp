@@ -26,19 +26,11 @@
 #include "MappedAttribute.h"
 #include "MediaList.h"
 #include "MediaQueryEvaluator.h"
-#include <limits>
 
 namespace WebCore {
 
 StyleElement::StyleElement()
 {
-}
-
-StyleSheet* StyleElement::sheet(Element* e)
-{
-    if (!m_sheet)
-        createSheet(e);
-    return m_sheet.get();
 }
 
 void StyleElement::insertedIntoDocument(Document*, Element* element)
@@ -48,13 +40,14 @@ void StyleElement::insertedIntoDocument(Document*, Element* element)
 
 void StyleElement::removedFromDocument(Document* document)
 {
-    // If we're in document teardown, then we don't need to do any notification of our sheet's removal.
-    if (!document->renderer())
-        return;
+    if (m_sheet) {
+        m_sheet->clearOwnerNode();
+        m_sheet = 0;
+    }
 
-    // FIXME: It's terrible to do a synchronous update of the style selector just because a <style> or <link> element got removed.
-    if (m_sheet)
-        document->updateStyleSelector();
+    // If we're in document teardown, then we don't need to do any notification of our sheet's removal.
+    if (document->renderer())
+        document->styleSelectorChanged(DeferRecalcStyle);
 }
 
 void StyleElement::process(Element* e)
@@ -65,12 +58,8 @@ void StyleElement::process(Element* e)
     unsigned resultLength = 0;
     for (Node* c = e->firstChild(); c; c = c->nextSibling()) {
         Node::NodeType nodeType = c->nodeType();
-        if (nodeType == Node::TEXT_NODE || nodeType == Node::CDATA_SECTION_NODE || nodeType == Node::COMMENT_NODE) {
-            unsigned length = c->nodeValue().length();
-            if (length > std::numeric_limits<unsigned>::max() - resultLength)
-                CRASH();
-            resultLength += length;
-        }
+        if (nodeType == Node::TEXT_NODE || nodeType == Node::CDATA_SECTION_NODE || nodeType == Node::COMMENT_NODE)
+            resultLength += c->nodeValue().length();
     }
     UChar* text;
     String sheetText = String::createUninitialized(resultLength, text);
@@ -92,6 +81,7 @@ void StyleElement::process(Element* e)
 
 void StyleElement::createSheet(Element* e, const String& text)
 {
+    ASSERT(e->inDocument());
     Document* document = e->document();
     if (m_sheet) {
         if (static_cast<CSSStyleSheet*>(m_sheet.get())->isLoading())
